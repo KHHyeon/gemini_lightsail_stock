@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # File: ~/my_bot/test_slack.py
 import os
 from slack_sdk import WebClient

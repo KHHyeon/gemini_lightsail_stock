@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # File: ~/my_bot/kis_api.py
 import os
 import requests

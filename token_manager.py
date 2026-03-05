@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # File: ~/my_bot/token_manager.py
 import os
 import json

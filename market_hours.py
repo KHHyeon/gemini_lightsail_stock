@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # File: ~/my_bot/market_hours.py
 from datetime import datetime
 import pytz
