@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# -*- coding: utf-8 -*-
 # File: ~/my_bot/kis_api.py
 import os
 import requests
@@ -17,9 +16,9 @@ class KISClient:
     def set_token(self, token):
         self.token = token
 
-    def get_current_price(self, ticker):
+    def get_valuation_data(self, ticker):
         """
-        Fetch the current price of a specific stock
+        특정 종목의 PBR, PER, ROE 등의 투자지표를 가져옵니다.
         """
         path = "/uapi/domestic-stock/v1/quotations/inquire-price"
         url = f"{self.base_url}{path}"
@@ -29,7 +28,7 @@ class KISClient:
             "authorization": f"Bearer {self.token}",
             "appkey": self.app_key,
             "appsecret": self.secret_key,
-            "tr_id": "FHKST01010100" # TR ID for Current Price
+            "tr_id": "FHKST01010100"
         }
         
         params = {
@@ -37,6 +36,25 @@ class KISClient:
             "fid_input_iscd": ticker
         }
 
-
-        res = requests.get(url, headers=headers, params=params)
-        return res.json()
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            data = res.json()
+            
+            if data.get('rt_cd') == '0':
+                output = data.get('output', {})
+                pbr = float(output.get('pbr', 0))
+                per = float(output.get('per', 0))
+                
+                # ROE 계산 공식: (PBR / PER) * 100
+                roe = round((pbr / per) * 100, 2) if per != 0 else 0
+                
+                return {
+                    "pbr": pbr,
+                    "per": per,
+                    "roe": roe,
+                    "current_price": output.get('stck_prpr')
+                }
+            return None
+        except Exception as e:
+            print(f"Log: [KIS API] 지표 수집 중 오류: {e}")
+            return None
