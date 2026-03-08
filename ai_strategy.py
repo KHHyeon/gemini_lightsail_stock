@@ -5,6 +5,7 @@ import os
 import json
 from dotenv import load_dotenv
 
+# 환경 변수 로드 (.env 파일의 GOOGLE_API_KEY 사용)
 load_dotenv()
 
 def get_ai_investment_report(ticker_symbol, chart_data, macro_data, portfolio_data):
@@ -15,9 +16,10 @@ def get_ai_investment_report(ticker_symbol, chart_data, macro_data, portfolio_da
     if not api_key:
         return "Log: [Error] GOOGLE_API_KEY가 설정되지 않았습니다."
 
+    # Gemini 클라이언트 초기화
     client = genai.Client(api_key=api_key)
     
-    # [Section 1~3] 투자 원칙 및 페르소나 주입
+    # [Section 1~3] 사용자 지정 투자 원칙 및 페르소나 주입
     system_instruction = """
     당신은 엄격하고 냉철한 수석 펀드매니저입니다. 아래의 [투자 프로토콜]을 반드시 준수하여 분석하십시오.
 
@@ -46,6 +48,7 @@ def get_ai_investment_report(ticker_symbol, chart_data, macro_data, portfolio_da
     - 비판: 강력한 반대 근거(Anti-thesis) 명시.
     """
 
+    # AI에게 전달할 프롬프트 구성
     user_prompt = f"""
     분석 대상: {ticker_symbol}
     
@@ -58,12 +61,18 @@ def get_ai_investment_report(ticker_symbol, chart_data, macro_data, portfolio_da
     """
 
     try:
-        # Gemini 1.5 Pro 모델 사용하여 깊이 있는 분석 수행
+        # 모델 호출 (안정적인 gemini-2.0-flash 사용)
         response = client.models.generate_content(
-            model="gemini-1.5-pro",
+            model="gemini-2.5-flash",
             contents=user_prompt,
             config={'system_instruction': system_instruction}
         )
         return response.text
+        
     except Exception as e:
-        return f"Log: [AI Error] 분석 중 오류 발생: {str(e)}"
+        # 429 RESOURCE_EXHAUSTED 에러 처리 로직 추가
+        error_msg = str(e)
+        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+            return "⚠️ [Quota Limit] 현재 Google AI API의 무료 사용량을 초과했습니다. 약 1분 뒤에 다시 시도해 주세요."
+        
+        return f"Log: [AI Error] 분석 중 오류 발생: {error_msg}"
