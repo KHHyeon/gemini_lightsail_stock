@@ -2,3 +2,5 @@ venv/
 .env
 *.log
 __pycache__/
+gcp_key.json
+*.pem
