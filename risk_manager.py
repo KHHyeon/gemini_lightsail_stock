@@ -1,80 +1,88 @@
 # -*- coding: utf-8 -*-
 # File: ~/my_bot/risk_manager.py
+import time
 from datetime import datetime, timezone, timedelta
-from trade_logger import load_json_from_gdrive
-from order_manager import OrderManager
+from trade_logger import load_json_from_gdrive, save_json_to_gdrive
 
-# 한국 표준시(KST) 설정
 KST = timezone(timedelta(hours=9))
 
-def run_risk_monitor(kis_client, url, app_key, secret_key, token, acc_no, slack_app, channel_id, say_func=None):
-    """
-    백그라운드에서 30분마다 실행되며 포트폴리오의 리스크(손절, 시간 만료)를 감시합니다.
-    수동 테스트 시 say_func를 통해 즉각 응답합니다.
-    """
-    portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-    trades = load_json_from_gdrive("paper_trades.json") or []
-
+def run_risk_monitor(kis_client, base_url, app_key, secret_key, token, acc_no, app, channel_id, say_func=None):
+    print("Log: [Risk Manager] 3중 매도 필터(손절/시간/추적) 점검을 시작합니다.", flush=True)
+    
+    portfolio = load_json_from_gdrive("paper_portfolio.json")
     if not portfolio:
+        print("Log: [Risk Manager] 관리 중인 보유 종목이 없습니다.", flush=True)
         return
 
-    order_mgr = OrderManager(url, app_key, secret_key, token, acc_no)
+    modified = False
+    messages = []
+    now = datetime.now(KST)
 
-    for ticker, info in portfolio.items():
+    kis_client.set_token(token)
+
+    for ticker, info in list(portfolio.items()):
         qty = info.get("quantity", 0)
         if qty <= 0:
             continue
-            
+
+        name = info.get("name", ticker)
         avg_price = info.get("avg_price", 0)
         
-        valuation = kis_client.get_valuation_data(ticker)
-        if not valuation:
-            continue
-            
-        current_price = int(valuation.get("current_price", 0))
-        if current_price == 0:
-            continue
-            
-        yield_pct = ((current_price - avg_price) / avg_price) * 100
-        
-        # [원칙 1] 가격 손절 (Stop-Loss -10%)
-        if yield_pct <= -10.0:
-            reason = f"리스크 데몬: -10% 손절매 규정 도달 (현재 수익률: {yield_pct:.2f}%)"
-            res = order_mgr.execute_paper_order(ticker, info["name"], qty, current_price, "sell", reason)
-            if res["success"]:
-                msg = f"[자동 손절 집행 Warning]\n{info['name']}({ticker}) 종목이 -10% 손절선을 이탈하여 기계적 전량 매도되었습니다.\n사유: {reason}"
-                # say_func가 전달되었으면 명령어 입력 방으로 즉시 출력, 아니면 공용 채널로 전송
-                if say_func:
-                    say_func(msg)
-                elif channel_id:
-                    slack_app.client.chat_postMessage(channel=channel_id, text=msg)
+        # 매수 시점 및 최고가 기록 추적 (기존 데이터 호환)
+        buy_timestamp = info.get("buy_timestamp", now.timestamp())
+        buy_date = datetime.fromtimestamp(buy_timestamp, tz=KST)
+        highest_price = info.get("highest_price", avg_price)
+
+        # 현재가 조회
+        val = kis_client.get_valuation_data(ticker)
+        current_price = int(val.get("current_price", 0))
+
+        if current_price <= 0:
             continue
 
-        # [원칙 2] 시간 손절 (Time-Stop 8주 / 56일)
-        buy_trades = [t for t in trades if t["ticker"] == ticker and t["action"] == "BUY"]
-        if buy_trades:
-            first_buy_str = buy_trades[0]["timestamp"]
-            try:
-                first_buy_date = datetime.strptime(first_buy_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
-                days_held = (datetime.now(KST) - first_buy_date).days
-                
-                if days_held >= 56 and yield_pct <= 0:
-                    reason = f"리스크 데몬: 8주 보유 초과 및 수익 부재 (보유: {days_held}일, 수익률: {yield_pct:.2f}%)"
-                    res = order_mgr.execute_paper_order(ticker, info["name"], qty, current_price, "sell", reason)
-                    if res["success"]:
-                        msg = f"[시간 손절 집행 Notice]\n{info['name']}({ticker}) 종목이 8주(56일)간 수익을 내지 못해 전량 매도되었습니다.\n사유: {reason}"
-                        if say_func:
-                            say_func(msg)
-                        elif channel_id:
-                            slack_app.client.chat_postMessage(channel=channel_id, text=msg)
-                    continue
-            except Exception as e:
-                pass
+        # 고점 갱신
+        if current_price > highest_price:
+            highest_price = current_price
+            info["highest_price"] = highest_price
+            modified = True
 
-        # [원칙 3] 이익 극대화 알림 (Trailing Stop 준비)
-        if yield_pct >= 20.0:
-            msg = f"[익절 타겟 도달 Success]\n{info['name']}({ticker}) 종목이 +20% 수익률을 돌파했습니다! (현재: {yield_pct:.2f}%)\n시스템이 추적 손절매(Trailing Stop) 가드레일을 평단가 위로 상향 조정합니다."
-            if say_func:
-                say_func(msg)
-            elif channel_id:
-                slack_app.client.chat_postMessage(channel=channel_id, text=msg)
+        # 지표 연산
+        profit_rate = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+        peak_profit_rate = ((highest_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+        drawdown_from_peak = ((current_price - highest_price) / highest_price) * 100 if highest_price > 0 else 0
+        days_held = (now - buy_date).days
+
+        sell_reason = ""
+
+        # 필터 1: 원금 손절매 (-10%)
+        if profit_rate <= -10.0:
+            sell_reason = f"원금 손절매 (-10% 도달 / 현재수익률 {profit_rate:.2f}%)"
+            
+        # 필터 2: 시간 손절매 (8주=56일 경과 및 유의미한 수익 5% 미만 시)
+        elif days_held >= 56 and profit_rate < 5.0:
+            sell_reason = f"시간 손절매 (8주 경과 수익 부진 / 현재수익률 {profit_rate:.2f}%)"
+
+        # 필터 3: 추적 손절매 (최고 20% 이상 수익 후, 고점 대비 5% 하락 시 익절)
+        elif peak_profit_rate >= 20.0 and drawdown_from_peak <= -5.0:
+            sell_reason = f"추적 손절매 (고점 대비 5% 하락 익절 / 현재수익률 {profit_rate:.2f}%)"
+
+        # 매도 트리거 발생 시 처리 (모의 장부 수량 0으로 변경)
+        if sell_reason:
+            msg = f"*[리스크 관리 데몬 작동]*\n- 종목: {name} ({ticker})\n- 사유: {sell_reason}\n- 매도 단가: {current_price:,}원"
+            messages.append(msg)
+            print(f"Log: [Risk Manager] [Sell] {name} - {sell_reason}", flush=True)
+            info["quantity"] = 0
+            modified = True
+
+    if modified:
+        save_json_to_gdrive(portfolio, "paper_portfolio.json")
+
+    # 슬랙 알림 전송
+    if messages and channel_id and app:
+        for m in messages:
+            app.client.chat_postMessage(channel=channel_id, text=m)
+    
+    if say_func and messages:
+        say_func("\n".join(messages))
+
+    print("Log: [Risk Manager] 점검이 완료되었습니다.", flush=True)

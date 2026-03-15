@@ -29,13 +29,41 @@ kis = KISClient()
 
 pending_orders = {}
 
+def get_empty_result_blocks():
+    """발굴 결과가 없을 때 출력할 Block Kit 메시지"""
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "엄격한 스캐닝(역배열 차단) 결과, 조건을 만족하는 종목이 없습니다.\n관망을 유지하시겠습니까, 아니면 단기 반등(5MA>20MA) 조건으로 재검색하시겠습니까?"
+            }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "단기 반등 재검색"},
+                    "style": "primary",
+                    "action_id": "action_relaxed_scan"
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "관망 유지"},
+                    "action_id": "action_keep_observing"
+                }
+            ]
+        }
+    ]
+
 def run_risk_routine():
-    print(f"Log: [Risk Daemon] 실시간 리스크 감시 시작 ({datetime.now(KST)})")
+    print(f"Log: [Risk Daemon] 실시간 리스크 감시 시작 ({datetime.now(KST)})", flush=True)
     token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
     risk_manager.run_risk_monitor(kis, URL, APP_KEY, SECRET_KEY, token, ACC_NO, app, CHANNEL_ID)
 
 def daily_routine():
-    print(f"Log: [Daily Routine] 시작 ({datetime.now(KST)})")
+    print(f"Log: [Daily Routine] 시작 ({datetime.now(KST)})", flush=True)
     if not CHANNEL_ID:
         return
     token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
@@ -48,7 +76,7 @@ def daily_routine():
         app.client.chat_postMessage(channel=CHANNEL_ID, text=msg)
 
 def weekly_routine():
-    print(f"Log: [Weekly Routine] 퀀트 스캐너 시작 ({datetime.now(KST)})")
+    print(f"Log: [Weekly Routine] 퀀트 스캐너 시작 ({datetime.now(KST)})", flush=True)
     if not CHANNEL_ID:
         return
     
@@ -68,7 +96,7 @@ def weekly_routine():
             msg_lines.append(f"- {c['name']}({c['ticker']}): 배당 {c['div_yield']}%, PBR {c['pbr']}, ROE {c['roe']}% ({c['source']} 검증)")
         app.client.chat_postMessage(channel=CHANNEL_ID, text="\n".join(msg_lines))
     else:
-        app.client.chat_postMessage(channel=CHANNEL_ID, text="[Notice] 이번 주 스캐닝 결과, 조건을 만족하는 종목이 없습니다.")
+        app.client.chat_postMessage(channel=CHANNEL_ID, blocks=get_empty_result_blocks())
 
 def quarterly_routine():
     if CHANNEL_ID:
@@ -141,7 +169,7 @@ def discover_stocks(message, say):
                 msg_lines.append(f"- {c['name']}({c['ticker']}): 배당 {c['div_yield']}%, PBR {c['pbr']}, ROE {c['roe']}% ({c['source']} 검증)")
             say("\n".join(msg_lines))
         else:
-            say(f"[Notice] 현재 조건을 만족하는 종목이 없습니다.")
+            say(blocks=get_empty_result_blocks(), text="종목 발굴 실패. 관망 여부 선택")
 
     threading.Thread(target=background_discovery, daemon=True).start()
 
@@ -203,56 +231,73 @@ def ai_buy_stock(message, say):
 
     say(f"[System] {ticker} 종목의 시장 데이터를 수집하고 AI 분석을 시작합니다. (약 10~20초 소요)")
 
-    token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-    kis.set_token(token)
+    def background_ai_task():
+        try:
+            print(f"Log: [AI Task] 1. KIS 토큰 세팅 및 밸류에이션 수집 시작", flush=True)
+            token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
+            kis.set_token(token)
+            valuation = kis.get_valuation_data(ticker)
+            valuation["div_yield"] = quant_screener.get_naver_dividend(ticker)
+            current_price = int(valuation.get("current_price", 0))
+            
+            print(f"Log: [AI Task] 2. KIS 30일 차트 데이터 수집 시작", flush=True)
+            chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
+            
+            print(f"Log: [AI Task] 3. 매크로 데이터(yfinance) 수집 시작", flush=True)
+            macro = macro_collector.get_macro_indicators()
+            
+            print(f"Log: [AI Task] 4. 구글 드라이브 가상 장부 로드 시작", flush=True)
+            paper_portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
 
-    valuation = kis.get_valuation_data(ticker)
-    current_price = int(valuation.get("current_price", 0))
-    chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
-    macro = macro_collector.get_macro_indicators()
-    paper_portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+            print(f"Log: [AI Task] 5. Gemini AI + 뉴스 센티먼트 리포트 생성 시작", flush=True)
+            report = ai_strategy.get_ai_investment_report(ticker, chart_30d, macro, paper_portfolio, valuation)
 
-    report = ai_strategy.get_ai_investment_report(ticker, chart_30d, macro, paper_portfolio, valuation)
-
-    order_id = str(uuid.uuid4())
-    pending_orders[order_id] = {
-        "ticker": ticker,
-        "total_budget": total_budget,
-        "current_price": current_price,
-        "report": report
-    }
-
-    say(f"*[System] {ticker} AI 투자 분석 리포트*\n\n{report}")
-
-    button_blocks = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "위 AI의 리포트 및 *[반대 근거]*를 명확히 확인하셨습니까? 이성에 기반하여 최종 결정을 내려주십시오."
+            print(f"Log: [AI Task] 6. 분석 완료. 슬랙으로 리포트 전송", flush=True)
+            order_id = str(uuid.uuid4())
+            pending_orders[order_id] = {
+                "ticker": ticker,
+                "total_budget": total_budget,
+                "current_price": current_price,
+                "report": report
             }
-        },
-        {
-            "type": "actions",
-            "elements": [
+
+            say(f"*[System] {ticker} AI 투자 분석 리포트*\n\n{report}")
+
+            button_blocks = [
                 {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "승인 (10일 분할매수)"},
-                    "style": "primary",
-                    "action_id": "approve_buy",
-                    "value": order_id
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "위 AI의 리포트 및 *[반대 근거]*를 명확히 확인하셨습니까? 이성에 기반하여 최종 결정을 내려주십시오."
+                    }
                 },
                 {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "기각 (매수 취소)"},
-                    "style": "danger",
-                    "action_id": "reject_buy",
-                    "value": order_id
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "승인 (10일 분할매수)"},
+                            "style": "primary",
+                            "action_id": "approve_buy",
+                            "value": order_id
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "기각 (매수 취소)"},
+                            "style": "danger",
+                            "action_id": "reject_buy",
+                            "value": order_id
+                        }
+                    ]
                 }
             ]
-        }
-    ]
-    say(blocks=button_blocks, text="AI 리포트 승인 대기 중")
+            say(blocks=button_blocks, text="AI 리포트 승인 대기 중")
+            
+        except Exception as e:
+            print(f"Log: [AI Task Error] 백그라운드 작업 중 치명적 에러: {str(e)}", flush=True)
+            say(f"[Error] AI 분석 중 오류 발생: {str(e)}")
+
+    threading.Thread(target=background_ai_task, daemon=True).start()
 
 @app.action("approve_buy")
 def action_approve_buy(ack, body, respond):
@@ -291,6 +336,38 @@ def action_reject_buy(ack, body, respond):
         del pending_orders[order_id]
         
     respond(text=f"[Notice] <@{user_id}> 님이 위험성을 인지하고 매수를 기각했습니다. 훌륭한 리스크 관리입니다.", replace_original=True)
+
+@app.action("action_relaxed_scan")
+def handle_relaxed_scan(ack, body, respond):
+    ack()
+    user_id = body["user"]["id"]
+    channel_id = body["container"]["channel_id"]
+    respond(text=f"<@{user_id}> 님의 요청으로 단기 반등 타겟(5MA>20MA) 스캐너를 가동합니다. (약 30초 소요)", replace_original=True)
+    
+    def background_task():
+        token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
+        macro = macro_collector.get_macro_indicators()
+        benchmark_str = macro.get("us_10y_yield", 4.0)
+        benchmark = float(benchmark_str) if benchmark_str != "N/A" else 4.0
+        
+        raw_candidates = stock_finder.get_high_dividend_candidates(URL, APP_KEY, SECRET_KEY, token, benchmark)
+        candidates = quant_screener.run_screener(raw_candidates, URL, APP_KEY, SECRET_KEY, token, benchmark, DART_API_KEY, relaxed_mode=True)
+        
+        if candidates:
+            msg_lines = [f"[단기 반등 스캐너 결과: {len(candidates)}종목 발굴]"]
+            for c in candidates:
+                msg_lines.append(f"- {c['name']}({c['ticker']}): 배당 {c['div_yield']}%, PBR {c['pbr']}, ROE {c['roe']}%")
+            app.client.chat_postMessage(channel=channel_id, text="\n".join(msg_lines))
+        else:
+            app.client.chat_postMessage(channel=channel_id, text="[Notice] 조건 완화(단기 반등) 스캐닝 결과도 조건을 만족하는 종목이 없습니다. 철저히 관망을 유지합니다.")
+
+    threading.Thread(target=background_task, daemon=True).start()
+
+@app.action("action_keep_observing")
+def handle_keep_observing(ack, body, respond):
+    ack()
+    user_id = body["user"]["id"]
+    respond(text=f"<@{user_id}> 님의 결정에 따라 스캐닝을 종료하고 관망 상태를 유지합니다. 자본 보호가 최우선입니다.", replace_original=True)
 
 if __name__ == "__main__":
     print(f"Log: [System] Stock Bot Command Center Active at {datetime.now(KST)}", flush=True)
