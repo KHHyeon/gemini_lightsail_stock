@@ -52,27 +52,23 @@ def weekly_routine():
     if not CHANNEL_ID:
         return
     
-    app.client.chat_postMessage(channel=CHANNEL_ID, text="[Weekly Routine] 주간 동적 퀀트 스캐너 가동을 시작합니다. (약 1분 소요)")
+    app.client.chat_postMessage(channel=CHANNEL_ID, text="[Weekly Routine] KIS 동적 유니버스 기반 퀀트 스캐너 가동 (약 30초 소요)")
     
     token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-    kis.set_token(token)
     macro = macro_collector.get_macro_indicators()
     benchmark_str = macro.get("us_10y_yield", 4.0)
     benchmark = float(benchmark_str) if benchmark_str != "N/A" else 4.0
 
-    print("Log: [Main] 1차 stock_finder 데이터 수집 시작")
     raw_candidates = stock_finder.get_high_dividend_candidates(URL, APP_KEY, SECRET_KEY, token, benchmark)
-    candidates = quant_screener.run_screener(raw_candidates, benchmark, kis, DART_API_KEY)
+    candidates = quant_screener.run_screener(raw_candidates, URL, APP_KEY, SECRET_KEY, token, benchmark, DART_API_KEY)
 
     if candidates:
         msg_lines = [f"[주간 스캐너 결과: 최정예 {len(candidates)}종목 발굴]"]
         for c in candidates:
-            name = c.get("name", "Unknown")
-            ticker = c.get("ticker", c.get("code", ""))
-            msg_lines.append(f"- {name}({ticker}): 배당 {c.get('div_yield')}% / PBR {c.get('pbr')} / ROE {c.get('roe')}% ({c.get('source')} 검증)")
+            msg_lines.append(f"- {c['name']}({c['ticker']}): 배당 {c['div_yield']}%, PBR {c['pbr']}, ROE {c['roe']}% ({c['source']} 검증)")
         app.client.chat_postMessage(channel=CHANNEL_ID, text="\n".join(msg_lines))
     else:
-        app.client.chat_postMessage(channel=CHANNEL_ID, text="[Notice] 이번 주 스캐닝 결과, 조건을 만족하는 종목이 없습니다. 서버의 디버그 로그를 확인해 주십시오.")
+        app.client.chat_postMessage(channel=CHANNEL_ID, text="[Notice] 이번 주 스캐닝 결과, 조건을 만족하는 종목이 없습니다.")
 
 def quarterly_routine():
     if CHANNEL_ID:
@@ -129,27 +125,23 @@ def force_run_risk_manager(message, say):
 def discover_stocks(message, say):
     def background_discovery():
         token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-        kis.set_token(token)
         macro = macro_collector.get_macro_indicators()
         benchmark_str = macro.get("us_10y_yield", 4.0)
         benchmark = float(benchmark_str) if benchmark_str != "N/A" else 4.0
         
         target_div = round(benchmark * 0.8, 2)
-        say(f"[System] 동적 스캐너 가동: 배당률 {target_div}% 이상, 흑자(ROE>0) 기업 탐색 (디버그 모드, 약 1분 소요)")
+        say(f"[System] KIS 동적 유니버스 기반 스캐너 가동: 배당률 {target_div}% 이상, 흑자(ROE>0) 기업 탐색 (약 30초 소요)")
         
-        print("Log: [Main Debug] 1차 stock_finder 데이터 수집 시작")
         raw_candidates = stock_finder.get_high_dividend_candidates(URL, APP_KEY, SECRET_KEY, token, benchmark)
-        candidates = quant_screener.run_screener(raw_candidates, benchmark, kis, DART_API_KEY)
+        candidates = quant_screener.run_screener(raw_candidates, URL, APP_KEY, SECRET_KEY, token, benchmark, DART_API_KEY)
         
         if candidates:
             msg_lines = [f"[스캐닝 완료: 최정예 {len(candidates)}종목 발굴]"]
             for c in candidates:
-                name = c.get("name", "Unknown")
-                ticker = c.get("ticker", c.get("code", ""))
-                msg_lines.append(f"- {name}({ticker}): 배당 {c.get('div_yield')}% / PBR {c.get('pbr')} / ROE {c.get('roe')}% ({c.get('source')} 검증)")
+                msg_lines.append(f"- {c['name']}({c['ticker']}): 배당 {c['div_yield']}%, PBR {c['pbr']}, ROE {c['roe']}% ({c['source']} 검증)")
             say("\n".join(msg_lines))
         else:
-            say(f"[Notice] 현재 조건을 만족하는 종목이 없습니다. 서버 터미널의 [Screener Debug] 로그를 확인해 주십시오.")
+            say(f"[Notice] 현재 조건을 만족하는 종목이 없습니다.")
 
     threading.Thread(target=background_discovery, daemon=True).start()
 
