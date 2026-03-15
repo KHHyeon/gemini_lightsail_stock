@@ -3,10 +3,13 @@
 import json
 import os
 import io
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
+# 한국 표준시(KST) 설정
+KST = timezone(timedelta(hours=9))
 
 FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -53,15 +56,12 @@ def save_json_to_gdrive(data, filename):
         service = get_drive_service()
         file_id = get_file_id(service, filename)
         
-        # 메모리 상에서 JSON 텍스트를 파일 스트림으로 변환
         json_bytes = json.dumps(data, indent=4, ensure_ascii=False).encode('utf-8')
         media = MediaIoBaseUpload(io.BytesIO(json_bytes), mimetype='application/json', resumable=True)
         
         if file_id:
-            # 기존 파일이 존재하면 업데이트
             service.files().update(fileId=file_id, media_body=media).execute()
         else:
-            # 파일이 없으면 새 파일 생성
             file_metadata = {'name': filename, 'parents': [FOLDER_ID]}
             service.files().create(body=file_metadata, media_body=media).execute()
     except Exception as e:
@@ -69,10 +69,11 @@ def save_json_to_gdrive(data, filename):
 
 def record_trade(ticker, name, action, price, quantity, reason):
     """
-    모의 매매 내역을 내 구글 드라이브에 기록하고 가상 포트폴리오를 업데이트합니다.
+    모의 매매 내역을 구글 드라이브에 기록하고 가상 포트폴리오를 업데이트합니다.
     """
+    # [Fix] KST 기준으로 시간 강제 지정
     trade_record = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
         "ticker": ticker,
         "name": name,
         "action": action,
@@ -82,13 +83,11 @@ def record_trade(ticker, name, action, price, quantity, reason):
         "reason": reason
     }
     
-    # 1. 매매 히스토리 기록 (GDrive)
     log_filename = "paper_trades.json"
     history = load_json_from_gdrive(log_filename) or []
     history.append(trade_record)
     save_json_to_gdrive(history, log_filename)
         
-    # 2. 가상 포트폴리오(잔고) 업데이트 (GDrive)
     portfolio_filename = "paper_portfolio.json"
     portfolio = load_json_from_gdrive(portfolio_filename) or {}
             

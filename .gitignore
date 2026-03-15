@@ -5,4 +5,4 @@ __pycache__/
 gcp_key.json
 *.pem
 *.json
-
+docs_cache/
