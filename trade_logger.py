@@ -3,6 +3,7 @@
 import json
 import os
 import io
+import time
 from datetime import datetime, timezone, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -15,18 +16,25 @@ FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 def get_drive_service():
-    """구글 드라이브 API 서비스 객체를 생성합니다."""
     creds = service_account.Credentials.from_service_account_file(
         os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), scopes=SCOPES)
     return build('drive', 'v3', credentials=creds)
 
-def get_file_id(service, filename):
-    """지정된 폴더 내에서 파일 이름으로 파일 ID를 검색합니다."""
+def get_file_id(service, filename, retries=3):
+    """지정된 폴더 내에서 파일 이름으로 파일 ID를 검색합니다. (통신 지연 대비 재시도 추가)"""
     query = f"name='{filename}' and '{FOLDER_ID}' in parents and trashed=false"
-    results = service.files().list(q=query, fields="files(id, name)").execute()
-    items = results.get('files', [])
-    if items:
-        return items[0]['id']
+    for i in range(retries):
+        try:
+            results = service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+            items = results.get('files', [])
+            if items:
+                return items[0]['id']
+            return None
+        except Exception as e:
+            if i == retries - 1:
+                print(f"Log: [GDrive Search Error] 파일 검색 완전 실패: {str(e)}", flush=True)
+                return None
+            time.sleep(1)
     return None
 
 def load_json_from_gdrive(filename):
@@ -47,7 +55,7 @@ def load_json_from_gdrive(filename):
         fh.seek(0)
         return json.loads(fh.read().decode('utf-8'))
     except Exception as e:
-        print(f"Log: [GDrive Load Error] {str(e)}")
+        print(f"Log: [GDrive Load Error] {filename} 로드 실패: {str(e)}", flush=True)
         return None
 
 def save_json_to_gdrive(data, filename):
@@ -60,18 +68,22 @@ def save_json_to_gdrive(data, filename):
         media = MediaIoBaseUpload(io.BytesIO(json_bytes), mimetype='application/json', resumable=True)
         
         if file_id:
-            service.files().update(fileId=file_id, media_body=media).execute()
+            try:
+                service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+            except Exception as e:
+                print(f"Log: [GDrive Update Error] [경고] {filename} 업데이트 중 403 에러 발생 (버전 기록 폭발 의심): {str(e)}", flush=True)
         else:
-            file_metadata = {'name': filename, 'parents': [FOLDER_ID]}
-            service.files().create(body=file_metadata, media_body=media).execute()
+            try:
+                print(f"Log: [GDrive] {filename} 파일을 찾지 못해 새로 생성을 시도합니다.", flush=True)
+                file_metadata = {'name': filename, 'parents': [FOLDER_ID]}
+                service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True).execute()
+            except Exception as e:
+                print(f"Log: [GDrive Create Error] [경고] {filename} 생성 중 403 용량 에러 발생: {str(e)}", flush=True)
     except Exception as e:
-        print(f"Log: [GDrive Save Error] {str(e)}")
+        print(f"Log: [GDrive Save System Error] {str(e)}", flush=True)
 
 def record_trade(ticker, name, action, price, quantity, reason):
-    """
-    모의 매매 내역을 구글 드라이브에 기록하고 가상 포트폴리오를 업데이트합니다.
-    """
-    # [Fix] KST 기준으로 시간 강제 지정
+    """모의 매매 내역을 구글 드라이브에 기록하고 가상 포트폴리오를 업데이트합니다."""
     trade_record = {
         "timestamp": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
         "ticker": ticker,

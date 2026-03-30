@@ -19,9 +19,10 @@ def get_latest_news(keyword, limit=10, search_type="stock"):
         encoded_name = urllib.parse.quote(exact_match_name)
         query = f"{encoded_name}+AND+(특징주+OR+주가+OR+실적)"
     else:
-        # 매크로 모드: 단순 URL 인코딩만 적용하여 포괄적인 기사 수집
+        # 매크로 모드: 띄어쓰기를 안전한 %20 형태로 인코딩
         query = urllib.parse.quote(keyword)
         
+    # URL이 마크다운으로 변환되지 않도록 순수한 문자열로 조합
     url = f"https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
     
     try:
@@ -32,15 +33,12 @@ def get_latest_news(keyword, limit=10, search_type="stock"):
         for item in soup.find_all('item'):
             title_tag = item.find('title')
             if title_tag:
-                clean_title = " ".join(title_tag.text.strip().split())
-                if clean_title not in news_list:
-                    news_list.append(clean_title)
-                    
-            if len(news_list) >= limit:
-                break
+                clean_title = title_tag.text.strip()
+                news_list.append(clean_title)
+                if len(news_list) >= limit: break
                 
-        print(f"Log: [News Crawler] {len(news_list)}개의 뉴스를 확보했습니다.", flush=True)
+        print(f"Log: [News Crawler] '{keyword}' 관련 최신 뉴스 {len(news_list)}개 확보.", flush=True)
         return news_list
     except Exception as e:
         print(f"Log: [News Crawler Error] {str(e)}", flush=True)
-        return [f"[Error] 뉴스 수집 실패: {str(e)}"]
+        return []
