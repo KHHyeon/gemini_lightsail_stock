@@ -1,154 +1,147 @@
 # -*- coding: utf-8 -*-
 # File: ~/my_bot/ai_strategy.py
-import os, json, concurrent.futures, time, re
+import os
 from google import genai
-from dotenv import load_dotenv
-import news_crawler
-from slack_notifier import send_slack_alert
-
-load_dotenv()
-MODEL_NAME = os.getenv("AI_MODEL_NAME", "gemini-3-flash-preview")
-
-def clean_text(text):
-    if not text: return text
-    return re.sub(r'[^\U00000000-\U0000FFFF]', '', text)
 
 def get_gemini_client():
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return genai.Client(api_key=api_key) if api_key else None
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("Log: [AI Error] GOOGLE_API_KEY가 환경변수에 없습니다. (.env 파일을 확인하세요)")
+        return None
+    return genai.Client(api_key=api_key)
 
-def handle_ai_error(e, context=""):
-    error_msg = str(e)
-    if "429" in error_msg:
-        alert = f"[AI API 접근 제한] 429 할당량 초과 발생. ({context})"
-        send_slack_alert(alert)
-        return alert
-    elif "403" in error_msg:
-        alert = f"[AI API 접근 제한] 403 권한 없음 또는 API 키 만료. ({context})"
-        send_slack_alert(alert)
-        return alert
-    elif "400" in error_msg:
-        return f"[AI API 에러] 400 안전 필터 차단. ({context})"
-    else:
-        return f"[AI Error] {context} 중 알 수 없는 오류: {error_msg[:50]}"
+def generate_text(prompt, model_name='gemini-2.5-flash'):
+    client = get_gemini_client()
+    if not client: return "AI 설정 오류: GOOGLE_API_KEY 누락"
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt
+        )
+        return response.text
+    except Exception as e:
+        print(f"Log: [AI Generation Error] {e}")
+        return "AI 리포트 생성 실패"
 
 def infer_news_keywords():
-    client = get_gemini_client()
-    default_us, default_kr = "나스닥 마감", "코스피 시황"
-    if not client: return default_us, default_kr
+    prompt = "현재 글로벌 거시경제와 한국 주식시장에서 가장 중요한 핵심 키워드(산업, 매크로 등)를 미국용 1개, 한국용 1개만 쉼표로 구분하여 알려줘. 예시: 금리인하, 반도체"
+    res = generate_text(prompt)
+    parts = [p.strip() for p in res.split(',')]
+    if len(parts) >= 2: return parts[0], parts[1]
+    return "연준", "삼성전자"
+
+def get_daily_market_report(macro, us_news, kr_news, research_reports, extra):
+    prompt = f"""
+    당신은 친절하면서도 예리한 퀀트 애널리스트입니다.
     
-    system_instruction = """
-    당신은 금융 뉴스 검색 전문가입니다.
-    오늘 미국 증시와 한국 코스피의 전반적인 마감/시황을 파악하기 위한 구글 뉴스 검색어 2개를 도출하십시오.
-    [출력 규칙] 반드시 "미국검색어|한국검색어" 형식으로만 출력하십시오. 검색어는 무조건 '2단어 이하'로. 이모지 금지.
+    [절대 규칙]
+    1. 어려운 금융 전문 용어 사용을 엄격히 금지합니다. 주식 초보자도 직관적으로 이해할 수 있는 쉬운 일상 용어로 완벽히 순화해서 작성하세요.
+    2. 이모지는 절대 사용하지 마세요.
+    
+    아래 데이터를 분석하여 일일 마감 시황 보고서를 작성하세요.
+    - 매크로 지표: {macro}
+    - 주요 뉴스: {us_news} / {kr_news}
+    - 여의도 증권사 산업 리포트: {research_reports}
+    - 특이사항: {extra}
+    
+    [출력 양식]
+    [ 핵심 매크로 지표 ]
+    (전달받은 매크로 지표 중 미 국채 10년물 금리, WTI 원유 가격, 금 가격, 환율, VIX 등 주요 수치를 절대 숨기지 말고 직관적인 목록 형태로 정확히 나열하세요.)
+    
+    [ 오늘의 시장 흐름 ]
+    (위의 매크로 수치들과 주요 뉴스를 엮어서 오늘 시장이 왜 이런 흐름을 보였는지 쉽게 설명)
+    
+    [ 주목할 산업 테마 키워드 ]
+    (증권사 산업 리포트를 분석하여, 앞으로 돈이 몰릴 것 같은 유망한 산업 키워드 2~3개를 명확하게 추천. 짧은 명사형이어야 함)
+    
+    [ 내일의 투자 전략 ]
+    (내일 어떻게 대응해야 할지 냉정하고 쉬운 조언)
     """
-    try:
-        res = client.models.generate_content(model=MODEL_NAME, contents="오늘 최적의 뉴스 검색어 2개를 추출해주세요.", config={'system_instruction': system_instruction})
-        result = clean_text(res.text).strip()
-        if "|" in result: return result.split("|", 1)[0].strip(), result.split("|", 1)[1].strip()
-    except Exception as e:
-        handle_ai_error(e, "검색어 추론")
-    return default_us, default_kr
+    return generate_text(prompt)
 
-def get_trending_themes():
-    client = get_gemini_client()
-    if not client: return "AI 반도체, K-뷰티"
-    system_instruction = "당신은 한국 주식시장 트렌드 분석가입니다. 최근 가장 자금이 몰리고 있는 주도 테마(섹터) 2~3가지를 콤마로 구분하여 단어로만 답변하십시오. 이모지 및 부가설명 절대 금지."
-    try:
-        res = client.models.generate_content(model=MODEL_NAME, contents="현재 강력하게 상승중인 테마 2~3개 추출", config={'system_instruction': system_instruction})
-        return clean_text(res.text).strip()
-    except Exception as e:
-        handle_ai_error(e, "주도 테마 추론")
-        return "AI 반도체, 저PBR 밸류업"
+def get_weekly_portfolio_report(portfolio, news_dict):
+    prompt = f"다음은 현재 모의투자 포트폴리오와 관련 뉴스입니다. 주간 성과를 분석하고, 다음 주 포지션 유지/축소에 대한 조언을 3단락으로 작성하세요. 쉬운 용어만 사용하세요. 포트폴리오: {portfolio}, 뉴스: {news_dict}"
+    return generate_text(prompt)
 
-def get_theme_universe(theme_keywords):
+def get_monthly_portfolio_report(portfolio, news_dict):
+    prompt = f"다음은 월간 포트폴리오 현황과 뉴스입니다. 지난 한 달간의 성과를 리뷰하고, 자산 배분 전략의 맹점을 쉬운 언어로 지적하세요. 포트폴리오: {portfolio}"
+    return generate_text(prompt)
+
+def get_quarterly_portfolio_report(portfolio, news_dict):
+    prompt = f"다음은 분기 포트폴리오 현황입니다. 거시 경제 흐름 변화와 연동하여 분기별 포트폴리오 교체 전략을 쉬운 말로 제시하세요. 포트폴리오: {portfolio}"
+    return generate_text(prompt)
+
+def get_theme_stock_narrative(target_theme, name, ticker, fundamentals):
+    prompt = f"""
+    당신은 성장 잠재력을 중시하는 애널리스트입니다. 
+    종목 '{name}({ticker})'이(가) '{target_theme}' 테마에 어떻게 연관되어 있으며, 
+    현재 재무 상태(총점: {fundamentals.get('score', 'N/A')}, PBR: {fundamentals.get('pbr', 'N/A')})를 고려할 때 
+    단순한 테마성 껍데기인지, 아니면 크게 성장할 진짜 유망주인지 어려운 용어 없이 3문장 이내로 평가하세요.
+    """
+    return generate_text(prompt)
+
+def get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context):
+    prompt = f"""
+    당신은 '비대칭적 손익비'를 추구하는 실전 헤지펀드 매니저입니다.
+    
+    종목: {stock_name}({ticker})
+    최근 30일 차트요약: {chart_30d[-1] if chart_30d else '데이터 없음'}
+    거시경제: {macro}
+    밸류에이션: {valuation}
+    테마 컨텍스트: {theme_context}
+    
+    [절대 규칙]
+    1. 어려운 금융 전문 용어를 절대 쓰지 말고, 일상 언어로 설명하세요.
+    2. 분석 후 최종 투자 의견을 [적극찬성], [찬성], [반대], [적극반대] 중 하나로 글의 서두에 명확히 제시하세요.
+    3. 마지막 줄에 반드시 다음 형식으로 팩트 기반의 구체적인 요약을 작성하세요.
+       '[한줄요약] [투자의견] 구체적 매수사유 | [상승조건] (어떤 실적/매크로/이벤트가 발생해야 하는가) | [손절조건] (정확히 어떤 매크로 수치가 악화되거나 실적이 깨지면 팔 것인가)'
+    4. '상방잠재력', '거시환경 개선' 같은 추상적인 단어를 엄격히 금지합니다. 'WTI 90불 돌파 시', '영업이익 적자 전환 시', '미 국채 금리 4.5% 돌파 시' 등 측정 가능하고 구체적인 조건을 반드시 명시하세요.
+    이모지 사용 금지.
+    """
+    return generate_text(prompt)
+
+def check_fundamental_damage(ticker, stock_name, chart_30d, macro, valuation, theme_context):
+    prompt = f"""
+    당신은 기업의 본질적 가치와 성장 스토리를 믿는 장기 투자자입니다.
+    현재 포트폴리오에 보유 중인 종목의 '투자 아이디어 훼손 여부'를 진단해야 합니다.
+    
+    종목: {stock_name}({ticker})
+    최근 30일 차트요약: {chart_30d[-1] if chart_30d else '데이터 없음'}
+    현재 거시경제: {macro}
+    현재 밸류에이션: {valuation}
+    [중요] 초기 매수이유 및 설정된 손절조건: {theme_context}
+    
+    [절대 규칙]
+    1. 주가 하락 등 '단기 노이즈'는 무시하세요.
+    2. 제공된 '초기 매수이유 및 설정된 손절조건'을 꼼꼼히 읽고, 사용자가 설정했던 그 구체적인 악재(예: WTI 특정 가격 돌파, 특정 거시지표 악화 등)가 현재 시점에서 실제로 발생했는지 냉정하게 대조하세요.
+    3. 사전에 정의된 [손절조건]에 명확히 도달했거나 기업 본질이 파괴되었다면 서두에 [펀더멘털훼손] 이라고 쓰세요.
+    4. 아직 손절조건에 도달하지 않았고 기대했던 잠재력이 살아있다면 [보유유지] 라고 쓰세요.
+    5. 그 뒤에 왜 그렇게 판단했는지 초기 손절조건과 현재 지표를 대조하여 3문장 이내로 설명하세요.
+    """
+    return generate_text(prompt)
+
+def match_naver_themes(keyword, theme_list):
+    prompt = f"""
+    사용자가 '{keyword}'와(과) 관련된 주식 테마를 찾고 있습니다.
+    아래는 네이버 금융에서 공식적으로 제공하는 테마 목록입니다.
+    
+    [네이버 공식 테마 목록]
+    {', '.join(theme_list)}
+    
+    위 목록 중에서 사용자의 검색어와 가장 의미가 일치하는 테마를 최대 3개만 골라주세요.
+    반드시 위 목록에 존재하는 정확한 텍스트로만 답변해야 하며, 여러 개일 경우 쉼표(,)로 구분해 주세요.
+    설명이나 부가적인 말은 절대 하지 마세요.
+    """
     client = get_gemini_client()
     if not client: return []
-    system_instruction = f"""
-    당신은 한국 주식시장 섹터 애널리스트입니다. 입력된 단일 테마 '{theme_keywords}'와 실질적으로 관련하여 비즈니스를 영위하는 한국 코스피/코스닥 상장사 15개를 선별하십시오.
-    [출력 규칙] 반드시 JSON 배열 형식으로만 출력. 코드블록 금지. 이모지 금지.
-    [ {{"name": "종목명", "ticker": "6자리숫자코드"}}, ... ]
-    """
     try:
-        res = client.models.generate_content(model=MODEL_NAME, contents=f"'{theme_keywords}' 관련 주식 15개 JSON 반환", config={'system_instruction': system_instruction})
-        text = clean_text(res.text).replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        matched = [t.strip() for t in response.text.split(',') if t.strip()]
+        valid_themes = [t for t in matched if t in theme_list]
+        return valid_themes
     except Exception as e:
-        handle_ai_error(e, f"테마({theme_keywords}) 유니버스 생성")
+        print(f"Log: [AI Router Error] {e}")
         return []
-
-def get_theme_stock_narrative(theme, stock_name, ticker, fundamentals):
-    client = get_gemini_client()
-    if not client: return "내러티브 분석 실패"
-    system_instruction = f"""
-    당신은 퀀트 펀드매니저입니다. 이 종목({stock_name})이 '{theme}' 테마와 어떤 관련이 있으며, 제공된 실적을 바탕으로 성장이 정당화되는지 3줄 이내로 핵심만 요약하십시오. 이모지 금지.
-    """
-    try:
-        res = client.models.generate_content(model=MODEL_NAME, contents=f"재무데이터: {json.dumps(fundamentals, ensure_ascii=False)}", config={'system_instruction': system_instruction})
-        return clean_text(res.text).strip()
-    except Exception as e:
-        return handle_ai_error(e, f"{stock_name} 내러티브 생성")
-
-def get_ai_investment_report(ticker, stock_name, chart_30d, macro, paper_portfolio, valuation, theme_context=""):
-    client = get_gemini_client()
-    if not client: return "[Error] API 키 누락."
-    
-    latest_news = news_crawler.get_latest_news(stock_name, limit=5)
-    news_summary = "\n".join([f"- {news}" for news in latest_news]) if latest_news else "뉴스 데이터 없음"
-    chart_summary = "차트 데이터 없음"
-    if chart_30d and len(chart_30d) > 0:
-        start_price, end_price = chart_30d[0]['close'], chart_30d[-1]['close']
-        pct = ((end_price - start_price) / start_price) * 100 if start_price > 0 else 0
-        chart_summary = f"- 시작가: {start_price:,}원 -> 현재가: {end_price:,}원 (수익률: {pct:+.2f}%)"
-    
-    system_instruction = "당신은 팩트 기반 수석 퀀트 개발자입니다. [출력 규칙] 1. 첫 줄은 '[한줄요약] '으로 압축. 2. '[핵심 논리] '. 이모지 절대 금지."
-    narrative_injection = f"\n[사전 테마 진단 리포트 (중요 검토 대상)]\n{theme_context}\n" if theme_context else ""
-    user_prompt = f"분석 대상 종목: {stock_name} ({ticker}){narrative_injection}\n[지표]\n{valuation}\n[뉴스]\n{news_summary}\n[차트]\n{chart_summary}\n[매크로]\n{macro}"
-    
-    try:
-        res = client.models.generate_content(model=MODEL_NAME, contents=user_prompt, config={'system_instruction': system_instruction})
-        return clean_text(res.text)
-    except Exception as e:
-        return handle_ai_error(e, f"{stock_name} 종목 분석 리포트")
-
-def get_daily_market_report(macro, us_news, kr_news, disclosures):
-    client = get_gemini_client()
-    if not client: return "API 에러"
-    us_news_str = "\n".join([f"- {n}" for n in us_news]) if us_news else "[주의] 오늘 수집된 미국 관련 최신 뉴스가 없습니다."
-    kr_news_str = "\n".join([f"- {n}" for n in kr_news]) if kr_news else "[주의] 오늘 수집된 한국 관련 최신 뉴스가 없습니다."
-    system_instruction = "수석 퀀트 애널리스트. 뉴스가 없다면 지어내지 말고 팩트만 명시하십시오. 이모지 금지."
-    user_prompt = f"[매크로]\n{macro}\n[미국뉴스]\n{us_news_str}\n[한국뉴스]\n{kr_news_str}\n[공시]\n{disclosures}"
-    try:
-        return clean_text(client.models.generate_content(model=MODEL_NAME, contents=user_prompt, config={'system_instruction': system_instruction}).text)
-    except Exception as e:
-        return handle_ai_error(e, "일일 시장 브리핑")
-
-def get_weekly_portfolio_report(portfolio_details, news_dict):
-    client = get_gemini_client()
-    if not client: return "API 에러"
-    system_instruction = "당신은 퀀트 펀드매니저입니다. 포트폴리오 진단. 이모지 금지."
-    user_prompt = f"포트폴리오: {portfolio_details}\n뉴스: {news_dict}"
-    try:
-        return clean_text(client.models.generate_content(model=MODEL_NAME, contents=user_prompt, config={'system_instruction': system_instruction}).text)
-    except Exception as e:
-        return handle_ai_error(e, "주간 브리핑")
-
-def get_monthly_portfolio_report(portfolio_details, news_dict):
-    client = get_gemini_client()
-    if not client: return "API 에러"
-    system_instruction = "당신은 수석 펀드매니저입니다. 월간 리포트 작성. 이모지 금지."
-    user_prompt = f"포트폴리오: {portfolio_details}\n월간 주요 뉴스: {news_dict}"
-    try:
-        return clean_text(client.models.generate_content(model=MODEL_NAME, contents=user_prompt, config={'system_instruction': system_instruction}).text)
-    except Exception as e:
-        return handle_ai_error(e, "월간 브리핑")
-
-def get_quarterly_portfolio_report(portfolio_details, news_dict):
-    client = get_gemini_client()
-    if not client: return "API 에러"
-    system_instruction = "당신은 헤지펀드 총괄 책임자입니다. 분기 리포트 작성. 이모지 금지."
-    user_prompt = f"포트폴리오: {portfolio_details}\n분기 주요 뉴스: {news_dict}"
-    try:
-        return clean_text(client.models.generate_content(model=MODEL_NAME, contents=user_prompt, config={'system_instruction': system_instruction}).text)
-    except Exception as e:
-        return handle_ai_error(e, "분기 브리핑")

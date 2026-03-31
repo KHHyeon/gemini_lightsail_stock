@@ -21,43 +21,6 @@ def get_naver_dividend(ticker):
     except: pass
     return 0.0
 
-def get_dart_fundamentals(dart_client, ticker):
-    if not dart_client: return None
-    try:
-        report = None
-        f = io.StringIO()
-        
-        # [수정] 하드코딩 제거: 현재 연도 기준으로 최근 3개년도 자동 계산
-        current_year = datetime.now().year
-        target_years = [current_year, current_year - 1, current_year - 2]
-        
-        with redirect_stdout(f):
-            for year in target_years:
-                for rpt_code in ["11011", "11013", "11012", "11014"]: # 1분기, 반기, 3분기, 사업보고서 순차 조회
-                    try:
-                        report = dart_client.finstate(ticker, year, rpt_code)
-                        if report is not None and not report.empty: break
-                    except: continue
-                if report is not None and not report.empty: break
-                
-        if report is not None and not report.empty:
-            equity_row = report.loc[(report['account_nm'] == '자본총계') | (report['account_nm'] == '자본총액')]
-            income_row = report.loc[(report['account_nm'] == '당기순이익') | (report['account_nm'] == '연결당기순이익')]
-            op_income_row = report.loc[(report['account_nm'] == '영업이익') | (report['account_nm'] == '연결영업이익')]
-            sales_row = report.loc[report['account_nm'].str.contains('매출|영업수익|수익', na=False)]
-            
-            if not equity_row.empty and not income_row.empty and not op_income_row.empty:
-                equity = float(str(equity_row.iloc[0]['thstrm_amount']).replace(',', '').strip() or 0)
-                income = float(str(income_row.iloc[0]['thstrm_amount']).replace(',', '').strip() or 0)
-                op_income = float(str(op_income_row.iloc[0]['thstrm_amount']).replace(',', '').strip() or 0)
-                sales = float(str(sales_row.iloc[0]['thstrm_amount']).replace(',', '').strip() or 0) if not sales_row.empty else 0
-                
-                if equity > 0:
-                    roe = (income / equity) * 100
-                    return {"roe": roe, "operating_profit": op_income, "sales": sales}
-    except: pass
-    return None
-
 def get_basic_valuation(base_url, app_key, secret_key, token, ticker):
     url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
@@ -65,113 +28,144 @@ def get_basic_valuation(base_url, app_key, secret_key, token, ticker):
         "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST01010100"
     }
     params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    time.sleep(0.1)
     try:
         res = requests.get(url, headers=headers, params=params, timeout=5)
         if res.status_code == 200:
             data = res.json().get("output", {})
+            # acml_tr_pbmn: 누적 거래 대금 (단위: 원)
+            tr_amount = int(data.get("acml_tr_pbmn", "0") or 0)
             return {
+                "current_price": int(data.get("stck_prpr", "0") or 0),
                 "pbr": float(data.get("pbr", "0") or 0.0),
-                "per": float(data.get("per", "0") or 0.0)
+                "per": float(data.get("per", "0") or 0.0),
+                "tr_amount": tr_amount
             }
     except: pass
-    return {"pbr": 0.0, "per": 0.0}
+    return {"current_price": 0, "pbr": 0.0, "per": 0.0, "tr_amount": 0}
 
-def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark_rate, dart_api_key, relaxed_mode=False):
+def get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker):
+    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
+    headers = {
+        "Content-Type": "application/json", "authorization": f"Bearer {token}",
+        "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST01010900"
+    }
+    params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    time.sleep(0.2)
+    frgn_net, orgn_net = 0, 0
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            daily_data = res.json().get("output2", [])
+            for day in daily_data:
+                frgn_net += int(day.get("frgn_ntby_qty", "0"))
+                orgn_net += int(day.get("orgn_ntby_qty", "0"))
+    except: pass
+    return frgn_net, orgn_net
+
+def get_dart_yoy_growth(dart_client, ticker):
+    if not dart_client: return 0.0, 0.0, False
+    current_year = datetime.now().year
+    search_queue = [(current_year, "11013"), (current_year, "11012"), (current_year - 1, "11011")]
+    report = None
+    f = io.StringIO()
+    time.sleep(0.6)
+    try:
+        with redirect_stdout(f):
+            for year, rpt_code in search_queue:
+                try:
+                    report = dart_client.finstate(ticker, year, rpt_code)
+                    if report is not None and not report.empty: break
+                except: continue
+        if report is not None and not report.empty:
+            op_income_row = report.loc[(report['account_nm'] == '영업이익') | (report['account_nm'] == '연결영업이익')]
+            sales_row = report.loc[report['account_nm'].str.contains('매출|영업수익|수익', na=False)]
+            if not op_income_row.empty and not sales_row.empty:
+                cur_op = float(str(op_income_row.iloc[0].get('thstrm_amount', '0')).replace(',', '').strip() or 0)
+                cur_sales = float(str(sales_row.iloc[0].get('thstrm_amount', '0')).replace(',', '').strip() or 0)
+                prev_op = float(str(op_income_row.iloc[0].get('frmtrm_amount', '0')).replace(',', '').strip() or 0)
+                prev_sales = float(str(sales_row.iloc[0].get('frmtrm_amount', '0')).replace(',', '').strip() or 0)
+                
+                sales_growth = ((cur_sales - prev_sales) / abs(prev_sales)) * 100 if prev_sales != 0 else 0.0
+                turnaround = (prev_op <= 0 and cur_op > 0)
+                op_growth = ((cur_op - prev_op) / abs(prev_op)) * 100 if prev_op != 0 else 0.0
+                return sales_growth, op_growth, turnaround
+    except: pass
+    return 0.0, 0.0, False
+
+def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, dart_api_key):
     if not raw_candidates: return []
     dart_client = OpenDartReader(dart_api_key) if dart_api_key else None
     final_list = []
-    min_dividend = round(benchmark_rate * 0.8, 2)
     
     for c in raw_candidates:
         ticker = c.get("ticker")
         if not ticker: continue
-        time.sleep(0.15)
-        div_yield = get_naver_dividend(ticker)
-        if div_yield < min_dividend: continue
-        c["div_yield"] = div_yield
         
+        # 1. 유동성 필터 (데이터 무결성 검증 포함)
+        val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
+        if val["current_price"] <= 0: continue # 가격 데이터 무결성 실패 시 스킵
+        
+        # 당일 거래대금 10억 미만인 종목은 즉시 탈락 (유동성 부족)
+        if val["tr_amount"] < 1000000000:
+            print(f"Log: [Liquidity Filter] {c.get('name')} 탈락 (거래대금: {val['tr_amount']/1000000:.1f}백만)")
+            continue
+
+        score = 0
+        details = []
+        
+        # 2. 기술적 지표 채점
         chart_60d = chart_data.get_daily_ohlcv(base_url, app_key, secret_key, token, ticker, count=60)
         if chart_60d and len(chart_60d) >= 60:
-            closes = [day['close'] for day in chart_60d]
-            if not relaxed_mode:
-                if sum(closes[:20])/20 < sum(closes[:60])/60: continue
-            else:
-                if sum(closes[:5])/5 <= sum(closes[:20])/20: continue
-        else: continue
-
-        val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
-        pbr, per = val["pbr"], val["per"]
-        if pbr > 0 and per > 0:
-            roe = round((pbr / per) * 100, 2)
-            if pbr >= 2.0 or roe <= 0: continue
-            dart_data = get_dart_fundamentals(dart_client, ticker)
-            if dart_data and dart_data.get("operating_profit", 0) <= 0: continue
-            c.update({"pbr": pbr, "per": per, "roe": roe, "source": "KIS+DART"})
+            current_close = chart_60d[0]['close']
+            ma60 = sum(day['close'] for day in chart_60d) / 60
+            if current_close >= ma60:
+                score += 20
+                details.append("차트 정배열(+20)")
+            
+        # 3. 수급 채점
+        frgn, orgn = get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker)
+        if frgn > 0 or orgn > 0:
+            score += 30
+            details.append("수급 유입(+30)")
+            
+        # 4. 실적 채점
+        sales_growth, op_growth, turnaround = get_dart_yoy_growth(dart_client, ticker)
+        if sales_growth >= 10.0:
+            score += 20
+            details.append(f"매출성장 {sales_growth:.1f}%(+20)")
+        if turnaround or op_growth >= 20.0:
+            score += 30
+            details.append("이익성장/흑전(+30)")
+            
+        if score >= 70:
+            c.update({
+                "score": score, "score_details": details,
+                "current_price": val["current_price"],
+                "pbr": val["pbr"], "per": val["per"]
+            })
             final_list.append(c)
-    final_list.sort(key=lambda x: x.get("div_yield", 0), reverse=True)
+            
+    final_list.sort(key=lambda x: x.get("score", 0), reverse=True)
     return final_list
 
-def run_theme_screener(raw_candidates, base_url, app_key, secret_key, token, dart_api_key):
+def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark_rate, dart_api_key):
+    """기존 배당주 스캐너에도 유동성 필터 적용"""
     if not raw_candidates: return []
-    dart_client = OpenDartReader(dart_api_key) if dart_api_key else None
     final_list = []
-    
-    print("\nLog: [Theme Screener] 테마주 실적 및 차트 검증 시작...", flush=True)
-    
+    min_dividend = round(benchmark_rate * 0.8, 2)
     for c in raw_candidates:
         ticker = c.get("ticker")
-        name = c.get("name")
-        if not ticker: continue
-        time.sleep(0.2)
-        
-        # 1. 차트 추세 검증
-        chart_60d = chart_data.get_daily_ohlcv(base_url, app_key, secret_key, token, ticker, count=60)
-        if not chart_60d or len(chart_60d) < 60:
-            print(f" └ 탈락: {name} (차트 데이터 60일 미만)", flush=True)
-            continue
-            
-        closes = [day['close'] for day in chart_60d]
-        current_close = closes[0]
-        ma20 = sum(closes[:20]) / 20
-        ma60 = sum(closes[:60]) / 60
-        
-        if current_close < ma60 and ma20 < ma60:
-            print(f" └ 탈락: {name} (차트 역배열/하락추세)", flush=True)
-            continue 
-            
-        # 2. 실적 검증 (DART + KIS 우회로)
         val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
-        pbr = val["pbr"]
-        per = val["per"]
+        if val["current_price"] <= 0 or val["tr_amount"] < 1000000000: continue
         
-        dart_data = get_dart_fundamentals(dart_client, ticker)
+        div_yield = get_naver_dividend(ticker)
+        if div_yield < min_dividend: continue
         
-        if dart_data:
-            sales = dart_data.get("sales", 0)
-            op = dart_data.get("operating_profit", 0)
-            roe = round(dart_data.get("roe", 0), 2)
-            
-            if sales <= 0 or op <= 0:
-                print(f" └ 탈락: {name} (DART 실적 적자 또는 매출 0)", flush=True)
-                continue
-        else:
-            # DART 생존 우회로
-            if per <= 0:
-                print(f" └ 탈락: {name} (DART 응답 실패 & KIS PER 적자)", flush=True)
-                continue
-            else:
-                roe = round((pbr / per) * 100, 2) if per > 0 else 0.0
-                sales = "DART 미응답(우회 흑자검증)"
-                print(f" └ 통과: {name} (DART 응답 실패했으나 PER>0 으로 우회 통과)", flush=True)
-                
-        c.update({
-            "pbr": pbr, 
-            "per": per, 
-            "roe": roe, 
-            "sales": sales
-        })
-        print(f" [합격]: {name} (ROE: {roe}%)", flush=True)
-        final_list.append(c)
-        
-    print(f"Log: [Theme Screener] 검증 완료. 총 {len(final_list)}종목 통과.\n", flush=True)
+        if val["pbr"] > 0 and val["per"] > 0:
+            roe = round((val["pbr"] / val["per"]) * 100, 2)
+            if val["pbr"] >= 2.0 or roe <= 0: continue
+            c.update({"current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"], "roe": roe, "div_yield": div_yield})
+            final_list.append(c)
+    final_list.sort(key=lambda x: x.get("div_yield", 0), reverse=True)
     return final_list
