@@ -42,8 +42,6 @@ def get_stock_info_naver(ticker):
         etf_keywords = ['KODEX', 'TIGER', 'KBSTAR', 'ACE', 'ARIRANG', 'HANARO', 'KOSEF', 'SOL', 'TIMEFOLIO', '히어로즈']
         if any(kw in name.upper() for kw in etf_keywords) or 'ETN' in name.upper() or 'ETF' in name.upper():
             is_etf = True
-        elif soup.find('img', alt='ETF') or soup.find('img', alt='ETN'):
-            is_etf = True
     except: pass
     return name, div, is_etf
 
@@ -110,7 +108,6 @@ def daily_fundamental_stop_loss():
         context = info.get("reason", "매수 근거 기록 없음")
         
         val = kis.get_valuation_data(ticker)
-        # 데이터 무결성 검증 방어막 적용
         if not val or int(val.get("current_price", 0)) <= 0: continue
             
         current_price = int(val["current_price"])
@@ -165,7 +162,6 @@ def execute_daily_split_buys():
         mode_type = info.get("mode_type", "PAPER_ONLY") 
         
         val = kis.get_valuation_data(ticker)
-        # 데이터 무결성 검증 방어막 적용
         if not val or int(val.get("current_price", 0)) <= 0: continue
             
         current_price = int(val["current_price"])
@@ -217,7 +213,7 @@ def run_scheduler():
     schedule.every().day.at("10:45").do(check_monthly_quarterly)
     schedule.every().day.at("11:45").do(execute_daily_split_buys)
     schedule.every().day.at("14:30").do(daily_fundamental_stop_loss)
-    schedule.every(30).minutes.do(run_risk_routine)
+    schedule.every(30).minutes.do(lambda: risk_manager.run_risk_monitor(kis, URL, APP_KEY, SECRET_KEY, token_manager.get_access_token(APP_KEY, SECRET_KEY), ACC_NO, app, CHANNEL_ID))
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -270,7 +266,6 @@ def cmd_balance(message, say):
                     ret_pct = ((curr_price - avg_price) / avg_price) * 100
                     ret_str = f"+{ret_pct:.2f}%" if ret_pct > 0 else f"{ret_pct:.2f}%"
                     msg.append(f"- {info['name']}({ticker}) [{mode}] : {qty}주 | 평단 {avg_price:,.0f}원 -> 현재 {curr_price:,}원 ({ret_str})")
-                    # 긴 문장을 내어쓰기 형태로 가독성 있게 출력
                     msg.append(f"  내러티브: {reason}\n")
         
         if split_orders:
@@ -300,7 +295,7 @@ def execute_unified_scan(say, candidates, keyword_msg):
     passed_stocks = quant_screener.run_unified_screener(unique_candidates, URL, APP_KEY, SECRET_KEY, token, DART_API_KEY)
     
     if not passed_stocks:
-        return say(f"[결과] {keyword_msg} 관련 종목 중 펀더멘털 스코어 70점(수급/실적)을 넘은 진짜 대장주가 전멸했습니다. (모두 가치함정 또는 역배열)")
+        return say(f"[결과] {keyword_msg} 관련 종목 중 펀더멘털 스코어 70점(수급/실적)을 넘은 진짜 대장주가 전멸했습니다.")
 
     theme_memory = load_json_from_gdrive("theme_context.json") or {}
     report_msg = [f"[ 100점 만점 펀더멘털 검증 완료 ({len(passed_stocks)}종목 합격) ]"]
@@ -322,7 +317,7 @@ def execute_unified_scan(say, candidates, keyword_msg):
 
 @app.message(re.compile(r"^!일일보고", re.IGNORECASE))
 def cmd_daily_report(message, say):
-    say("[System] 수동 일일 시황 브리핑 작성을 시작합니다 (산업 리포트 분석 포함). 약 1~2분 소요될 수 있습니다.")
+    say("[System] 수동 일일 시황 브리핑 작성을 시작합니다.")
     def bg_task():
         macro = macro_collector.get_macro_indicators()
         us_kw, kr_kw = ai_strategy.infer_news_keywords()
@@ -407,11 +402,13 @@ def manual_register_stock(message, say):
             except: pass
             if qty > 0: break
             
-        if qty <= 0: return say(f"[결과] 잔고에서 {ticker} 종목을 찾을 수 없습니다. (매수 체결 후 등록 요망)")
+        if qty <= 0: return say(f"[결과] 잔고에서 {ticker} 종목을 찾을 수 없습니다.")
 
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
         stock_name, div_yield, is_etf = get_stock_info_naver(ticker)
         if is_etf: return say(f"[거절] {stock_name}({ticker})은(는) ETF 종목입니다. 시스템 장부에 등록 불가.")
+        
+        now_str = datetime.now(KST).strftime("%Y-%m-%d")
         
         if ticker in portfolio:
             portfolio[ticker].update({"quantity": qty, "avg_price": avg_price, "mode_type": found_mode})
@@ -419,9 +416,8 @@ def manual_register_stock(message, say):
             save_json_to_gdrive(portfolio, "paper_portfolio.json")
             say(f"[Success] {stock_name}({ticker}) 기존 가상 장부 업데이트 완료.\n(잔고 연동: {qty}주 / 평단 {avg_price:,.0f}원)")
         else:
-            say(f"[System] {stock_name}({ticker}) 잔고 확인 완료 ({qty}주). AI 팩트체크 리포트 생성 중...")
+            say(f"[System] {stock_name}({ticker}) 잔고 확인 완료 ({qty}주). 최신 뉴스 스캔 및 AI 팩트체크 리포트 생성 중...")
             valuation = kis.get_valuation_data(ticker)
-            # 데이터 무결성 검증 추가
             if not valuation or int(valuation.get("current_price", 0)) <= 0:
                 return say(f"[에러] {stock_name} 주가 데이터를 가져오지 못했습니다.")
             valuation.update({"div_yield": div_yield, "name": stock_name})
@@ -429,14 +425,20 @@ def manual_register_stock(message, say):
             chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
             macro = macro_collector.get_macro_indicators()
             
-            report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, portfolio, valuation, theme_context="사용자 수동 발굴")
+            # [핵심] 수동등록 시 최신 뉴스 수집 기능 탑재
+            recent_news = news_crawler.get_latest_news(stock_name, limit=5, search_type="stock")
             
-            # re.DOTALL 적용하여 개행 무시하고 끝까지 가져옴
+            report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, portfolio, valuation, theme_context="사용자 수동 발굴", recent_news=recent_news)
+            
             summary_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
-            short_reason = summary_match.group(1).strip() if summary_match else "AI 팩트체크 완료"
+            short_reason = summary_match.group(1).strip()[:200] if summary_match else "AI 팩트체크 완료"
             reason_log = f"수동등록 | {short_reason}"
             
-            portfolio[ticker] = {"name": stock_name, "quantity": qty, "avg_price": avg_price, "high_water_mark": avg_price, "mode_type": found_mode, "reason": reason_log}
+            portfolio[ticker] = {
+                "name": stock_name, "quantity": qty, "avg_price": avg_price, 
+                "high_water_mark": avg_price, "mode_type": found_mode, 
+                "reason": reason_log, "buy_date": now_str
+            }
             save_json_to_gdrive(portfolio, "paper_portfolio.json")
             say(f"[ {stock_name}({ticker}) 수동 등록 완료 및 AI 리포트 ]\n- 연동: {qty}주 / 평단 {avg_price:,.0f}원\n- 펀더멘털 손절 감시 활성화\n\n{report}")
     threading.Thread(target=bg_task, daemon=True).start()
@@ -488,13 +490,12 @@ def process_ai_buy(ticker, budget, say):
                 return
 
             actual_mode = os.getenv("TRADING_MODE_NORMAL", "PAPER").upper()
-            say(f"[System] {stock_name}({ticker}) 최종 매수 승인 보고서 작성 중... (모드: {actual_mode})")
+            say(f"[System] {stock_name}({ticker}) 최신 뉴스 스캔 및 최종 매수 승인 보고서 작성 중... (모드: {actual_mode})")
             
             token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
             kis.set_token(token)
             valuation = kis.get_valuation_data(ticker)
             
-            # 데이터 무결성 검증 추가
             if not valuation or int(valuation.get("current_price", 0)) <= 0:
                 return say(f"[에러] {stock_name} 주가 데이터를 가져오지 못했습니다. KIS 서버 상태를 확인하세요.")
                 
@@ -505,11 +506,13 @@ def process_ai_buy(ticker, budget, say):
             pf = load_json_from_gdrive("paper_portfolio.json") or {}
             theme_memory = load_json_from_gdrive("theme_context.json") or {}
             
-            report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context=theme_memory.get(ticker, ""))
+            # [핵심] 매수 시 최신 뉴스 수집 기능 탑재
+            recent_news = news_crawler.get_latest_news(stock_name, limit=5, search_type="stock")
+            
+            report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context=theme_memory.get(ticker, ""), recent_news=recent_news)
             
             order_id = str(uuid.uuid4())
             
-            # re.DOTALL 적용하여 개행 무시하고 끝까지 가져옴
             summary_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
             full_reason = summary_match.group(1).strip() if summary_match else "AI 분석 완료"
 

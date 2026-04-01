@@ -25,8 +25,10 @@ def record_trade(ticker, name, action, price, quantity, reason):
     if "SMALL" in reason: mode_type = "SMALL"
     elif "NORMAL" in reason: mode_type = "NORMAL"
     
+    now_kst = datetime.now(KST)
+    
     trade_record = {
-        "timestamp": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": now_kst.strftime("%Y-%m-%d %H:%M:%S"),
         "ticker": ticker, "name": name, "action": action,
         "price": price, "quantity": quantity, "reason": reason, "mode_type": mode_type
     }
@@ -34,18 +36,26 @@ def record_trade(ticker, name, action, price, quantity, reason):
     save_json_to_gdrive(trades, "paper_trades.json")
     
     if ticker not in portfolio:
-        portfolio[ticker] = {"name": name, "quantity": 0, "avg_price": 0, "high_water_mark": 0, "mode_type": mode_type, "reason": "기록 없음"}
+        portfolio[ticker] = {
+            "name": name, "quantity": 0, "avg_price": 0, "high_water_mark": 0, 
+            "mode_type": mode_type, "reason": "기록 없음",
+            "buy_date": now_kst.strftime("%Y-%m-%d") # 최초 매수일 각인
+        }
         
     if action.upper() == "BUY":
         curr_qty = portfolio[ticker]["quantity"]
         curr_avg = portfolio[ticker].get("avg_price", 0)
+        
+        # 기존 보유량이 0이었다면 신규 진입이므로 매수일 갱신
+        if curr_qty == 0:
+            portfolio[ticker]["buy_date"] = now_kst.strftime("%Y-%m-%d")
+            
         total_value = (curr_qty * curr_avg) + (quantity * price)
         new_qty = curr_qty + quantity
         portfolio[ticker]["avg_price"] = total_value / new_qty if new_qty > 0 else 0
         portfolio[ticker]["quantity"] = new_qty
         portfolio[ticker]["high_water_mark"] = max(portfolio[ticker].get("high_water_mark", price), price)
         portfolio[ticker]["mode_type"] = mode_type 
-        # [수정] 짤림 방지: reason 전체를 저장 (글자 수 제한 제거)
         portfolio[ticker]["reason"] = reason 
     elif action.upper() == "SELL":
         curr_qty = portfolio[ticker]["quantity"]
@@ -55,3 +65,4 @@ def record_trade(ticker, name, action, price, quantity, reason):
             del portfolio[ticker]
             
     save_json_to_gdrive(portfolio, "paper_portfolio.json")
+

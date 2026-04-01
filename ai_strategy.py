@@ -10,9 +10,13 @@ def get_gemini_client():
         return None
     return genai.Client(api_key=api_key)
 
-def generate_text(prompt, model_name='gemini-2.5-flash'):
+def generate_text(prompt, model_name=None):
     client = get_gemini_client()
     if not client: return "AI 설정 오류: GOOGLE_API_KEY 누락"
+    
+    if model_name is None:
+        model_name = os.getenv("AI_MODEL_NAME", "gemini-2.5-flash")
+        
     try:
         response = client.models.generate_content(
             model=model_name,
@@ -25,10 +29,7 @@ def generate_text(prompt, model_name='gemini-2.5-flash'):
 
 def infer_news_keywords():
     prompt = "현재 글로벌 거시경제와 한국 주식시장에서 가장 중요한 핵심 키워드(산업, 매크로 등)를 미국용 1개, 한국용 1개만 쉼표로 구분하여 알려줘. 예시: 금리인하, 반도체"
-    res = generate_text(prompt)
-    parts = [p.strip() for p in res.split(',')]
-    if len(parts) >= 2: return parts[0], parts[1]
-    return "연준", "삼성전자"
+    return generate_text(prompt)
 
 def get_daily_market_report(macro, us_news, kr_news, research_reports, extra):
     prompt = f"""
@@ -80,7 +81,7 @@ def get_theme_stock_narrative(target_theme, name, ticker, fundamentals):
     """
     return generate_text(prompt)
 
-def get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context):
+def get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news):
     prompt = f"""
     당신은 '비대칭적 손익비'를 추구하는 실전 헤지펀드 매니저입니다.
     
@@ -89,13 +90,15 @@ def get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation
     거시경제: {macro}
     밸류에이션: {valuation}
     테마 컨텍스트: {theme_context}
+    [중요] 최신 핵심 뉴스 (상승 촉매제 판별용): {recent_news}
     
     [절대 규칙]
     1. 어려운 금융 전문 용어를 절대 쓰지 말고, 일상 언어로 설명하세요.
-    2. 분석 후 최종 투자 의견을 [적극찬성], [찬성], [반대], [적극반대] 중 하나로 글의 서두에 명확히 제시하세요.
-    3. 마지막 줄에 반드시 다음 형식으로 팩트 기반의 구체적인 요약을 작성하세요.
-       '[한줄요약] [투자의견] 구체적 매수사유 | [상승조건] (어떤 실적/매크로/이벤트가 발생해야 하는가) | [손절조건] (정확히 어떤 매크로 수치가 악화되거나 실적이 깨지면 팔 것인가)'
-    4. '상방잠재력', '거시환경 개선' 같은 추상적인 단어를 엄격히 금지합니다. 'WTI 90불 돌파 시', '영업이익 적자 전환 시', '미 국채 금리 4.5% 돌파 시' 등 측정 가능하고 구체적인 조건을 반드시 명시하세요.
+    2. 제공된 '최신 핵심 뉴스'를 최우선으로 검토하십시오. 과거 재무제표가 부실하더라도, 뉴스에 정부 정책, 대규모 수주, 턴어라운드 등 강력한 주가 상승 동력(모멘텀)이 있다면 이를 근거로 과감하게 긍정적 평가를 내리십시오.
+    3. 분석 후 최종 투자 의견을 [적극찬성], [찬성], [반대], [적극반대] 중 하나로 글의 서두에 명확히 제시하세요.
+    4. 마지막 줄에 반드시 다음 형식으로 팩트 기반의 구체적인 요약을 작성하세요.
+       '[한줄요약] [투자의견] 뉴스와 가치를 종합한 매수사유 | [상승조건] (어떤 실적/매크로/이벤트가 발생해야 하는가) | [손절조건] (정확히 어떤 매크로 수치가 악화되거나 실적이 깨지면 팔 것인가)'
+    5. '상방잠재력', '거시환경 개선' 같은 추상적인 단어를 엄격히 금지합니다. 측정 가능하고 구체적인 조건을 반드시 명시하세요.
     이모지 사용 금지.
     """
     return generate_text(prompt)
@@ -113,7 +116,7 @@ def check_fundamental_damage(ticker, stock_name, chart_30d, macro, valuation, th
     
     [절대 규칙]
     1. 주가 하락 등 '단기 노이즈'는 무시하세요.
-    2. 제공된 '초기 매수이유 및 설정된 손절조건'을 꼼꼼히 읽고, 사용자가 설정했던 그 구체적인 악재(예: WTI 특정 가격 돌파, 특정 거시지표 악화 등)가 현재 시점에서 실제로 발생했는지 냉정하게 대조하세요.
+    2. 제공된 '초기 매수이유 및 설정된 손절조건'을 꼼꼼히 읽고, 설정했던 구체적인 악재가 현재 시점에서 실제로 발생했는지 냉정하게 대조하세요.
     3. 사전에 정의된 [손절조건]에 명확히 도달했거나 기업 본질이 파괴되었다면 서두에 [펀더멘털훼손] 이라고 쓰세요.
     4. 아직 손절조건에 도달하지 않았고 기대했던 잠재력이 살아있다면 [보유유지] 라고 쓰세요.
     5. 그 뒤에 왜 그렇게 판단했는지 초기 손절조건과 현재 지표를 대조하여 3문장 이내로 설명하세요.
@@ -135,8 +138,9 @@ def match_naver_themes(keyword, theme_list):
     client = get_gemini_client()
     if not client: return []
     try:
+        model_name = os.getenv("AI_MODEL_NAME", "gemini-2.5-flash")
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=model_name,
             contents=prompt
         )
         matched = [t.strip() for t in response.text.split(',') if t.strip()]
