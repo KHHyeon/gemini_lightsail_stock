@@ -58,38 +58,57 @@ def daily_routine():
 
 def weekly_routine():
     if datetime.now(KST).weekday() >= 5: return
-    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 주간 포트폴리오 진단을 시작합니다.")
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 주간 투자 이유(상승조건) 유효성 진단을 시작합니다.")
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
     news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=3, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
     report = ai_strategy.get_weekly_portfolio_report(portfolio, news_dict)
-    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[주간 포트폴리오 진단]\n\n{report}")
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[주간 이유 확인 리포트]\n\n{report}")
 
 def monthly_routine():
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
     news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=4, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
     report = ai_strategy.get_monthly_portfolio_report(portfolio, news_dict)
-    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[월간 포트폴리오 리포트]\n\n{report}")
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[월간 시장 트렌드 및 리밸런싱 리포트]\n\n{report}")
 
 def quarterly_routine():
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
     news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=5, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
     report = ai_strategy.get_quarterly_portfolio_report(portfolio, news_dict)
-    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[분기 포트폴리오 리포트]\n\n{report}")
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[분기 핵심 실적 및 펀더멘털 점검 리포트]\n\n{report}")
 
-def run_risk_routine():
+def alert_manual_stocks():
     if not market_hours.is_market_open(): return
+    portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+    if not portfolio: return
+    
     token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-    risk_manager.run_risk_monitor(kis, URL, APP_KEY, SECRET_KEY, token, ACC_NO, app, CHANNEL_ID)
+    kis.set_token(token)
+    messages = []
+    
+    for ticker, info in portfolio.items():
+        if "수동등록" in info.get("reason", ""):
+            val = kis.get_valuation_data(ticker)
+            if not val or int(val.get("current_price", 0)) <= 0: continue
+            current_price = int(val["current_price"])
+            
+            chart_data_list = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=5)
+            if not chart_data_list or len(chart_data_list) < 5: continue
+            
+            ma5 = sum(day['close'] for day in chart_data_list) / 5
+            
+            if current_price <= ma5 * 1.03:
+                messages.append(f"- {info['name']}({ticker}) : 현재가 {current_price:,}원 (5일선 {int(ma5):,}원 부근)")
+                
+    if messages and CHANNEL_ID:
+        app.client.chat_postMessage(channel=CHANNEL_ID, text="[수동 등록 종목 매수 타점 알림]\n현재 아래 수동 종목들이 매수 타이밍(눌림목)에 진입했습니다. 최종 매수 여부를 직접 결정해 주십시오.\n" + "\n".join(messages))
 
 def daily_fundamental_stop_loss():
     if not market_hours.is_market_open(): return
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
-    
-    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 14:30 펀더멘털 손절매 감시를 시작합니다. (구체적 손절조건 도달 여부 점검)")
     
     token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
     kis.set_token(token)
@@ -98,6 +117,7 @@ def daily_fundamental_stop_loss():
     
     keys_to_delete = []
     messages = []
+    portfolio_updated = False
     
     for ticker, info in portfolio.items():
         qty = info.get("quantity", 0)
@@ -106,26 +126,46 @@ def daily_fundamental_stop_loss():
         name = info.get("name", ticker)
         mode_type = info.get("mode_type", "PAPER_ONLY")
         context = info.get("reason", "매수 근거 기록 없음")
+        avg_price = info.get("avg_price", 0)
+        high_water_mark = info.get("high_water_mark", avg_price)
         
         val = kis.get_valuation_data(ticker)
         if not val or int(val.get("current_price", 0)) <= 0: continue
             
         current_price = int(val["current_price"])
-        chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
         
+        if current_price > high_water_mark:
+            info["high_water_mark"] = current_price
+            portfolio_updated = True
+            
+        if avg_price > 0 and current_price <= avg_price * 0.90:
+            reason = "원금 방어선(-10%) 이탈 (기계적 손절)"
+            res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", reason, mode_type)
+            messages.append(res["msg"])
+            keys_to_delete.append(ticker)
+            continue
+            
+        if avg_price > 0 and current_price >= avg_price * 1.10:
+            reason = "목표 수익(+10%) 도달 (고정 익절)"
+            res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", reason, mode_type)
+            messages.append(res["msg"])
+            keys_to_delete.append(ticker)
+            continue
+        
+        chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
         report = ai_strategy.check_fundamental_damage(ticker, name, chart_30d, macro, val, context)
         
         if "[펀더멘털훼손]" in report:
-            reason = "AI 펀더멘털 훼손 진단 (사전 설정 손절조건 도달)"
+            reason = "AI 팩트체크: 투자 이유 훼손 (치명적 악재 발생)"
             res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", reason, mode_type)
-            messages.append(f"[구조적 손절매 발동] {name}({ticker}) 전량 매도\n- 사유: {reason}\n- 코멘트: {report}")
+            messages.append(f"{res['msg']}\n- 코멘트: {report}")
             keys_to_delete.append(ticker)
         
         time.sleep(3)
         
     for k in keys_to_delete: del portfolio[k]
-    if keys_to_delete: save_json_to_gdrive(portfolio, "paper_portfolio.json")
-    if messages and CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[AI 펀더멘털 진단 결과]\n" + "\n".join(messages))
+    if keys_to_delete or portfolio_updated: save_json_to_gdrive(portfolio, "paper_portfolio.json")
+    if messages and CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[3중 철통 방어막 및 AI 팩트 진단 결과]\n" + "\n\n".join(messages))
 
 def execute_daily_split_buys():
     if not market_hours.is_market_open(): return
@@ -174,8 +214,8 @@ def execute_daily_split_buys():
         if current_price <= ma5 * 1.03:
             qty = int(daily_budget // current_price)
             if qty > 0:
-                order_mgr.execute_order(ticker, name, qty, current_price, "buy", f"{reason} ({nth_round}/10회차 눌림목)", mode_type)
-                messages.append(f"[매수 성공] {name}({ticker}): {qty}주 매수 완료 ({nth_round}/10회차) | 주가 <= 5일선+3%")
+                res = order_mgr.execute_order(ticker, name, qty, current_price, "buy", f"{reason} ({nth_round}/10회차 눌림목)", mode_type)
+                messages.append(res["msg"])
                 info["remaining_days"] -= 1
             else:
                 messages.append(f"[예산 부족] {name}({ticker}): 스킵 ({nth_round}/10회차)")
@@ -207,12 +247,17 @@ def check_monthly_quarterly():
         else:
             monthly_routine()
 
+def afternoon_routine():
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 14:30 장 마감 전 안전 진단(3중 방어막) 및 분할 매수 루틴을 시작합니다.")
+    daily_fundamental_stop_loss()
+    execute_daily_split_buys()
+
 def run_scheduler():
     schedule.every().day.at("08:45").do(daily_routine)
     schedule.every().monday.at("09:45").do(weekly_routine)
     schedule.every().day.at("10:45").do(check_monthly_quarterly)
-    schedule.every().day.at("11:45").do(execute_daily_split_buys)
-    schedule.every().day.at("14:30").do(daily_fundamental_stop_loss)
+    schedule.every().day.at("14:20").do(alert_manual_stocks)
+    schedule.every().day.at("14:30").do(afternoon_routine)
     schedule.every(30).minutes.do(lambda: risk_manager.run_risk_monitor(kis, URL, APP_KEY, SECRET_KEY, token_manager.get_access_token(APP_KEY, SECRET_KEY), ACC_NO, app, CHANNEL_ID))
     while True:
         schedule.run_pending()
@@ -266,6 +311,9 @@ def cmd_balance(message, say):
                     ret_pct = ((curr_price - avg_price) / avg_price) * 100
                     ret_str = f"+{ret_pct:.2f}%" if ret_pct > 0 else f"{ret_pct:.2f}%"
                     msg.append(f"- {info['name']}({ticker}) [{mode}] : {qty}주 | 평단 {avg_price:,.0f}원 -> 현재 {curr_price:,}원 ({ret_str})")
+                    msg.append(f"  내러티브: {reason}\n")
+                elif qty == 0:
+                    msg.append(f"- {info['name']}({ticker}) [{mode}] : 관심 등록 종목 (0주 보유 중)")
                     msg.append(f"  내러티브: {reason}\n")
         
         if split_orders:
@@ -330,35 +378,35 @@ def cmd_daily_report(message, say):
 
 @app.message(re.compile(r"^!주간보고", re.IGNORECASE))
 def cmd_weekly_report(message, say):
-    say("[System] 수동 주간 포트폴리오 진단을 시작합니다.")
+    say("[System] 수동 주간 투자 이유(상승조건) 유효성 진단을 시작합니다.")
     def bg_task():
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
         if not portfolio: return say("[결과] 장부에 보유 중인 종목이 없습니다.")
         news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=3, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
         report = ai_strategy.get_weekly_portfolio_report(portfolio, news_dict)
-        say(f"[주간 포트폴리오 진단]\n\n{report}")
+        say(f"[주간 이유 확인 리포트]\n\n{report}")
     threading.Thread(target=bg_task, daemon=True).start()
 
 @app.message(re.compile(r"^!월간보고", re.IGNORECASE))
 def cmd_monthly_report(message, say):
-    say("[System] 수동 월간 포트폴리오 리포트 작성을 시작합니다.")
+    say("[System] 수동 월간 시장 트렌드 및 리밸런싱 리포트 작성을 시작합니다.")
     def bg_task():
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
         if not portfolio: return say("[결과] 장부에 보유 중인 종목이 없습니다.")
         news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=4, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
         report = ai_strategy.get_monthly_portfolio_report(portfolio, news_dict)
-        say(f"[월간 포트폴리오 리포트]\n\n{report}")
+        say(f"[월간 시장 트렌드 및 리밸런싱 리포트]\n\n{report}")
     threading.Thread(target=bg_task, daemon=True).start()
 
 @app.message(re.compile(r"^!분기보고", re.IGNORECASE))
 def cmd_quarterly_report(message, say):
-    say("[System] 수동 분기 포트폴리오 리포트 작성을 시작합니다.")
+    say("[System] 수동 분기 핵심 실적 및 펀더멘털 점검 리포트 작성을 시작합니다.")
     def bg_task():
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
         if not portfolio: return say("[결과] 장부에 보유 중인 종목이 없습니다.")
         news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=5, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
         report = ai_strategy.get_quarterly_portfolio_report(portfolio, news_dict)
-        say(f"[분기 포트폴리오 리포트]\n\n{report}")
+        say(f"[분기 핵심 실적 및 펀더멘털 점검 리포트]\n\n{report}")
     threading.Thread(target=bg_task, daemon=True).start()
 
 @app.message(re.compile(r"^!수동등록", re.IGNORECASE))
@@ -367,8 +415,8 @@ def manual_register_stock(message, say):
     parts = text.split()
     if len(parts) < 2: return say("[Error] 사용법: !수동등록 [종목코드]")
         
-    ticker = re.sub(r'[^\d]', '', parts[1])[:6]
-    say(f"[System] {ticker} KIS 증권사 잔고 조회를 시작합니다...")
+    ticker = re.sub(r'[^A-Za-z0-9]', '', parts[1])[:6].upper()
+    say(f"[System] {ticker} KIS 증권사 잔고 조회 및 AI 팩트체크를 시작합니다...")
     
     def bg_task():
         token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
@@ -397,12 +445,17 @@ def manual_register_stock(message, say):
                             if hldg_qty > 0:
                                 qty = hldg_qty
                                 avg_price = float(item.get("pchs_avg_pric", "0"))
-                                found_mode = "NORMAL" if test_mode == "LIVE" else "PAPER_ONLY"
+                                found_mode = "LIVE_MANUAL" if test_mode == "LIVE" else "PAPER_ONLY"
                                 break
             except: pass
             if qty > 0: break
             
-        if qty <= 0: return say(f"[결과] 잔고에서 {ticker} 종목을 찾을 수 없습니다.")
+        if qty <= 0:
+            say(f"[알림] 잔고에서 {ticker} 종목을 찾을 수 없으므로, 신규 관심 종목(0주)으로 가상 장부에 등록합니다.")
+            qty = 0
+            found_mode = "PAPER_ONLY"
+            val = kis.get_valuation_data(ticker)
+            avg_price = float(val.get("current_price", "0")) if val else 0.0
 
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
         stock_name, div_yield, is_etf = get_stock_info_naver(ticker)
@@ -410,37 +463,36 @@ def manual_register_stock(message, say):
         
         now_str = datetime.now(KST).strftime("%Y-%m-%d")
         
+        # [수정됨] 기존 종목이든 신규 종목이든 항상 AI 리포트를 새롭게 생성하여 장부를 덮어씁니다 (잘림 현상 복구)
+        valuation = kis.get_valuation_data(ticker)
+        if not valuation or int(valuation.get("current_price", 0)) <= 0:
+            return say(f"[에러] {stock_name} 주가 데이터를 가져오지 못했습니다.")
+        valuation.update({"div_yield": div_yield, "name": stock_name})
+        
+        chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
+        macro = macro_collector.get_macro_indicators()
+        recent_news = news_crawler.get_latest_news(stock_name, limit=5, search_type="stock")
+        
+        report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, portfolio, valuation, theme_context="사용자 수동 발굴", recent_news=recent_news)
+        
+        summary_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
+        short_reason = summary_match.group(1).strip() if summary_match else "AI 팩트체크 완료"
+        reason_log = f"수동등록 | {short_reason}"
+        
         if ticker in portfolio:
-            portfolio[ticker].update({"quantity": qty, "avg_price": avg_price, "mode_type": found_mode})
+            portfolio[ticker].update({"quantity": qty, "avg_price": avg_price, "mode_type": found_mode, "reason": reason_log})
             portfolio[ticker]["high_water_mark"] = max(portfolio[ticker].get("high_water_mark", avg_price), avg_price)
             save_json_to_gdrive(portfolio, "paper_portfolio.json")
-            say(f"[Success] {stock_name}({ticker}) 기존 가상 장부 업데이트 완료.\n(잔고 연동: {qty}주 / 평단 {avg_price:,.0f}원)")
+            say(f"[Success] {stock_name}({ticker}) 기존 장부 업데이트 및 펀더멘털 최신화 완료.\n(잔고 연동: {qty}주 / 평단 {avg_price:,.0f}원)\n\n{report}")
         else:
-            say(f"[System] {stock_name}({ticker}) 잔고 확인 완료 ({qty}주). 최신 뉴스 스캔 및 AI 팩트체크 리포트 생성 중...")
-            valuation = kis.get_valuation_data(ticker)
-            if not valuation or int(valuation.get("current_price", 0)) <= 0:
-                return say(f"[에러] {stock_name} 주가 데이터를 가져오지 못했습니다.")
-            valuation.update({"div_yield": div_yield, "name": stock_name})
-            
-            chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
-            macro = macro_collector.get_macro_indicators()
-            
-            # [핵심] 수동등록 시 최신 뉴스 수집 기능 탑재
-            recent_news = news_crawler.get_latest_news(stock_name, limit=5, search_type="stock")
-            
-            report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, portfolio, valuation, theme_context="사용자 수동 발굴", recent_news=recent_news)
-            
-            summary_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
-            short_reason = summary_match.group(1).strip()[:200] if summary_match else "AI 팩트체크 완료"
-            reason_log = f"수동등록 | {short_reason}"
-            
             portfolio[ticker] = {
                 "name": stock_name, "quantity": qty, "avg_price": avg_price, 
                 "high_water_mark": avg_price, "mode_type": found_mode, 
                 "reason": reason_log, "buy_date": now_str
             }
             save_json_to_gdrive(portfolio, "paper_portfolio.json")
-            say(f"[ {stock_name}({ticker}) 수동 등록 완료 및 AI 리포트 ]\n- 연동: {qty}주 / 평단 {avg_price:,.0f}원\n- 펀더멘털 손절 감시 활성화\n\n{report}")
+            say(f"[ {stock_name}({ticker}) 수동 등록 완료 및 AI 리포트 ]\n- 연동: {qty}주 / 평단 {avg_price:,.0f}원\n- 3중 방어막 손절 감시 활성화 완료\n\n{report}")
+            
     threading.Thread(target=bg_task, daemon=True).start()
 
 @app.message(re.compile(r"^!발굴", re.IGNORECASE))
@@ -506,7 +558,6 @@ def process_ai_buy(ticker, budget, say):
             pf = load_json_from_gdrive("paper_portfolio.json") or {}
             theme_memory = load_json_from_gdrive("theme_context.json") or {}
             
-            # [핵심] 매수 시 최신 뉴스 수집 기능 탑재
             recent_news = news_crawler.get_latest_news(stock_name, limit=5, search_type="stock")
             
             report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context=theme_memory.get(ticker, ""), recent_news=recent_news)
@@ -538,7 +589,7 @@ def ai_buy_stock(message, say):
     parts = text.split()
     if len(parts) < 3: return say("[Error] 사용법: !ai매수 [종목코드] [총예산]\n예시: !ai매수 005930 1000000")
     
-    ticker = re.sub(r'[^\d]', '', parts[1])[:6]
+    ticker = re.sub(r'[^A-Za-z0-9]', '', parts[1])[:6].upper()
     budget = int(re.sub(r'[^\d]', '', parts[2]))
     process_ai_buy(ticker, budget, say)
 
@@ -562,7 +613,7 @@ def action_approve_buy(ack, body, respond):
             "remaining_days": 10, "reason": reason, "mode_type": order["mode_type"] 
         }
         save_json_to_gdrive(split_orders, "split_orders.json")
-        respond(text=f"[Success] <@{body['user']['id']}> 님이 승인했습니다.\n{res['msg']}\n(매 평일 11시 45분 5일선 눌림목 도달 시에만 기계적 매수)", replace_original=True)
+        respond(text=f"[Success] <@{body['user']['id']}> 님이 승인했습니다.\n{res['msg']}\n(매 평일 14시 30분 5일선 눌림목 도달 시에만 기계적 매수)", replace_original=True)
     else: respond(text=f"[Fail] {res['msg']}", replace_original=True)
 
 @app.action("reject_buy")
@@ -586,3 +637,4 @@ if __name__ == "__main__":
     print("Log: [System] Active KST", flush=True)
     threading.Thread(target=run_scheduler, daemon=True).start()
     SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN")).start()
+

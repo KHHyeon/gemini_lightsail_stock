@@ -14,10 +14,13 @@ class OrderManager:
         self.acc_no = acc_no 
 
     def execute_order(self, ticker, name, quantity, current_price, side, reason, mode_type="NORMAL"):
-        # [핵심 보완] 과거 기록이거나 명시되지 않은 경우 무조건 PAPER로 강제
+        # [수정됨] 수동 등록 종목의 독립성 보장 로직
         if mode_type == "PAPER_ONLY":
             mode = "PAPER"
+        elif mode_type == "LIVE_MANUAL":
+            mode = "LIVE" # 전체 환경변수와 무관하게 무조건 실전 매도 집행
         else:
+            # AI 자동 발굴 종목은 글로벌 환경변수를 따름
             env_var = "TRADING_MODE_SMALL" if mode_type == "SMALL" else "TRADING_MODE_NORMAL"
             mode = os.getenv(env_var, "PAPER").upper()
             

@@ -47,8 +47,10 @@ def get_stocks_by_theme_link(theme_link, theme_name):
             href = a_tag.get('href', '')
             if 'code=' in href:
                 ticker = href.split('code=')[-1]
-                if ticker and ticker.isdigit():
-                    stocks.append({'name': stock_name, 'ticker': ticker, 'target_theme': theme_name})
+                # [수정됨] isdigit() -> isalnum()을 통해 알파벳과 숫자 혼용 허용
+                if ticker and ticker.isalnum():
+                    stocks.append({'name': stock_name, 'ticker': ticker.upper(), 'target_theme': theme_name})
     except Exception as e:
         print(f"Log: [Theme Crawler] Stocks error: {e}")
     return stocks
+
