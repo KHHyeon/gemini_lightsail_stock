@@ -28,6 +28,12 @@ app = App(token=os.getenv("SLACK_TOKEN"))
 kis = KISClient()
 pending_orders = {}
 
+def get_auth_kis():
+    """토큰 매니저와 KIS 클라이언트를 동기화하여 반환하는 헬퍼 함수"""
+    token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
+    kis.set_token(token)
+    return token
+
 def get_stock_info_naver(ticker):
     name, div, is_etf = ticker, 0.0, False
     try:
@@ -45,8 +51,9 @@ def get_stock_info_naver(ticker):
     except: pass
     return name, div, is_etf
 
+# --- [ 정기 보고 스케줄러 로직 ] ---
 def daily_routine():
-    if datetime.now(KST).weekday() >= 5: return
+    if not market_hours.is_market_open(): return
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 일일 시황 브리핑 작성을 시작합니다.")
     macro = macro_collector.get_macro_indicators()
     us_kw, kr_kw = ai_strategy.infer_news_keywords()
@@ -57,7 +64,7 @@ def daily_routine():
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[일간 마감 브리핑]\n\n{report}")
 
 def weekly_routine():
-    if datetime.now(KST).weekday() >= 5: return
+    if not market_hours.is_market_open(): return
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 주간 투자 이유(상승조건) 유효성 진단을 시작합니다.")
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
@@ -79,13 +86,13 @@ def quarterly_routine():
     report = ai_strategy.get_quarterly_portfolio_report(portfolio, news_dict)
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[분기 핵심 실적 및 펀더멘털 점검 리포트]\n\n{report}")
 
+# --- [ 자동 매매 및 방어막 로직 ] ---
 def alert_manual_stocks():
     if not market_hours.is_market_open(): return
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
     
-    token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-    kis.set_token(token)
+    token = get_auth_kis()
     messages = []
     
     for ticker, info in portfolio.items():
@@ -106,6 +113,10 @@ def alert_manual_stocks():
         app.client.chat_postMessage(channel=CHANNEL_ID, text="[수동 등록 종목 매수 타점 알림]\n현재 아래 수동 종목들이 매수 타이밍(눌림목)에 진입했습니다. 최종 매수 여부를 직접 결정해 주십시오.\n" + "\n".join(messages))
 
 def daily_fundamental_stop_loss():
+    """
+    14:30에 실행되는 심층 방어막입니다.
+    가격 이탈(하드스탑/추적익절) 검사와 함께 AI 펀더멘털 훼손 검사를 병행합니다.
+    """
     if not market_hours.is_market_open(): return
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
@@ -113,8 +124,7 @@ def daily_fundamental_stop_loss():
     split_orders = load_json_from_gdrive("split_orders.json") or {}
     split_orders_updated = False
     
-    token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-    kis.set_token(token)
+    token = get_auth_kis()
     order_mgr = OrderManager(URL, APP_KEY, SECRET_KEY, token, ACC_NO)
     macro = macro_collector.get_macro_indicators()
     
@@ -201,8 +211,7 @@ def execute_daily_split_buys():
     split_orders = load_json_from_gdrive("split_orders.json") or {}
     if not split_orders: return
     
-    token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-    kis.set_token(token)
+    token = get_auth_kis()
     order_mgr = OrderManager(URL, APP_KEY, SECRET_KEY, token, ACC_NO)
     
     messages = []
@@ -283,9 +292,7 @@ def run_scheduler():
 def cmd_balance(message, say):
     say("[System] KIS 실전 계좌 및 AI 가상 장부 현황을 조회합니다...")
     def bg_task():
-        token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-        kis.set_token(token)
-        
+        get_auth_kis()
         cash_balance = kis.get_psbl_cash()
         
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
@@ -338,7 +345,7 @@ def execute_unified_scan(say, candidates, keyword_msg):
         return say(f"[Error] {keyword_msg} 소속 종목을 추출하지 못했습니다.")
         
     say(f"[System] 총 {len(unique_candidates)}개 종목 대상 100점 만점 펀더멘털 스크리닝(차트/수급/실적YoY)을 시작합니다. (API 딜레이로 약 1~3분 소요)")
-    token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
+    token = get_auth_kis()
     
     passed_stocks = quant_screener.run_unified_screener(unique_candidates, URL, APP_KEY, SECRET_KEY, token, DART_API_KEY)
     
@@ -419,8 +426,7 @@ def manual_register_stock(message, say):
     say(f"[System] {ticker} KIS 증권사 잔고 조회 및 AI 팩트체크를 시작합니다...")
     
     def bg_task():
-        token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-        kis.set_token(token)
+        token = get_auth_kis()
         qty, avg_price, found_mode = 0, 0.0, "PAPER_ONLY"
         
         for test_mode in ["LIVE", "PAPER"]:
@@ -521,8 +527,7 @@ def process_ai_buy(ticker, budget, say):
             actual_mode = os.getenv("TRADING_MODE_NORMAL", "PAPER").upper()
             say(f"[System] {stock_name}({ticker}) 최신 뉴스 스캔 및 최종 매수 승인 보고서 작성 중... (모드: {actual_mode})")
             
-            token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-            kis.set_token(token)
+            token = get_auth_kis()
             valuation = kis.get_valuation_data(ticker)
             
             if not valuation or int(valuation.get("current_price", 0)) <= 0:
