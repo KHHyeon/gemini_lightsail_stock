@@ -110,6 +110,9 @@ def daily_fundamental_stop_loss():
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
     
+    split_orders = load_json_from_gdrive("split_orders.json") or {}
+    split_orders_updated = False
+    
     token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
     kis.set_token(token)
     order_mgr = OrderManager(URL, APP_KEY, SECRET_KEY, token, ACC_NO)
@@ -136,35 +139,44 @@ def daily_fundamental_stop_loss():
         
         if current_price > high_water_mark:
             info["high_water_mark"] = current_price
+            high_water_mark = current_price
             portfolio_updated = True
             
+        trigger_reason = None
+        report_comment = ""
+        
+        # 1. 기계적 원금 방어 (-10%)
         if avg_price > 0 and current_price <= avg_price * 0.90:
-            reason = "원금 방어선(-10%) 이탈 (기계적 손절)"
-            res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", reason, mode_type)
-            messages.append(res["msg"])
+            trigger_reason = "원금 방어선(-10%) 이탈 (기계적 손절)"
+        # 2. 최고점 대비 추적 하락선 (-10%)
+        elif avg_price > 0 and high_water_mark > avg_price and current_price <= high_water_mark * 0.90:
+            trigger_reason = "최고점 대비 하락선(-10%) 이탈 (추적 익절/손절)"
+        # 3. 펀더멘털 훼손 검사
+        else:
+            chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
+            report = ai_strategy.check_fundamental_damage(ticker, name, chart_30d, macro, val, context)
+            if "[펀더멘털훼손]" in report:
+                trigger_reason = "AI 팩트체크: 투자 이유 훼손 (치명적 악재 발생)"
+                report_comment = f"\n- 코멘트: {report}"
+        
+        if trigger_reason:
+            res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", trigger_reason, mode_type)
+            messages.append(res["msg"] + report_comment)
             keys_to_delete.append(ticker)
-            continue
             
-        if avg_price > 0 and current_price >= avg_price * 1.10:
-            reason = "목표 수익(+10%) 도달 (고정 익절)"
-            res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", reason, mode_type)
-            messages.append(res["msg"])
-            keys_to_delete.append(ticker)
-            continue
-        
-        chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
-        report = ai_strategy.check_fundamental_damage(ticker, name, chart_30d, macro, val, context)
-        
-        if "[펀더멘털훼손]" in report:
-            reason = "AI 팩트체크: 투자 이유 훼손 (치명적 악재 발생)"
-            res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", reason, mode_type)
-            messages.append(f"{res['msg']}\n- 코멘트: {report}")
-            keys_to_delete.append(ticker)
-        
-        time.sleep(3)
+            split_keys_to_delete = [oid for oid, s_info in split_orders.items() if s_info["ticker"] == ticker]
+            if split_keys_to_delete:
+                for k in split_keys_to_delete:
+                    del split_orders[k]
+                split_orders_updated = True
+                messages.append(f"  └── [연쇄 조치] {name} 3중 방어막 가동에 따라 대기 중인 잔여 분할 매수 스케줄 강제 취소.")
+            
+            time.sleep(3)
         
     for k in keys_to_delete: del portfolio[k]
+    
     if keys_to_delete or portfolio_updated: save_json_to_gdrive(portfolio, "paper_portfolio.json")
+    if split_orders_updated: save_json_to_gdrive(split_orders, "split_orders.json")
     if messages and CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[3중 철통 방어막 및 AI 팩트 진단 결과]\n" + "\n\n".join(messages))
 
 def execute_daily_split_buys():
@@ -248,6 +260,7 @@ def check_monthly_quarterly():
             monthly_routine()
 
 def afternoon_routine():
+    if not market_hours.is_market_open(): return
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 14:30 장 마감 전 안전 진단(3중 방어막) 및 분할 매수 루틴을 시작합니다.")
     daily_fundamental_stop_loss()
     execute_daily_split_buys()
@@ -271,22 +284,10 @@ def cmd_balance(message, say):
     say("[System] KIS 실전 계좌 및 AI 가상 장부 현황을 조회합니다...")
     def bg_task():
         token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
-        cash_url = f"{URL}/uapi/domestic-stock/v1/trading/inquire-psbl-order"
-        headers = {
-            "Content-Type": "application/json", "authorization": f"Bearer {token}",
-            "appkey": APP_KEY, "appsecret": SECRET_KEY, "tr_id": "TTTC8908R"
-        }
-        params = {
-            "CANO": ACC_NO[:8], "ACNT_PRDT_CD": ACC_NO[8:], "PDNO": "",
-            "ORD_UNPR": "", "ORD_DVSN": "01", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"
-        }
-        cash_balance = 0
-        try:
-            res = requests.get(cash_url, headers=headers, params=params, timeout=5)
-            if res.status_code == 200:
-                cash_balance = int(res.json().get("output", {}).get("ord_psbl_cash", "0"))
-        except: pass
-
+        kis.set_token(token)
+        
+        cash_balance = kis.get_psbl_cash()
+        
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
         split_orders = load_json_from_gdrive("split_orders.json") or {}
         
@@ -297,7 +298,6 @@ def cmd_balance(message, say):
             msg.append("텅~ (현재 장부에 감시 중인 보유 종목이 없습니다.)")
         else:
             msg.append("[ 보유 종목 리스크 감시 현황 ]")
-            kis.set_token(token)
             for ticker, info in portfolio.items():
                 qty = info.get("quantity", 0)
                 avg_price = info.get("avg_price", 0)
@@ -424,36 +424,14 @@ def manual_register_stock(message, say):
         qty, avg_price, found_mode = 0, 0.0, "PAPER_ONLY"
         
         for test_mode in ["LIVE", "PAPER"]:
-            tr_id = "TTTC8434R" if test_mode == "LIVE" else "VTTC8434R"
-            url = f"{URL}/uapi/domestic-stock/v1/trading/inquire-balance"
-            headers = {
-                "Content-Type": "application/json", "authorization": f"Bearer {token}",
-                "appkey": APP_KEY, "appsecret": SECRET_KEY, "tr_id": tr_id
-            }
-            params = {
-                "CANO": ACC_NO[:8], "ACNT_PRDT_CD": ACC_NO[8:], "AFHR_FLPR_YN": "N",
-                "OFL_YN": "", "INQR_DVSN": "01", "UNPR_DVSN": "01",
-                "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N",
-                "PRCS_DVSN": "00", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
-            }
-            try:
-                res = requests.get(url, headers=headers, params=params, timeout=5)
-                if res.status_code == 200:
-                    for item in res.json().get("output1", []):
-                        if item.get("pdno") == ticker:
-                            hldg_qty = int(item.get("hldg_qty", "0"))
-                            if hldg_qty > 0:
-                                qty = hldg_qty
-                                avg_price = float(item.get("pchs_avg_pric", "0"))
-                                found_mode = "LIVE_MANUAL" if test_mode == "LIVE" else "PAPER_ONLY"
-                                break
-            except: pass
-            if qty > 0: break
+            q, a_price = kis.get_real_holding_qty(ticker, test_mode)
+            if q > 0:
+                qty, avg_price = q, a_price
+                found_mode = "LIVE_MANUAL" if test_mode == "LIVE" else "PAPER_ONLY"
+                break
             
         if qty <= 0:
             say(f"[알림] 잔고에서 {ticker} 종목을 찾을 수 없으므로, 신규 관심 종목(0주)으로 가상 장부에 등록합니다.")
-            qty = 0
-            found_mode = "PAPER_ONLY"
             val = kis.get_valuation_data(ticker)
             avg_price = float(val.get("current_price", "0")) if val else 0.0
 
@@ -463,7 +441,6 @@ def manual_register_stock(message, say):
         
         now_str = datetime.now(KST).strftime("%Y-%m-%d")
         
-        # [수정됨] 기존 종목이든 신규 종목이든 항상 AI 리포트를 새롭게 생성하여 장부를 덮어씁니다 (잘림 현상 복구)
         valuation = kis.get_valuation_data(ticker)
         if not valuation or int(valuation.get("current_price", 0)) <= 0:
             return say(f"[에러] {stock_name} 주가 데이터를 가져오지 못했습니다.")
