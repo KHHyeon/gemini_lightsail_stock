@@ -28,11 +28,17 @@ app = App(token=os.getenv("SLACK_TOKEN"))
 kis = KISClient()
 pending_orders = {}
 
-def get_auth_kis():
-    """토큰 매니저와 KIS 클라이언트를 동기화하여 반환하는 헬퍼 함수"""
-    token = token_manager.get_access_token(APP_KEY, SECRET_KEY)
+def get_auth_kis(force=False):
+    """token_manager를 통해 토큰을 가져오고(캐시 또는 신규), KIS 클라이언트에 세팅합니다."""
+    token = token_manager.get_access_token(APP_KEY, SECRET_KEY, force=force)
     kis.set_token(token)
     return token
+
+def issue_daily_token():
+    """매일 08:00에 실행되어 장 열리는 날일 경우에만 토큰을 강제 갱신합니다."""
+    if not market_hours.is_market_open(): return
+    get_auth_kis(force=True)
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 08:00 KIS API 일일 접근 토큰 갱신 완료.")
 
 def get_stock_info_naver(ticker):
     name, div, is_etf = ticker, 0.0, False
@@ -62,6 +68,47 @@ def daily_routine():
     research_reports = research_crawler.get_latest_industry_reports(limit=8)
     report = ai_strategy.get_daily_market_report(macro, us_news, kr_news, research_reports, "특이사항 없음")
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[일간 마감 브리핑]\n\n{report}")
+
+def deep_market_routine():
+    if not market_hours.is_market_open(): return
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 10:00 장 초반 자금 흐름 기반 심층 시황 보고를 시작합니다.")
+    macro = macro_collector.get_macro_indicators()
+    _, kr_kw = ai_strategy.infer_news_keywords()
+    kr_news = news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro")
+    research_reports = research_crawler.get_latest_industry_reports(limit=5)
+    report = ai_strategy.get_deep_market_report(macro, kr_news, research_reports)
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[10:00 심층 시황 및 전략]\n\n{report}")
+
+def auto_stock_discovery():
+    if datetime.now(KST).weekday() >= 5: return
+    token = get_auth_kis()
+    
+    gem_stocks = quant_screener.run_condition_screener(kis, "기대주_발굴")
+    if gem_stocks:
+        passed_gem = quant_screener.run_unified_screener(gem_stocks, URL, APP_KEY, SECRET_KEY, token, DART_API_KEY)
+        top_gems = [p for p in passed_gem if p.get('score', 0) >= 60]
+        
+        msg = ["[ Track A. 기대주 (60점 상회) ]\n"]
+        if not top_gems:
+            msg.append("- 조건을 통과한 유망 종목이 없습니다.")
+        else:
+            for s in top_gems[:5]:
+                name, _, _ = get_stock_info_naver(s['ticker'])
+                news = news_crawler.get_latest_news(name, limit=2)
+                rating = ai_strategy.get_quick_rating(s['ticker'], name, news, "기대주", s)
+                msg.append(f"- {name} ({s['ticker']}) [{s.get('score')}점]\n{rating}\n")
+        if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="\n".join(msg))
+
+    div_stocks = quant_screener.run_condition_screener(kis, "배당주_발굴")
+    if div_stocks:
+        msg = ["[ Track B. 배당 가치주 ]\n"]
+        for s in div_stocks[:5]:
+            name, _, _ = get_stock_info_naver(s['ticker'])
+            news = news_crawler.get_latest_news(name, limit=2)
+            val = kis.get_valuation_data(s['ticker']) or {}
+            rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, val)
+            msg.append(f"- {name} ({s['ticker']})\n{rating}\n")
+        if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="\n".join(msg))
 
 def weekly_routine():
     if not market_hours.is_market_open(): return
@@ -113,10 +160,6 @@ def alert_manual_stocks():
         app.client.chat_postMessage(channel=CHANNEL_ID, text="[수동 등록 종목 매수 타점 알림]\n현재 아래 수동 종목들이 매수 타이밍(눌림목)에 진입했습니다. 최종 매수 여부를 직접 결정해 주십시오.\n" + "\n".join(messages))
 
 def daily_fundamental_stop_loss():
-    """
-    14:30에 실행되는 심층 방어막입니다.
-    가격 이탈(하드스탑/추적익절) 검사와 함께 AI 펀더멘털 훼손 검사를 병행합니다.
-    """
     if not market_hours.is_market_open(): return
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
     if not portfolio: return
@@ -155,13 +198,10 @@ def daily_fundamental_stop_loss():
         trigger_reason = None
         report_comment = ""
         
-        # 1. 기계적 원금 방어 (-10%)
         if avg_price > 0 and current_price <= avg_price * 0.90:
             trigger_reason = "원금 방어선(-10%) 이탈 (기계적 손절)"
-        # 2. 최고점 대비 추적 하락선 (-10%)
         elif avg_price > 0 and high_water_mark > avg_price and current_price <= high_water_mark * 0.90:
             trigger_reason = "최고점 대비 하락선(-10%) 이탈 (추적 익절/손절)"
-        # 3. 펀더멘털 훼손 검사
         else:
             chart_30d = chart_data.get_daily_ohlcv(URL, APP_KEY, SECRET_KEY, token, ticker, count=30)
             report = ai_strategy.check_fundamental_damage(ticker, name, chart_30d, macro, val, context)
@@ -275,7 +315,10 @@ def afternoon_routine():
     execute_daily_split_buys()
 
 def run_scheduler():
+    schedule.every().day.at("08:00").do(issue_daily_token)
     schedule.every().day.at("08:45").do(daily_routine)
+    schedule.every().day.at("08:50").do(auto_stock_discovery)
+    schedule.every().day.at("10:00").do(deep_market_routine)
     schedule.every().monday.at("09:45").do(weekly_routine)
     schedule.every().day.at("10:45").do(check_monthly_quarterly)
     schedule.every().day.at("14:20").do(alert_manual_stocks)
@@ -288,6 +331,55 @@ def run_scheduler():
 # ==============================================================
 # 슬랙 명령어 처리
 # ==============================================================
+@app.message(re.compile(r"^!명령어", re.IGNORECASE))
+def cmd_help(message, say):
+    help_text = """[ 봇 명령어 매뉴얼 ]
+- !잔고 : 실계좌 현금 및 포트폴리오 요약 조회
+- !기대주테스트 : 기대주 발굴 (60점 커트 + AI 5단계 검증)
+- !배당주테스트 : 배당주 발굴 (AI 배당컷 5단계 검증)
+- !발굴 [배당률/테마] : 기존 100점 만점 펀더멘탈 스크리닝
+- !ai매수 [코드] [예산] : 정밀 분석 후 10일 분할매수 세팅
+- !수동등록 [코드] : 내 보유종목 방어막 감시망에 편입
+- !일일보고 / !주간보고 / !월간보고 / !분기보고 : 각종 리포트 수동 생성
+- !초기화 : 장부 및 주문 데이터 초기화"""
+    say(help_text)
+
+@app.message(re.compile(r"^!기대주테스트", re.IGNORECASE))
+def cmd_test_gem(message, say):
+    say("[System] 기대주 발굴 중입니다 (기준: 60점 이상)...")
+    def task():
+        token = get_auth_kis()
+        stocks = quant_screener.run_condition_screener(kis, "기대주_발굴")
+        if not stocks: return say("[결과] 조건식 통과 종목이 없습니다.")
+        passed_gem = quant_screener.run_unified_screener(stocks, URL, APP_KEY, SECRET_KEY, token, DART_API_KEY)
+        top_gems = [p for p in passed_gem if p.get('score', 0) >= 60]
+        if not top_gems: return say("[결과] 60점 이상 펀더멘털 대장주가 없습니다.")
+        output = ["[ 기대주 (60점 이상) 테스트 결과 ]\n"]
+        for s in top_gems[:5]:
+            name, _, _ = get_stock_info_naver(s['ticker'])
+            news = news_crawler.get_latest_news(name, limit=2)
+            rating = ai_strategy.get_quick_rating(s['ticker'], name, news, "기대주", s)
+            output.append(f"- {name} ({s['ticker']}) [{s.get('score')}점]\n{rating}\n")
+        say("\n".join(output))
+    threading.Thread(target=task, daemon=True).start()
+
+@app.message(re.compile(r"^!배당주테스트", re.IGNORECASE))
+def cmd_test_div(message, say):
+    say("[System] 배당주 스캔 및 AI 위험 검증 중...")
+    def task():
+        get_auth_kis()
+        stocks = quant_screener.run_condition_screener(kis, "배당주_발굴")
+        if not stocks: return say("[결과] 조건식 통과 종목이 없습니다.")
+        output = ["[ 배당 가치주 테스트 결과 ]\n"]
+        for s in stocks[:5]:
+            name, _, _ = get_stock_info_naver(s['ticker'])
+            news = news_crawler.get_latest_news(name, limit=2)
+            val = kis.get_valuation_data(s['ticker']) or {}
+            rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, val)
+            output.append(f"- {name} ({s['ticker']})\n{rating}\n")
+        say("\n".join(output))
+    threading.Thread(target=task, daemon=True).start()
+
 @app.message(re.compile(r"^!잔고", re.IGNORECASE))
 def cmd_balance(message, say):
     say("[System] KIS 실전 계좌 및 AI 가상 장부 현황을 조회합니다...")
@@ -619,4 +711,3 @@ if __name__ == "__main__":
     print("Log: [System] Active KST", flush=True)
     threading.Thread(target=run_scheduler, daemon=True).start()
     SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN")).start()
-

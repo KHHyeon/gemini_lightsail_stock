@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
-# File: ~/my_bot/quant_screener.py
-import requests
 import time
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
 import io
 from contextlib import redirect_stdout
-from bs4 import BeautifulSoup
-import OpenDartReader
 import chart_data
-from datetime import datetime
+import OpenDartReader
 
 def get_naver_dividend(ticker):
     try:
@@ -93,6 +92,24 @@ def get_dart_yoy_growth(dart_client, ticker):
     except: pass
     return 0.0, 0.0, False
 
+def run_condition_screener(kis_client, target_condition_name):
+    print(f"Log: [Screener] '{target_condition_name}' 탐색 시작...")
+    seq = kis_client.find_condition_seq(target_condition_name)
+    if not seq:
+        print(f"Log: [Error] '{target_condition_name}' 조건식을 HTS 목록에서 찾을 수 없습니다.")
+        return []
+        
+    tickers = kis_client.get_condition_stocks(seq)
+    if not tickers:
+        print(f"Log: [Info] '{target_condition_name}' 조건에 맞는 종목이 현재 시장에 없습니다.")
+        return []
+
+    results = []
+    for ticker in tickers:
+        results.append({"ticker": ticker, "name": ticker})
+    print(f"Log: [Screener] 조건식 확인 완료. 종목 추출 중...")
+    return results
+
 def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, dart_api_key):
     if not raw_candidates: return []
     dart_client = OpenDartReader(dart_api_key) if dart_api_key else None
@@ -108,9 +125,9 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
         
         # 당일 거래대금 10억 미만인 종목은 즉시 탈락 (유동성 부족)
         if val["tr_amount"] < 1000000000:
-            print(f"Log: [Liquidity Filter] {c.get('name')} 탈락 (거래대금: {val['tr_amount']/1000000:.1f}백만)")
+            print(f"Log: [Liquidity Filter] {c.get('name', ticker)} 탈락 (거래대금: {val['tr_amount']/1000000:,.1f}백만)")
             continue
-
+            
         score = 0
         details = []
         
@@ -122,7 +139,7 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
             if current_close >= ma60:
                 score += 20
                 details.append("차트 정배열(+20)")
-            
+                
         # 3. 수급 채점
         frgn, orgn = get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker)
         if frgn > 0 or orgn > 0:
@@ -132,20 +149,22 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
         # 4. 실적 채점
         sales_growth, op_growth, turnaround = get_dart_yoy_growth(dart_client, ticker)
         if sales_growth >= 10.0:
-            score += 20
-            details.append(f"매출성장 {sales_growth:.1f}%(+20)")
-        if turnaround or op_growth >= 20.0:
-            score += 30
-            details.append("이익성장/흑전(+30)")
+            score += 25
+            details.append("매출성장(+25)")
+        if op_growth >= 15.0 or turnaround:
+            score += 25
+            details.append("이익성장/턴어라운드(+25)")
             
-        if score >= 70:
-            c.update({
-                "score": score, "score_details": details,
-                "current_price": val["current_price"],
-                "pbr": val["pbr"], "per": val["per"]
-            })
-            final_list.append(c)
-            
+        c.update({
+            "current_price": val["current_price"],
+            "pbr": val["pbr"],
+            "per": val["per"],
+            "score": score,
+            "score_details": details,
+            "target_theme": c.get("target_theme", "가치성장 대장주")
+        })
+        final_list.append(c)
+        
     final_list.sort(key=lambda x: x.get("score", 0), reverse=True)
     return final_list
 
@@ -154,6 +173,7 @@ def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark
     if not raw_candidates: return []
     final_list = []
     min_dividend = round(benchmark_rate * 0.8, 2)
+    
     for c in raw_candidates:
         ticker = c.get("ticker")
         val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
@@ -165,7 +185,16 @@ def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark
         if val["pbr"] > 0 and val["per"] > 0:
             roe = round((val["pbr"] / val["per"]) * 100, 2)
             if val["pbr"] >= 2.0 or roe <= 0: continue
-            c.update({"current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"], "roe": roe, "div_yield": div_yield})
+            
+            c.update({
+                "current_price": val["current_price"], 
+                "pbr": val["pbr"], 
+                "per": val["per"], 
+                "roe": roe, 
+                "div_yield": div_yield
+            })
             final_list.append(c)
+            
     final_list.sort(key=lambda x: x.get("div_yield", 0), reverse=True)
+    print(f"Log: [Screener] 총 {len(final_list)}개 종목 발굴 완료.")
     return final_list
