@@ -83,7 +83,7 @@ def get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation
     종목: {stock_name}({ticker}) | 밸류: {valuation} | 뉴스: {recent_news}
     
     마지막 줄은 반드시 아래 양식을 지키세요:
-    [한줄요약] [투자의견] 매수사유 | [상승조건] 팩트 | [손절조건] 악재수치
+    [한줄요약] [투자의견] 매수사유 | [상승조건] 팩트 (200자 이내로 명확히 작성) | [손절조건] 악재수치 (200자 이내로 명확히 작성)
     """
     return generate_text(prompt)
 

@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# File: ~/my_bot/risk_manager.py
 import time
 import market_hours
 from trade_logger import load_json_from_gdrive, save_json_to_gdrive
@@ -41,7 +40,7 @@ def run_risk_monitor(kis_client, base_url, app_key, secret_key, token, acc_no, a
         # 1. 기계적 하드스탑 (-10%)
         if avg_price > 0 and current_price <= avg_price * 0.90:
             sell_reason = "원금 방어선 이탈 (기계적 손절 -10%)"
-        # 2. 추적 익절/손절 (고점 대비 -10%) - 고정 익절 폐지
+        # 2. 추적 익절/손절 (고점 대비 -10% 원복)
         elif avg_price > 0 and high_water_mark > avg_price and current_price <= high_water_mark * 0.90:
             sell_reason = "최고점 대비 하락선 이탈 (추적 매도 -10%)"
             

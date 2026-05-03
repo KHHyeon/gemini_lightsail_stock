@@ -18,7 +18,6 @@ class KISClient:
         self.token = token
 
     def get_psbl_cash(self):
-        """실계좌 주문 가능 현금 조회 기능 (복구됨)"""
         path = "/uapi/domestic-stock/v1/trading/inquire-psbl-order"
         headers = {
             "Content-Type": "application/json",
@@ -39,6 +38,32 @@ class KISClient:
                 return int(res.json().get("output", {}).get("ord_psbl_cash", "0"))
         except: pass
         return 0
+
+    def get_real_holding_qty(self, ticker, test_mode="LIVE"):
+        """실계좌 또는 모의계좌의 실제 보유 수량과 평단가를 조회합니다."""
+        if not self.acc_no or not self.token: return 0, 0.0
+        tr_id = "TTTC8434R" if test_mode == "LIVE" else "VTTC8434R"
+        path = "/uapi/domestic-stock/v1/trading/inquire-balance"
+        headers = {
+            "Content-Type": "application/json", "authorization": f"Bearer {self.token}",
+            "appkey": self.app_key, "appsecret": self.secret_key, "tr_id": tr_id
+        }
+        params = {
+            "CANO": self.acc_no[:8], "ACNT_PRDT_CD": self.acc_no[8:], "AFHR_FLPR_YN": "N",
+            "OFL_YN": "", "INQR_DVSN": "01", "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "00", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+        }
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=headers, params=params, timeout=5)
+            if res.status_code == 200:
+                for item in res.json().get("output1", []):
+                    if item.get("pdno") == ticker:
+                        qty = int(item.get("hldg_qty", "0"))
+                        avg_price = float(item.get("pchs_avg_pric", "0"))
+                        return qty, avg_price
+        except: pass
+        return 0, 0.0
 
     def get_condition_list(self):
         path = "/uapi/domestic-stock/v1/quotations/psearch-title"

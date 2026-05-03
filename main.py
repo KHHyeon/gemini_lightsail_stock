@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# File: ~/my_bot/main.py
 import os, time, threading, schedule, sys, re, uuid
 import requests
 from bs4 import BeautifulSoup
@@ -29,13 +28,11 @@ kis = KISClient()
 pending_orders = {}
 
 def get_auth_kis(force=False):
-    """token_manager를 통해 토큰을 가져오고(캐시 또는 신규), KIS 클라이언트에 세팅합니다."""
     token = token_manager.get_access_token(APP_KEY, SECRET_KEY, force=force)
     kis.set_token(token)
     return token
 
 def issue_daily_token():
-    """매일 08:00에 실행되어 장 열리는 날일 경우에만 토큰을 강제 갱신합니다."""
     if not market_hours.is_market_open(): return
     get_auth_kis(force=True)
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 08:00 KIS API 일일 접근 토큰 갱신 완료.")
@@ -57,12 +54,18 @@ def get_stock_info_naver(ticker):
     except: pass
     return name, div, is_etf
 
-# --- [ 정기 보고 스케줄러 로직 ] ---
+def get_parsed_keywords():
+    kw_text = ai_strategy.infer_news_keywords()
+    kws = [k.strip() for k in kw_text.split(',')] if kw_text else []
+    us_kw = kws[0] if len(kws) > 0 else "미국증시"
+    kr_kw = kws[1] if len(kws) > 1 else "한국증시"
+    return us_kw, kr_kw
+
 def daily_routine():
     if not market_hours.is_market_open(): return
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 일일 시황 브리핑 작성을 시작합니다.")
     macro = macro_collector.get_macro_indicators()
-    us_kw, kr_kw = ai_strategy.infer_news_keywords()
+    us_kw, kr_kw = get_parsed_keywords()
     us_news = news_crawler.get_latest_news(us_kw, limit=5, search_type="macro")
     kr_news = news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro")
     research_reports = research_crawler.get_latest_industry_reports(limit=8)
@@ -73,7 +76,7 @@ def deep_market_routine():
     if not market_hours.is_market_open(): return
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 10:00 장 초반 자금 흐름 기반 심층 시황 보고를 시작합니다.")
     macro = macro_collector.get_macro_indicators()
-    _, kr_kw = ai_strategy.infer_news_keywords()
+    _, kr_kw = get_parsed_keywords()
     kr_news = news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro")
     research_reports = research_crawler.get_latest_industry_reports(limit=5)
     report = ai_strategy.get_deep_market_report(macro, kr_news, research_reports)
@@ -133,7 +136,6 @@ def quarterly_routine():
     report = ai_strategy.get_quarterly_portfolio_report(portfolio, news_dict)
     if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[분기 핵심 실적 및 펀더멘털 점검 리포트]\n\n{report}")
 
-# --- [ 자동 매매 및 방어막 로직 ] ---
 def alert_manual_stocks():
     if not market_hours.is_market_open(): return
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
@@ -328,9 +330,6 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(1)
 
-# ==============================================================
-# 슬랙 명령어 처리
-# ==============================================================
 @app.message(re.compile(r"^!명령어", re.IGNORECASE))
 def cmd_help(message, say):
     help_text = """[ 봇 명령어 매뉴얼 ]
@@ -467,7 +466,7 @@ def cmd_daily_report(message, say):
     say("[System] 수동 일일 시황 브리핑 작성을 시작합니다.")
     def bg_task():
         macro = macro_collector.get_macro_indicators()
-        us_kw, kr_kw = ai_strategy.infer_news_keywords()
+        us_kw, kr_kw = get_parsed_keywords()
         us_news = news_crawler.get_latest_news(us_kw, limit=5, search_type="macro")
         kr_news = news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro")
         research_reports = research_crawler.get_latest_industry_reports(limit=8)
