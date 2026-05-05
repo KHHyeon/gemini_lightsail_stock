@@ -231,7 +231,7 @@ def daily_fundamental_stop_loss():
     if split_orders_updated: save_json_to_gdrive(split_orders, "split_orders.json")
     if messages and CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[3중 철통 방어막 및 AI 팩트 진단 결과]\n" + "\n\n".join(messages))
 
-def execute_daily_split_buys():
+def execute_daily_split_buys(check_news=False):
     if not market_hours.is_market_open(): return
     macro = macro_collector.get_macro_indicators()
     try:
@@ -242,12 +242,20 @@ def execute_daily_split_buys():
         vix, wti, us10y = 20.0, 70.0, 4.0
         
     shutdown_reason = ""
-    if vix >= 30.0: shutdown_reason = f"VIX 지수 위험 수치 도달 ({vix})"
-    elif wti >= 95.0: shutdown_reason = f"WTI 유가 인플레이션 한계치 돌파 ({wti})"
-    elif us10y >= 4.8: shutdown_reason = f"미 국채 10년물 금리 발작 ({us10y}%)"
+    half_buy_reason = ""
+    
+    # 2단계 셧다운 룰 적용
+    if vix >= 30.0: shutdown_reason = f"VIX 지수 위험 ({vix})"
+    elif vix >= 25.0: half_buy_reason = f"VIX 지수 경계 ({vix})"
+    
+    if wti >= 95.0: shutdown_reason = f"WTI 유가 위험 ({wti})"
+    elif wti >= 90.0: half_buy_reason = f"WTI 유가 경계 ({wti})"
+    
+    if us10y >= 4.8: shutdown_reason = f"미 국채 10년물 금리 위험 ({us10y}%)"
+    elif us10y >= 4.5: half_buy_reason = f"미 국채 금리 경계 ({us10y}%)"
         
     if shutdown_reason:
-        if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[Macro Shutdown 발동]\n{shutdown_reason}\n시스템 보호를 위해 오늘의 모든 신규 분할 매수를 전면 중단(Skip)합니다.")
+        if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text=f"[Macro Shutdown 발동]\n{shutdown_reason}\n오늘의 신규 분할 매수를 전면 중단(Skip)합니다.")
         return
 
     split_orders = load_json_from_gdrive("split_orders.json") or {}
@@ -257,12 +265,27 @@ def execute_daily_split_buys():
     order_mgr = OrderManager(URL, APP_KEY, SECRET_KEY, token, ACC_NO)
     
     messages = []
+    if half_buy_reason:
+        messages.append(f"[Macro Alert] {half_buy_reason}\n선제적 리스크 관리를 위해 오늘 매수 예산은 50%로 축소됩니다.")
+        
     keys_to_delete = []
     
     for oid, info in split_orders.items():
-        ticker, name, daily_budget = info["ticker"], info["name"], info["daily_budget"]
+        ticker, name = info["ticker"], info["name"]
+        daily_budget = info["daily_budget"]
+        if half_buy_reason: daily_budget /= 2
+        
         remain, reason = info["remaining_days"], info["reason"]
         mode_type = info.get("mode_type", "PAPER_ONLY") 
+        score = info.get("score", 0)
+        
+        if check_news:
+            recent_news = news_crawler.get_latest_news(name, limit=3, search_type="stock")
+            news_text = " ".join(recent_news)
+            news_check = ai_strategy.get_emergency_news_check(name, news_text)
+            if "[위험]" in news_check:
+                messages.append(f"[정오 긴급 스캔] {name}({ticker}) 돌발 악재 감지: 매수 스킵.\n사유: {news_check}")
+                continue
         
         val = kis.get_valuation_data(ticker)
         if not val or int(val.get("current_price", 0)) <= 0: continue
@@ -274,17 +297,21 @@ def execute_daily_split_buys():
         ma5 = sum(day['close'] for day in chart_data_list) / 5
         nth_round = 11 - remain
         
-        if current_price <= ma5 * 1.03:
+        # High-Pass 룰 적용: 85점 이상 초우량주는 5일선 + 5%까지 허용
+        threshold_ratio = 1.05 if score >= 85 else 1.03
+        
+        if current_price <= ma5 * threshold_ratio:
             qty = int(daily_budget // current_price)
             if qty > 0:
-                res = order_mgr.execute_order(ticker, name, qty, current_price, "buy", f"{reason} ({nth_round}/10회차 눌림목)", mode_type)
+                res = order_mgr.execute_order(ticker, name, qty, current_price, "buy", f"{reason} ({nth_round}/10회차)", mode_type)
                 messages.append(res["msg"])
                 info["remaining_days"] -= 1
             else:
                 messages.append(f"[예산 부족] {name}({ticker}): 스킵 ({nth_round}/10회차)")
                 info["remaining_days"] -= 1
         else:
-            messages.append(f"[매수 보류] {name}({ticker}): 단기 과열 스킵 [현재가 {current_price:,}원 > 5일선 {int(ma5):,}원+3%].")
+            target_prc = int(ma5 * threshold_ratio)
+            messages.append(f"[매수 보류] {name}({ticker}): 단기 과열 스킵 [현재가 {current_price:,}원 > 기준가 {target_prc:,}원].")
 
         if info["remaining_days"] <= 0:
             keys_to_delete.append(oid)
@@ -292,7 +319,7 @@ def execute_daily_split_buys():
             
     for k in keys_to_delete: del split_orders[k]
     if messages or keys_to_delete: save_json_to_gdrive(split_orders, "split_orders.json")
-    if messages and CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[자동 분할 매수 데몬 (이평선 눌림목 모드)]\n" + "\n".join(messages))
+    if messages and CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[자동 분할 매수 데몬]\n" + "\n".join(messages))
 
 def is_first_trading_day_of_month():
     today = datetime.now(KST)
@@ -310,21 +337,26 @@ def check_monthly_quarterly():
         else:
             monthly_routine()
 
+def noon_routine():
+    if not market_hours.is_market_open(): return
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 11:45 정오의 보초 및 자동 분할 매수를 시작합니다.")
+    execute_daily_split_buys(check_news=True)
+
 def afternoon_routine():
     if not market_hours.is_market_open(): return
-    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 14:30 장 마감 전 안전 진단(3중 방어막) 및 분할 매수 루틴을 시작합니다.")
+    if CHANNEL_ID: app.client.chat_postMessage(channel=CHANNEL_ID, text="[System] 14:30 장 마감 전 안전 진단(3중 방어막)을 시작합니다.")
     daily_fundamental_stop_loss()
-    execute_daily_split_buys()
 
 def run_scheduler():
     schedule.every().day.at("08:00").do(issue_daily_token)
     schedule.every().day.at("08:45").do(daily_routine)
     schedule.every().day.at("08:50").do(auto_stock_discovery)
     schedule.every().day.at("10:00").do(deep_market_routine)
-    schedule.every().monday.at("09:45").do(weekly_routine)
     schedule.every().day.at("10:45").do(check_monthly_quarterly)
+    schedule.every().day.at("11:45").do(noon_routine)
     schedule.every().day.at("14:20").do(alert_manual_stocks)
     schedule.every().day.at("14:30").do(afternoon_routine)
+    schedule.every().monday.at("09:45").do(weekly_routine)
     schedule.every(30).minutes.do(lambda: risk_manager.run_risk_monitor(kis, URL, APP_KEY, SECRET_KEY, token_manager.get_access_token(APP_KEY, SECRET_KEY), ACC_NO, app, CHANNEL_ID))
     while True:
         schedule.run_pending()
@@ -435,13 +467,13 @@ def execute_unified_scan(say, candidates, keyword_msg):
     if not unique_candidates:
         return say(f"[Error] {keyword_msg} 소속 종목을 추출하지 못했습니다.")
         
-    say(f"[System] 총 {len(unique_candidates)}개 종목 대상 100점 만점 펀더멘털 스크리닝(차트/수급/실적YoY)을 시작합니다. (API 딜레이로 약 1~3분 소요)")
+    say(f"[System] 총 {len(unique_candidates)}개 종목 대상 100점 만점 펀더멘털 스크리닝(차트/수급/실적)을 시작합니다.")
     token = get_auth_kis()
     
     passed_stocks = quant_screener.run_unified_screener(unique_candidates, URL, APP_KEY, SECRET_KEY, token, DART_API_KEY)
     
     if not passed_stocks:
-        return say(f"[결과] {keyword_msg} 관련 종목 중 펀더멘털 스코어 70점(수급/실적)을 넘은 진짜 대장주가 전멸했습니다.")
+        return say(f"[결과] {keyword_msg} 관련 종목 중 펀더멘털 스코어 60점 이상을 획득한 대장주가 전멸했습니다.")
 
     theme_memory = load_json_from_gdrive("theme_context.json") or {}
     report_msg = [f"[ 100점 만점 펀더멘털 검증 완료 ({len(passed_stocks)}종목 합격) ]"]
@@ -633,6 +665,11 @@ def process_ai_buy(ticker, budget, say):
             
             recent_news = news_crawler.get_latest_news(stock_name, limit=5, search_type="stock")
             
+            # High-Pass 점수 기록을 위해 1종목 퀵 스캔
+            candidate = [{"ticker": ticker, "name": stock_name}]
+            passed = quant_screener.run_unified_screener(candidate, URL, APP_KEY, SECRET_KEY, token, DART_API_KEY)
+            score = passed[0].get("score", 0) if passed else 0
+            
             report = ai_strategy.get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context=theme_memory.get(ticker, ""), recent_news=recent_news)
             
             order_id = str(uuid.uuid4())
@@ -642,7 +679,7 @@ def process_ai_buy(ticker, budget, say):
 
             pending_orders[order_id] = {
                 "ticker": ticker, "total_budget": budget, "current_price": int(valuation.get("current_price", 0)), 
-                "report": report, "stock_name": stock_name, "mode_type": "NORMAL", "reason": full_reason
+                "report": report, "stock_name": stock_name, "mode_type": "NORMAL", "reason": full_reason, "score": score
             }
             say(f"[System] {stock_name}({ticker}) 최종 AI 리포트 ({actual_mode})\n\n{report}")
             say(blocks=[
@@ -683,10 +720,10 @@ def action_approve_buy(ack, body, respond):
         split_orders = load_json_from_gdrive("split_orders.json") or {}
         split_orders[str(uuid.uuid4())] = {
             "ticker": order["ticker"], "name": order["stock_name"], "daily_budget": res["daily_budget"], 
-            "remaining_days": 10, "reason": reason, "mode_type": order["mode_type"] 
+            "remaining_days": 10, "reason": reason, "mode_type": order["mode_type"], "score": order.get("score", 0)
         }
         save_json_to_gdrive(split_orders, "split_orders.json")
-        respond(text=f"[Success] <@{body['user']['id']}> 님이 승인했습니다.\n{res['msg']}\n(매 평일 14시 30분 5일선 눌림목 도달 시에만 기계적 매수)", replace_original=True)
+        respond(text=f"[Success] <@{body['user']['id']}> 님이 승인했습니다.\n{res['msg']}\n(11:45 정오 보초 루틴에 자동 매수 스케줄 편입 완료)", replace_original=True)
     else: respond(text=f"[Fail] {res['msg']}", replace_original=True)
 
 @app.action("reject_buy")

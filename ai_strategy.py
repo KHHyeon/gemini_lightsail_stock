@@ -77,10 +77,22 @@ def get_theme_stock_narrative(target_theme, name, ticker, fundamentals):
     prompt = f"'{name}'이 '{target_theme}'의 진짜 성장주인지 재무({fundamentals}) 바탕으로 2문장 이내 핵심만 요약. 이모지 금지."
     return generate_text(prompt)
 
+def get_emergency_news_check(name, news_text):
+    prompt = f"""
+    [긴급 팩트체크] (이모지 금지)
+    종목 '{name}'의 최신 뉴스입니다: {news_text}
+    위 뉴스 내용 중 횡령, 배임, 대규모 유상증자, 어닝쇼크 등 치명적인 돌발 악재가 존재합니까?
+    치명적 악재가 있다면 [위험], 없다면 [통과]라고 첫 줄에 반드시 명시하고 1문장으로 이유를 적어주세요.
+    """
+    return generate_text(prompt)
+
 def get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news):
     prompt = f"""
     스마트폰 가독성을 극대화하여 아래 종목을 분석하세요. (이모지 금지)
     종목: {stock_name}({ticker}) | 밸류: {valuation} | 뉴스: {recent_news}
+    
+    [특수 섹터 규칙]
+    만약 이 기업이 금융업(은행, 증권, 보험, 지주)이라면 NPL(부실채권비율), CET1(보통주자본비율) 등의 리스크 맥락과 총주주환원율(배당 및 자사주) 의지를 파악하여 [상승조건]에 '주주환원 정책 지속성'을 포함하세요.
     
     마지막 줄은 반드시 아래 양식을 지키세요:
     [한줄요약] [투자의견] 매수사유 | [상승조건] 팩트 (200자 이내로 명확히 작성) | [손절조건] 악재수치 (200자 이내로 명확히 작성)

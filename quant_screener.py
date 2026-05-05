@@ -32,7 +32,6 @@ def get_basic_valuation(base_url, app_key, secret_key, token, ticker):
         res = requests.get(url, headers=headers, params=params, timeout=5)
         if res.status_code == 200:
             data = res.json().get("output", {})
-            # acml_tr_pbmn: 누적 거래 대금 (단위: 원)
             tr_amount = int(data.get("acml_tr_pbmn", "0") or 0)
             return {
                 "current_price": int(data.get("stck_prpr", "0") or 0),
@@ -115,23 +114,25 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
     dart_client = OpenDartReader(dart_api_key) if dart_api_key else None
     final_list = []
     
+    financial_keywords = ['지주', '은행', '증권', '보험', '금융']
+    
     for c in raw_candidates:
         ticker = c.get("ticker")
+        stock_name = c.get("name", ticker)
         if not ticker: continue
         
-        # 1. 유동성 필터 (데이터 무결성 검증 포함)
-        val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
-        if val["current_price"] <= 0: continue # 가격 데이터 무결성 실패 시 스킵
+        is_financial = any(kw in stock_name for kw in financial_keywords)
         
-        # 당일 거래대금 10억 미만인 종목은 즉시 탈락 (유동성 부족)
+        val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
+        if val["current_price"] <= 0: continue
+        
         if val["tr_amount"] < 1000000000:
-            print(f"Log: [Liquidity Filter] {c.get('name', ticker)} 탈락 (거래대금: {val['tr_amount']/1000000:,.1f}백만)")
+            print(f"Log: [Liquidity Filter] {stock_name} 탈락 (거래대금 부족)")
             continue
             
         score = 0
         details = []
         
-        # 2. 기술적 지표 채점
         chart_60d = chart_data.get_daily_ohlcv(base_url, app_key, secret_key, token, ticker, count=60)
         if chart_60d and len(chart_60d) >= 60:
             current_close = chart_60d[0]['close']
@@ -140,36 +141,46 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
                 score += 20
                 details.append("차트 정배열(+20)")
                 
-        # 3. 수급 채점
         frgn, orgn = get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker)
         if frgn > 0 or orgn > 0:
             score += 30
             details.append("수급 유입(+30)")
             
-        # 4. 실적 채점
-        sales_growth, op_growth, turnaround = get_dart_yoy_growth(dart_client, ticker)
-        if sales_growth >= 10.0:
-            score += 25
-            details.append("매출성장(+25)")
-        if op_growth >= 15.0 or turnaround:
-            score += 25
-            details.append("이익성장/턴어라운드(+25)")
-            
-        c.update({
-            "current_price": val["current_price"],
-            "pbr": val["pbr"],
-            "per": val["per"],
-            "score": score,
-            "score_details": details,
-            "target_theme": c.get("target_theme", "가치성장 대장주")
-        })
-        final_list.append(c)
+        if is_financial:
+            if val["pbr"] > 0 and val["pbr"] <= 1.0:
+                score += 20
+                details.append("저PBR(+20)")
+            roe = round((val["pbr"] / val["per"]) * 100, 2) if val["per"] > 0 else 0
+            if roe >= 8.0:
+                score += 30
+                details.append("ROE 8% 이상(+30)")
+                
+            if score >= 80:
+                c.update({
+                    "current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"],
+                    "score": score, "score_details": details, "target_theme": c.get("target_theme", "우량 금융주")
+                })
+                final_list.append(c)
+        else:
+            sales_growth, op_growth, turnaround = get_dart_yoy_growth(dart_client, ticker)
+            if sales_growth >= 10.0:
+                score += 25
+                details.append("매출성장(+25)")
+            if op_growth >= 15.0 or turnaround:
+                score += 25
+                details.append("이익성장/턴어라운드(+25)")
+                
+            if score >= 60:
+                c.update({
+                    "current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"],
+                    "score": score, "score_details": details, "target_theme": c.get("target_theme", "가치성장 대장주")
+                })
+                final_list.append(c)
         
     final_list.sort(key=lambda x: x.get("score", 0), reverse=True)
     return final_list
 
 def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark_rate, dart_api_key):
-    """기존 배당주 스캐너에도 유동성 필터 적용"""
     if not raw_candidates: return []
     final_list = []
     min_dividend = round(benchmark_rate * 0.8, 2)
