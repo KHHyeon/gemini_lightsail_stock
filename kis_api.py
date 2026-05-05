@@ -40,7 +40,6 @@ class KISClient:
         return 0
 
     def get_real_holding_qty(self, ticker, test_mode="LIVE"):
-        """실계좌 또는 모의계좌의 실제 보유 수량과 평단가를 조회합니다."""
         if not self.acc_no or not self.token: return 0, 0.0
         tr_id = "TTTC8434R" if test_mode == "LIVE" else "VTTC8434R"
         path = "/uapi/domestic-stock/v1/trading/inquire-balance"
