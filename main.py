@@ -56,3 +56,4 @@ if __name__ == "__main__":
     slack_interface.register_slack_handlers(app, kis, CONFIG)
     threading.Thread(target=run_scheduler, daemon=True).start()
     SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN")).start()
+
