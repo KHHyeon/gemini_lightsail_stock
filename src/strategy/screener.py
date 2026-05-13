@@ -5,7 +5,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import io
 from contextlib import redirect_stdout
-import chart_data
+from src.data import chart as chart_data
+
 import OpenDartReader
 
 def get_naver_dividend(ticker):

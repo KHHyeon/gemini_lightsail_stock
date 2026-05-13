@@ -8,11 +8,16 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import OpenDartReader
 
-import token_manager, account_info, macro_collector, ai_strategy, chart_data, stock_finder
-import risk_manager, quant_screener, market_hours, news_crawler, theme_crawler, research_crawler
-from kis_api import KISClient
-from order_manager import OrderManager
-from trade_logger import save_json_to_gdrive, load_json_from_gdrive
+from src.core import token_manager, account_info, kis_api
+from src.data import collector as macro_collector, chart as chart_data
+from src.data.crawler import news_crawler, theme_crawler, research_crawler
+from src.strategy import ai_logic as ai_strategy, screener as quant_screener, finder as stock_finder
+from src.execution import risk_monitor as risk_manager, order as order_manager
+from src.utils import helpers as market_hours, logger as trade_logger
+from src.core.kis_api import KISClient
+from src.execution.order import OrderManager
+from src.utils.logger import save_json_to_gdrive, load_json_from_gdrive
+
 
 load_dotenv()
 APP_KEY = os.getenv("APP_KEY")

@@ -3,7 +3,9 @@
 import requests
 import json
 import os
-from trade_logger import record_trade
+from src.data import chart
+from src.utils.logger import record_trade
+
 
 class OrderManager:
     def __init__(self, base_url, app_key, secret_key, token, acc_no):
