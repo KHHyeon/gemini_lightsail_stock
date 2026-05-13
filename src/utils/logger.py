@@ -7,15 +7,21 @@ from datetime import datetime, timezone, timedelta
 KST = timezone(timedelta(hours=9))
 
 def load_json_from_gdrive(filename):
-    if not os.path.exists(filename): return None
+    # main.py와 같은 루트 디렉토리를 참조하도록 경로 설정
+    root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    filepath = os.path.join(root_path, filename)
+    if not os.path.exists(filepath): return None
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             return json.load(f)
     except: return None
 
 def save_json_to_gdrive(data, filename):
-    with open(filename, 'w', encoding='utf-8') as f:
+    root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    filepath = os.path.join(root_path, filename)
+    with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+
 
 def record_trade(ticker, name, action, price, quantity, reason):
     trades = load_json_from_gdrive("paper_trades.json") or []
