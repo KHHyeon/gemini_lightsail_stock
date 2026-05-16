@@ -22,26 +22,39 @@ def get_naver_dividend(ticker):
     return 0.0
 
 def get_basic_valuation(base_url, app_key, secret_key, token, ticker):
-    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
+    # FHKST01010100: 주식 현재가 시세
+    url_price = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
     headers = {
         "Content-Type": "application/json", "authorization": f"Bearer {token}",
         "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST01010100"
     }
     params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
     time.sleep(0.1)
+    
+    res_val = {"current_price": 0, "pbr": 0.0, "per": 0.0, "roe": 0.0, "tr_amount": 0, "dvd_yld": 0.0}
+    
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=5)
+        res = requests.get(url_price, headers=headers, params=params, timeout=5)
         if res.status_code == 200:
             data = res.json().get("output", {})
-            tr_amount = int(data.get("acml_tr_pbmn", "0") or 0)
-            return {
-                "current_price": int(data.get("stck_prpr", "0") or 0),
-                "pbr": float(data.get("pbr", "0") or 0.0),
-                "per": float(data.get("per", "0") or 0.0),
-                "tr_amount": tr_amount
-            }
+            res_val["current_price"] = int(data.get("stck_prpr", "0") or 0)
+            res_val["pbr"] = float(data.get("pbr", "0") or 0.0)
+            res_val["per"] = float(data.get("per", "0") or 0.0)
+            res_val["tr_amount"] = int(data.get("acml_tr_pbmn", "0") or 0)
     except: pass
-    return {"current_price": 0, "pbr": 0.0, "per": 0.0, "tr_amount": 0}
+
+    # FHKST03010300: 주식 가치지표 (실제 ROE, 배당수익률 등)
+    headers["tr_id"] = "FHKST03010300"
+    time.sleep(0.1)
+    try:
+        res = requests.get(url_price, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            data = res.json().get("output", {})
+            res_val["roe"] = float(data.get("roe", "0") or 0.0)
+            res_val["dvd_yld"] = float(data.get("dvd_yld", "0") or 0.0)
+    except: pass
+    
+    return res_val
 
 def get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker):
     url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
@@ -151,14 +164,18 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
             if val["pbr"] > 0 and val["pbr"] <= 1.0:
                 score += 20
                 details.append("저PBR(+20)")
-            roe = round((val["pbr"] / val["per"]) * 100, 2) if val["per"] > 0 else 0
+            
+            roe = val.get("roe", 0.0)
+            if roe <= 0: # API 데이터 부재 시 추정치 활용
+                roe = round((val["pbr"] / val["per"]) * 100, 2) if val["per"] > 0 else 0
+                
             if roe >= 8.0:
                 score += 30
                 details.append("ROE 8% 이상(+30)")
                 
             if score >= 80:
                 c.update({
-                    "current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"],
+                    "current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"], "roe": roe,
                     "score": score, "score_details": details, "target_theme": c.get("target_theme", "우량 금융주")
                 })
                 final_list.append(c)
@@ -192,10 +209,14 @@ def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark
         if val["current_price"] <= 0 or val["tr_amount"] < 1000000000: continue
         
         div_yield = get_naver_dividend(ticker)
+        if div_yield <= 0: div_yield = val.get("dvd_yld", 0.0) # 네이버 실패 시 KIS 데이터 활용
+        
         if div_yield < min_dividend: continue
         
+        roe = val.get("roe", 0.0)
+        if roe <= 0: roe = round((val["pbr"] / val["per"]) * 100, 2) if val["per"] > 0 else 0
+        
         if val["pbr"] > 0 and val["per"] > 0:
-            roe = round((val["pbr"] / val["per"]) * 100, 2)
             if val["pbr"] >= 2.0 or roe <= 0: continue
             
             c.update({

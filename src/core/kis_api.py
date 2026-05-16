@@ -131,3 +131,29 @@ class KISClient:
                 }
         except: pass
         return None
+
+    def get_valuation_metrics(self, ticker):
+        # FHKST03010300: 국내주식 가치지표 조회 (EPS, BPS, PER, PBR, ROE, 배당수익률 등)
+        path = "/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {self.token}",
+            "appkey": self.app_key,
+            "appsecret": self.secret_key,
+            "tr_id": "FHKST03010300"
+        }
+        params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=headers, params=params, timeout=5)
+            if res.status_code == 200:
+                data = res.json().get('output', {})
+                return {
+                    "eps": float(data.get('eps', 0) or 0.0),
+                    "bps": float(data.get('bps', 0) or 0.0),
+                    "per": float(data.get('per', 0) or 0.0),
+                    "pbr": float(data.get('pbr', 0) or 0.0),
+                    "roe": float(data.get('roe', 0) or 0.0),
+                    "dvd_yld": float(data.get('dvd_yld', 0) or 0.0) # 배당수익률
+                }
+        except: pass
+        return None
