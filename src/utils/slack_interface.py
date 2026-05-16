@@ -33,7 +33,7 @@ def register_slack_handlers(app, kis, config):
             kis.set_token(token)
             stocks = quant_screener.run_condition_screener(kis, "기대주_발굴")
             if not stocks: return say("[결과] 조건식 통과 종목이 없습니다.")
-            passed_gem = quant_screener.run_unified_screener(stocks, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, config["DART_API_KEY"])
+            passed_gem = quant_screener.run_unified_screener(stocks, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
             top_gems = [p for p in passed_gem if p.get('score', 0) >= 60]
             if not top_gems: return say("[결과] 60점 이상 펀더멘털 대장주가 없습니다.")
             output = ["[ 기대주 (60점 이상) 테스트 결과 ]\n"]
@@ -102,7 +102,7 @@ def register_slack_handlers(app, kis, config):
         if not unique_candidates: return say(f"[Error] {keyword_msg} 소속 종목을 추출하지 못했습니다.")
         say(f"[System] 총 {len(unique_candidates)}개 종목 대상 100점 만점 펀더멘털 스크리닝을 시작합니다.")
         token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
-        passed_stocks = quant_screener.run_unified_screener(unique_candidates, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, config["DART_API_KEY"])
+        passed_stocks = quant_screener.run_unified_screener(unique_candidates, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
         if not passed_stocks: return say(f"[결과] {keyword_msg} 관련 종목 중 펀더멘털 스코어 60점 이상 대장주가 없습니다.")
         theme_memory = load_json_from_gdrive("theme_context.json") or {}
         report_msg = [f"[ 100점 만점 펀더멘털 검증 완료 ({len(passed_stocks)}종목 합격) ]"]
@@ -125,7 +125,7 @@ def register_slack_handlers(app, kis, config):
             def bg_task_div():
                 token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
                 candidates = stock_finder.get_high_dividend_candidates(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, bm_rate)
-                passed_stocks = quant_screener.run_screener(candidates, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, bm_rate, config["DART_API_KEY"])
+                passed_stocks = quant_screener.run_screener(candidates, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, bm_rate)
                 if not passed_stocks: return say("[결과] 통과한 가치주가 없습니다.")
                 report_msg = [f"[ 배당 가치주 발굴 완료 ({len(passed_stocks)}종목) ]"]
                 for p in passed_stocks: report_msg.append(f"- {p['name']}({p['ticker']}): 현재가 {p.get('current_price', 0):,}원, 배당 {p['div_yield']}%, PBR {p['pbr']}, ROE {p['roe']}%")
@@ -169,7 +169,7 @@ def register_slack_handlers(app, kis, config):
                 pf = load_json_from_gdrive("paper_portfolio.json") or {}
                 theme_mem = load_json_from_gdrive("theme_context.json") or {}
                 news = news_crawler.get_latest_news(name, limit=5, search_type="stock")
-                passed = quant_screener.run_unified_screener([{"ticker": ticker, "name": name}], config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, config["DART_API_KEY"])
+                passed = quant_screener.run_unified_screener([{"ticker": ticker, "name": name}], config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
                 score = passed[0].get("score", 0) if passed else 0
                 report = ai_strategy.get_ai_investment_report(ticker, name, chart_30d, macro, pf, val, theme_mem.get(ticker, ""), news)
                 oid = str(uuid.uuid4())

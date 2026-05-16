@@ -61,7 +61,7 @@ class MarketOrchestrator:
         # Track A
         gem_stocks = quant_screener.run_condition_screener(self.kis, "기대주_발굴")
         if gem_stocks:
-            passed_gem = quant_screener.run_unified_screener(gem_stocks, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token, self.config["DART_API_KEY"])
+            passed_gem = quant_screener.run_unified_screener(gem_stocks, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token)
             top_gems = [p for p in passed_gem if p.get('score', 0) >= 60]
             msg = ["[ Track A. 기대주 (60점 상회) ]\n"]
             if not top_gems: msg.append("- 조건을 통과한 유망 종목이 없습니다.")
@@ -273,7 +273,7 @@ class MarketOrchestrator:
             self.send_slack("- 현재 시간 기준 발굴된 당일 주도주가 없습니다.")
             return
 
-        passed = quant_screener.run_unified_screener(candidates, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token, self.config["DART_API_KEY"])
+        passed = quant_screener.run_unified_screener(candidates, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token)
         # 70점 이상의 우량주만 선별
         top_picks = [p for p in passed if p.get('score', 0) >= 70]
         

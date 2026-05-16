@@ -157,3 +157,25 @@ class KISClient:
                 }
         except: pass
         return None
+
+    def get_growth_metrics(self, ticker):
+        # FHKST03010400: 국내주식 성장성지표 조회 (매출액증가율, 영업이익증가율 등)
+        path = "/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {self.token}",
+            "appkey": self.app_key,
+            "appsecret": self.secret_key,
+            "tr_id": "FHKST03010400"
+        }
+        params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+        try:
+            res = requests.get(f"{self.base_url}{path}", headers=headers, params=params, timeout=5)
+            if res.status_code == 200:
+                data = res.json().get('output', {})
+                return {
+                    "sales_growth": float(data.get('gr_sales', 0) or 0.0), # 매출액증가율
+                    "op_growth": float(data.get('gr_op_profit', 0) or 0.0) # 영업이익증가율
+                }
+        except: pass
+        return None

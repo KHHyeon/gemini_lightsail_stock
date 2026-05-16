@@ -7,7 +7,7 @@ import io
 from contextlib import redirect_stdout
 from src.data import chart as chart_data
 
-import OpenDartReader
+
 
 def get_naver_dividend(ticker):
     try:
@@ -75,33 +75,23 @@ def get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker):
     except: pass
     return frgn_net, orgn_net
 
-def get_dart_yoy_growth(dart_client, ticker):
-    if not dart_client: return 0.0, 0.0, False
-    current_year = datetime.now().year
-    search_queue = [(current_year, "11013"), (current_year, "11012"), (current_year - 1, "11011")]
-    report = None
-    f = io.StringIO()
-    time.sleep(0.6)
+def get_kis_growth_metrics(base_url, app_key, secret_key, token, ticker):
+    # FHKST03010400: 국내주식 성장성지표 조회
+    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
+    headers = {
+        "Content-Type": "application/json", "authorization": f"Bearer {token}",
+        "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST03010400"
+    }
+    params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    time.sleep(0.1)
     try:
-        with redirect_stdout(f):
-            for year, rpt_code in search_queue:
-                try:
-                    report = dart_client.finstate(ticker, year, rpt_code)
-                    if report is not None and not report.empty: break
-                except: continue
-        if report is not None and not report.empty:
-            op_income_row = report.loc[(report['account_nm'] == '영업이익') | (report['account_nm'] == '연결영업이익')]
-            sales_row = report.loc[report['account_nm'].str.contains('매출|영업수익|수익', na=False)]
-            if not op_income_row.empty and not sales_row.empty:
-                cur_op = float(str(op_income_row.iloc[0].get('thstrm_amount', '0')).replace(',', '').strip() or 0)
-                cur_sales = float(str(sales_row.iloc[0].get('thstrm_amount', '0')).replace(',', '').strip() or 0)
-                prev_op = float(str(op_income_row.iloc[0].get('frmtrm_amount', '0')).replace(',', '').strip() or 0)
-                prev_sales = float(str(sales_row.iloc[0].get('frmtrm_amount', '0')).replace(',', '').strip() or 0)
-                
-                sales_growth = ((cur_sales - prev_sales) / abs(prev_sales)) * 100 if prev_sales != 0 else 0.0
-                turnaround = (prev_op <= 0 and cur_op > 0)
-                op_growth = ((cur_op - prev_op) / abs(prev_op)) * 100 if prev_op != 0 else 0.0
-                return sales_growth, op_growth, turnaround
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            data = res.json().get("output", {})
+            sales_growth = float(data.get("gr_sales", "0") or 0.0)
+            op_growth = float(data.get("gr_op_profit", "0") or 0.0)
+            # 증가율이 매우 높으면(100% 이상) 턴어라운드 가능성이 높은 것으로 간주
+            return sales_growth, op_growth, (op_growth > 100)
     except: pass
     return 0.0, 0.0, False
 
@@ -123,9 +113,8 @@ def run_condition_screener(kis_client, target_condition_name):
     print(f"Log: [Screener] 조건식 확인 완료. 종목 추출 중...")
     return results
 
-def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, dart_api_key):
+def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token):
     if not raw_candidates: return []
-    dart_client = OpenDartReader(dart_api_key) if dart_api_key else None
     final_list = []
     
     financial_keywords = ['지주', '은행', '증권', '보험', '금융']
@@ -180,7 +169,7 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
                 })
                 final_list.append(c)
         else:
-            sales_growth, op_growth, turnaround = get_dart_yoy_growth(dart_client, ticker)
+            sales_growth, op_growth, turnaround = get_kis_growth_metrics(base_url, app_key, secret_key, token, ticker)
             if sales_growth >= 10.0:
                 score += 25
                 details.append("매출성장(+25)")
@@ -198,7 +187,7 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token, d
     final_list.sort(key=lambda x: x.get("score", 0), reverse=True)
     return final_list
 
-def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark_rate, dart_api_key):
+def run_screener(raw_candidates, base_url, app_key, secret_key, token, benchmark_rate):
     if not raw_candidates: return []
     final_list = []
     min_dividend = round(benchmark_rate * 0.8, 2)
