@@ -88,46 +88,60 @@ def get_emergency_news_check(name, news_text):
     return generate_text(prompt)
 
 def get_multi_agent_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news):
-    # 1. 분석가(Analyst) 에이전트: 긍정적 투자 논리 개발
+    # 1. 기초 분석 에이전트: 재무 및 이슈 정리
+    base_prompt = f"""
+    [에이전트: 데이터 분석가]
+    종목: {stock_name}({ticker}) | 재무데이터: {valuation} | 뉴스/공시: {recent_news}
+    
+    위 데이터를 바탕으로 다음 두 섹션을 아주 간결한 개조식으로 작성하세요:
+    1. [ 재무현황 ]: PER, PBR, ROE 및 주요 재무 건전성 요약
+    2. [ 최신이슈분석 ]: 최근 뉴스 및 공시 중 핵심 모멘텀 또는 리스크
+    """
+    base_analysis = generate_text(base_prompt)
+
+    # 2. 분석가(Analyst) 에이전트: 긍정적 투자 논리 개발
     analyst_prompt = f"""
     [에이전트: 성장주 전문 분석가]
-    종목: {stock_name}({ticker}) | 밸류: {valuation} | 뉴스: {recent_news}
-    차트(30일): {chart_30d} | 매크로: {macro} | 테마맥락: {theme_context}
+    기초분석: {base_analysis}
+    테마맥락: {theme_context} | 차트: {chart_30d}
     
-    위 데이터를 바탕으로 이 종목이 '매수해야만 하는 이유'와 '상승 시나리오'를 아주 강력하고 논리적으로 작성하세요.
-    스마트폰 가독성을 위해 짧은 개조식으로 3줄 이내로 작성하세요.
+    위 데이터를 바탕으로 이 종목의 강력한 매수 논리(분석가 의견)를 2~3줄 내외로 작성하세요.
     """
     analyst_opinion = generate_text(analyst_prompt)
     
-    # 2. 리스크 관리자(Risk Manager) 에이전트: 악마의 대변인 (논리 공격)
+    # 3. 리스크 관리자(Risk Manager) 에이전트: 악마의 대변인
     risk_prompt = f"""
     [에이전트: 악마의 대변인 (리스크 관리자)]
-    분석가의 의견: {analyst_opinion}
-    데이터: 밸류({valuation}), 뉴스({recent_news}), 매크로({macro})
+    분석가 의견: {analyst_opinion}
+    재무/이슈: {base_analysis}
     
-    분석가가 간과하고 있는 치명적인 리스크나 논리적 허점을 찾으세요. 
-    이 종목을 '절대 사면 안 되는 이유'를 중심으로 냉정하게 공격하세요.
-    스마트폰 가독성을 위해 짧은 개조식으로 3줄 이내로 작성하세요.
+    분석가의 논리를 반박하고, 투자자가 반드시 경계해야 할 핵심 리스크를 2~3줄 내외로 작성하세요.
     """
     risk_opinion = generate_text(risk_prompt)
     
-    # 3. 최종 조율 및 리포트 생성
+    # 4. 최종 통합 에이전트
     final_prompt = f"""
-    [에이전트: 최종 투자 결정권자]
-    분석가 의견: {analyst_opinion}
-    리스크 관리자 반박: {risk_opinion}
+    [에이전트: 투자심의위원회]
+    종목: {stock_name}({ticker})
+    데이터: {base_analysis}
+    의견: 분석가({analyst_opinion}), 리스크관리자({risk_opinion})
     
-    두 상반된 시각을 종합하여 최종 리포트를 작성하세요. 
+    아래 양식에 맞춰 최종 리포트를 작성하세요. 
+    특히 [한줄요약]은 향후 시스템의 펀더멘털 매수 근거로 기록되므로, 밸류에이션/성장성/이슈가 통합된 매우 견고하고 확실한 문장으로 작성해야 합니다.
     
     [출력 양식]
+    {base_analysis}
+    
+    [ 핵심요약 ]
+    - (분석가와 리스크 관리자의 의견을 종합한 1줄 핵심 포인트)
+    
     [ 분석가 의견 ]
     - {analyst_opinion}
     
     [ 리스크 관리자 반박 ]
     - {risk_opinion}
     
-    마지막 줄은 반드시 아래 양식을 지키세요:
-    [한줄요약] [의견: 매수적극찬성/매수찬성/매수주의/매수반대/매수적극반대 중 택1] 매수사유 및 행동근거 | [상승조건] 팩트 (200자 이내) | [손절조건] 악재수치 (200자 이내)
+    [한줄요약] [의견: 매수적극찬성/매수찬성/매수주의/매수반대/매수적극반대 중 택1] (기업의 기초체력과 매수 근거를 포함한 견고한 펀더멘털 요약 문장) | [상승조건] (상승 시나리오) | [손절조건] (손절 트리거)
     """
     return generate_text(final_prompt)
 
