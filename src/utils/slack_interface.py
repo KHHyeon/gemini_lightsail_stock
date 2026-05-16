@@ -18,6 +18,7 @@ def register_slack_handlers(app, kis, config):
 - !잔고 : 실계좌 현금 및 포트폴리오 요약 조회
 - !기대주테스트 : 기대주 발굴 (60점 커트 + AI 5단계 검증)
 - !배당주테스트 : 배당주 발굴 (AI 배당컷 5단계 검증)
+- !역발상 : RSI 과매도 및 하락 진정 패턴 포착 스캔
 - !발굴 [배당률/테마] : 기존 100점 만점 펀더멘탈 스크리닝
 - !ai매수 [코드] [예산] : 정밀 분석 후 10일 분할매수 세팅
 - !수동등록 [코드] : 내 보유종목 방어막 감시망에 편입
@@ -62,6 +63,59 @@ def register_slack_handlers(app, kis, config):
                 output.append(f"- {name} ({s['ticker']})\n{rating}\n")
             say("\n".join(output))
         threading.Thread(target=task, daemon=True).start()
+
+    @app.message(re.compile(r"^!역발상", re.IGNORECASE))
+    def contrarian_scan(message, say):
+        say("[System] RSI 과매도 및 하락 진정 패턴(도지/거래량 급감) 기반 3단계 교차 검증 스캔을 시작합니다...")
+        def bg_task():
+            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+            kis = KISClient(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
+            
+            # 1단계: 기술적 분석 후보군 추출
+            candidates = quant_screener.run_condition_screener(kis, "기대주_발굴")
+            if not candidates: return say("[결과] 분석 대상 후보 종목이 없습니다.")
+            
+            tech_passed = []
+            for c in candidates:
+                ticker = c['ticker']
+                name = c['name']
+                ohlcv = chart_data.get_daily_ohlcv(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, ticker, count=30)
+                is_signal, tech_reason = quant_screener.check_contrarian_signal(ohlcv)
+                if is_signal:
+                    tech_passed.append({"ticker": ticker, "name": name, "tech_reason": tech_reason})
+            
+            if not tech_passed:
+                return say("[결과] 현재 하락 진정 패턴(도지/거래량 급감)이 포착된 과매도 종목이 없습니다.")
+            
+            # 2단계: 펀더멘털 안전 마진 검증 (70점 이상)
+            say(f"[System] 기술적 반등 시그널 포착({len(tech_passed)}종목). 2단계 펀더멘털(70점 이상) 검증 중...")
+            fund_passed = quant_screener.run_unified_screener(tech_passed, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
+            safe_candidates = [p for p in fund_passed if p.get('score', 0) >= 70]
+            
+            if not safe_candidates:
+                return say("[결과] 기술적 지표는 양호하나, 펀더멘털(70점 미만) 안전 마진을 충족하는 우량주가 없습니다.")
+            
+            # 3단계: AI 돌발 악재 뉴스 스캔
+            say(f"[System] 펀더멘털 우량주 선별 완료({len(safe_candidates)}종목). 3단계 AI 돌발 악재 뉴스 스캔 중...")
+            final_matched = []
+            for s in safe_candidates:
+                ticker = s['ticker']
+                name = s['name']
+                news = news_crawler.get_latest_news(name, limit=10, search_type="stock")
+                risk_res = ai_strategy.check_sudden_bad_news(ticker, name, news)
+                if "[위험]" not in risk_res:
+                    final_matched.append(f"- {name}({ticker}): {s['tech_reason']} (펀더멘털 {s['score']}점, AI 안전)")
+                else:
+                    say(f"[주의] {name}({ticker}) 패턴은 좋으나 돌발 악재 감지: {risk_res.replace('[위험]', '').strip()}")
+
+            if not final_matched:
+                return say("[결과] 모든 필터를 통과한 '진짜 바닥' 종목이 현재 시장에 없습니다.")
+            
+            msg = ["[ 역발상 3중 필터 저가 매수 포착 ]\n"] + final_matched
+            msg.append("\n* 3중 필터: RSI/도지(기술적) + 70점 이상(재무) + 뉴스 클린(AI)")
+            say("\n".join(msg))
+        
+        threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!잔고", re.IGNORECASE))
     def cmd_balance(message, say):

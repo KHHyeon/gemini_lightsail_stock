@@ -154,6 +154,17 @@ def check_fundamental_damage(ticker, stock_name, chart_30d, macro, valuation, th
     """
     return generate_text(prompt)
 
+def check_sudden_bad_news(ticker, stock_name, recent_news):
+    prompt = f"""
+    [에이전트: 돌발 악재 스캐너]
+    종목: {stock_name}({ticker}) | 최근뉴스: {recent_news}
+    
+    위 뉴스 목록을 보고 유상증자, 배임/횡령, 거래정지, 경영진 리스크 등 '치명적인 돌발 악재'가 있는지 판단하세요.
+    악재가 있다면 [위험] 이라고 적고 이유를 1줄로 설명하세요.
+    없다면 [안전] 이라고만 적으세요.
+    """
+    return generate_text(prompt)
+
 def match_naver_themes(keyword, theme_list):
     prompt = f"키워드 '{keyword}'와 일치하는 네이버 공식 테마를 아래 목록에서 최대 3개 골라 쉼표로 나열.\n{', '.join(theme_list)}"
     res = generate_text(prompt)

@@ -21,6 +21,62 @@ def get_naver_dividend(ticker):
     except: pass
     return 0.0
 
+def calculate_rsi(ohlcv, period=14):
+    if len(ohlcv) < period + 1: return 50.0
+    deltas = []
+    for i in range(1, len(ohlcv)):
+        deltas.append(ohlcv[i]['close'] - ohlcv[i-1]['close'])
+    
+    up = [d if d > 0 else 0 for d in deltas]
+    down = [abs(d) if d < 0 else 0 for d in deltas]
+    
+    avg_up = sum(up[-period:]) / period
+    avg_down = sum(down[-period:]) / period
+    
+    if avg_down == 0: return 100.0
+    rs = avg_up / avg_down
+    return 100.0 - (100.0 / (1+rs))
+
+def calculate_envelope_bottom(ohlcv, period=20, spread=15.0):
+    if len(ohlcv) < period: return 0.0
+    closes = [x['close'] for x in ohlcv[-period:]]
+    sma = sum(closes) / period
+    return sma * (1 - (spread / 100.0))
+
+def check_contrarian_signal(ohlcv):
+    """
+    RSI 30 이하, 엔벨로프 하단 터치 + 도지 캔들 + 거래량 급감 시그널 확인
+    """
+    if not ohlcv or len(ohlcv) < 20: return False, ""
+    
+    curr = ohlcv[-1]
+    prev = ohlcv[-2]
+    
+    rsi = calculate_rsi(ohlcv)
+    env_bottom = calculate_envelope_bottom(ohlcv)
+    
+    # 1차 필터: 과매도권 (RSI 30 이하 또는 엔벨로프 하단 근접)
+    is_oversold = rsi <= 35 or curr['close'] <= env_bottom * 1.02
+    if not is_oversold: return False, ""
+    
+    # 2. 2차 필터: 하락 진정 패턴 (도지 캔들 + 거래량 급감)
+    body_size = abs(curr['open'] - curr['close'])
+    total_size = curr['high'] - curr['low'] if curr['high'] != curr['low'] else 1
+    
+    # 사용자의 정밀 요청: 시가와 종가의 차이가 전체 캔들 길이의 1.5% 이내일 때 도지로 인정
+    is_doji = (body_size / total_size) <= 0.015
+    
+    # 최근 5일 평균 거래량 대비 급감 (80% 이하)
+    avg_vol = sum([x['volume'] for x in ohlcv[-6:-1]]) / 5
+    is_vol_drop = curr['volume'] < avg_vol * 0.8
+    
+    if is_oversold and is_doji and is_vol_drop:
+        return True, f"RSI:{rsi:.1f}/도지/거래량급감"
+    elif is_oversold and curr['close'] > prev['close'] and is_vol_drop:
+        return True, f"RSI:{rsi:.1f}/양봉전환/거래량급감"
+        
+    return False, ""
+
 def get_basic_valuation(base_url, app_key, secret_key, token, ticker):
     # FHKST01010100: 주식 현재가 시세
     url_price = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
