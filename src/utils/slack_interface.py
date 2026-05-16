@@ -69,7 +69,7 @@ def register_slack_handlers(app, kis, config):
         say("[System] RSI 과매도 및 하락 진정 패턴(도지/거래량 급감) 기반 3단계 교차 검증 스캔을 시작합니다...")
         def bg_task():
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
-            kis = KISClient(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
+            kis.set_token(token)
             
             # 1단계: 기술적 분석 후보군 추출
             candidates = quant_screener.run_condition_screener(kis, "기대주_발굴")
