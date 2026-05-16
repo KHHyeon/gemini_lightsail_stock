@@ -264,9 +264,74 @@ class MarketOrchestrator:
         if messages or keys_to_delete: save_json_to_gdrive(split_orders, "split_orders.json")
         if messages: self.send_slack("[자동 분할 매수 데몬]\n" + "\n".join(messages))
 
+    def scan_and_register_intraday_stocks(self, token):
+        # 당일 거래량 급증 및 주도주 실시간 스캔 (HTS 조건식 연동)
+        self.send_slack("[System] 정오의 보초: 당일 주도주 실시간 스캔을 시작합니다.")
+        
+        candidates = quant_screener.run_condition_screener(self.kis, "당일_주도주_발굴")
+        if not candidates:
+            self.send_slack("- 현재 시간 기준 발굴된 당일 주도주가 없습니다.")
+            return
+
+        passed = quant_screener.run_unified_screener(candidates, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token, self.config["DART_API_KEY"])
+        # 70점 이상의 우량주만 선별
+        top_picks = [p for p in passed if p.get('score', 0) >= 70]
+        
+        if not top_picks:
+            self.send_slack("- 조건(70점)을 통과한 당일 주도주가 없습니다.")
+            return
+
+        split_orders = load_json_from_gdrive("split_orders.json") or {}
+        split_orders_updated = False
+        messages = []
+
+        for s in top_picks[:3]: # 너무 많지 않게 최대 3개만
+            ticker, name = s['ticker'], s['name']
+            
+            # 이미 매수 진행 중이거나 보유 중인 종목 제외
+            if ticker in split_orders: continue
+            portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+            if ticker in portfolio and portfolio[ticker].get("quantity", 0) > 0: continue
+
+            # AI 정밀 검증
+            news = news_crawler.get_latest_news(name, limit=3, search_type="stock")
+            rating = ai_strategy.get_quick_rating(ticker, name, news, "당일주도주", s)
+            
+            if "[매수추천]" in rating or "[매수]" in rating:
+                # 자동 편입 (기본 예산 100만원 가정 또는 계좌 잔고 기반 설정 가능)
+                # 여기서는 안전을 위해 기본 100만원 예산으로 10일 분할 매수 설정
+                total_budget = 1000000 
+                daily_budget = total_budget // 10
+                
+                oid = f"auto_{ticker}_{datetime.now().strftime('%m%d%H%M')}"
+                reason = f"정오 보초 발굴 | {rating}"
+                
+                split_orders[oid] = {
+                    "ticker": ticker, "name": name, "daily_budget": daily_budget, 
+                    "remaining_days": 10, "reason": reason, "mode_type": "NORMAL", "score": s.get("score", 0)
+                }
+                split_orders_updated = True
+                messages.append(f"- {name}({ticker}) [스코어: {s['score']}점] 자동 매수 편입 완료.\n  ㄴ 사유: {rating}")
+        
+        if split_orders_updated:
+            save_json_to_gdrive(split_orders, "split_orders.json")
+        
+        if messages:
+            self.send_slack("[정오 보초: 신규 주도주 발굴 결과]\n" + "\n".join(messages))
+        else:
+            self.send_slack("- 정밀 검증(AI)을 통과한 신규 주도주가 없습니다.")
+
     def noon_routine(self):
         if not market_hours.is_market_open(): return
         self.send_slack("[System] 11:45 정오의 보초 및 자동 분할 매수를 시작합니다.")
+        
+        token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
+        self.kis.set_token(token)
+        
+        # 1. 당일 급등 주도주 스캔 및 등록
+        self.scan_and_register_intraday_stocks(token)
+        
+        # 2. 기존 분할 매수 집행 (뉴스 악재 스캔 포함)
         self.execute_daily_split_buys(check_news=True)
 
     def afternoon_routine(self):

@@ -251,7 +251,7 @@ def register_slack_handlers(app, kis, config):
             say(report)
         threading.Thread(target=bg_task, daemon=True).start()
 
-    @app.message("!초기화")
+    @app.message(re.compile(r"^!초기화", re.IGNORECASE))
     def reset_data(message, say):
         for f in ["paper_trades.json", "paper_portfolio.json", "split_orders.json", "theme_context.json"]: save_json_to_gdrive({} if "trades" not in f else [], f)
         say("[System] 데이터 초기화 완료.")
