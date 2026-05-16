@@ -171,7 +171,7 @@ def register_slack_handlers(app, kis, config):
                 news = news_crawler.get_latest_news(name, limit=5, search_type="stock")
                 passed = quant_screener.run_unified_screener([{"ticker": ticker, "name": name}], config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
                 score = passed[0].get("score", 0) if passed else 0
-                report = ai_strategy.get_ai_investment_report(ticker, name, chart_30d, macro, pf, val, theme_mem.get(ticker, ""), news)
+                report = ai_strategy.get_multi_agent_investment_report(ticker, name, chart_30d, macro, pf, val, theme_mem.get(ticker, ""), news)
                 oid = str(uuid.uuid4())
                 sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
                 pending_orders[oid] = {"ticker": ticker, "total_budget": budget, "current_price": int(val.get("current_price", 0)), "stock_name": name, "mode_type": "NORMAL", "reason": sum_match.group(1).strip() if sum_match else "AI 분석 완료", "score": score}
@@ -224,7 +224,7 @@ def register_slack_handlers(app, kis, config):
             macro = macro_collector.get_macro_indicators()
             news = news_crawler.get_latest_news(name, limit=5, search_type="stock")
             portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-            report = ai_strategy.get_ai_investment_report(ticker, name, chart_30d, macro, portfolio, val, "수동 발굴", news)
+            report = ai_strategy.get_multi_agent_investment_report(ticker, name, chart_30d, macro, portfolio, val, "수동 발굴", news)
             sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
             reason = f"수동등록 | {sum_match.group(1).strip() if sum_match else 'AI 팩트체크 완료'}"
             portfolio[ticker] = {"name": name, "quantity": qty, "avg_price": avg_price, "high_water_mark": max(portfolio.get(ticker, {}).get("high_water_mark", avg_price), avg_price), "mode_type": found_mode, "reason": reason, "buy_date": datetime.now().strftime("%Y-%m-%d")}

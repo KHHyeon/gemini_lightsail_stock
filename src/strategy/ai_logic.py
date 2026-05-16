@@ -87,18 +87,49 @@ def get_emergency_news_check(name, news_text):
     """
     return generate_text(prompt)
 
-def get_ai_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news):
-    prompt = f"""
-    스마트폰 가독성을 극대화하여 아래 종목을 분석하세요.
+def get_multi_agent_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news):
+    # 1. 분석가(Analyst) 에이전트: 긍정적 투자 논리 개발
+    analyst_prompt = f"""
+    [에이전트: 성장주 전문 분석가]
     종목: {stock_name}({ticker}) | 밸류: {valuation} | 뉴스: {recent_news}
+    차트(30일): {chart_30d} | 매크로: {macro} | 테마맥락: {theme_context}
     
-    [특수 섹터 규칙]
-    만약 이 기업이 금융업(은행, 증권, 보험, 지주)이라면 NPL(부실채권비율), CET1(보통주자본비율) 등의 리스크 맥락과 총주주환원율(배당 및 자사주) 의지를 파악하여 [상승조건]에 '주주환원 정책 지속성'을 포함하세요.
+    위 데이터를 바탕으로 이 종목이 '매수해야만 하는 이유'와 '상승 시나리오'를 아주 강력하고 논리적으로 작성하세요.
+    스마트폰 가독성을 위해 짧은 개조식으로 3줄 이내로 작성하세요.
+    """
+    analyst_opinion = generate_text(analyst_prompt)
     
-        마지막 줄은 반드시 아래 양식을 지키세요:
+    # 2. 리스크 관리자(Risk Manager) 에이전트: 악마의 대변인 (논리 공격)
+    risk_prompt = f"""
+    [에이전트: 악마의 대변인 (리스크 관리자)]
+    분석가의 의견: {analyst_opinion}
+    데이터: 밸류({valuation}), 뉴스({recent_news}), 매크로({macro})
+    
+    분석가가 간과하고 있는 치명적인 리스크나 논리적 허점을 찾으세요. 
+    이 종목을 '절대 사면 안 되는 이유'를 중심으로 냉정하게 공격하세요.
+    스마트폰 가독성을 위해 짧은 개조식으로 3줄 이내로 작성하세요.
+    """
+    risk_opinion = generate_text(risk_prompt)
+    
+    # 3. 최종 조율 및 리포트 생성
+    final_prompt = f"""
+    [에이전트: 최종 투자 결정권자]
+    분석가 의견: {analyst_opinion}
+    리스크 관리자 반박: {risk_opinion}
+    
+    두 상반된 시각을 종합하여 최종 리포트를 작성하세요. 
+    
+    [출력 양식]
+    [ 분석가 의견 ]
+    - {analyst_opinion}
+    
+    [ 리스크 관리자 반박 ]
+    - {risk_opinion}
+    
+    마지막 줄은 반드시 아래 양식을 지키세요:
     [한줄요약] [의견: 매수적극찬성/매수찬성/매수주의/매수반대/매수적극반대 중 택1] 매수사유 및 행동근거 | [상승조건] 팩트 (200자 이내) | [손절조건] 악재수치 (200자 이내)
     """
-    return generate_text(prompt)
+    return generate_text(final_prompt)
 
 def check_fundamental_damage(ticker, stock_name, chart_30d, macro, valuation, theme_context):
     prompt = f"""
