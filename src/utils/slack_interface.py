@@ -379,7 +379,7 @@ def register_slack_handlers(app, kis, config):
                 us_kw, kr_kw = ai_strategy.infer_news_keywords().split(',')[:2]
                 report = ai_strategy.get_daily_market_report(macro, news_crawler.get_latest_news(us_kw, limit=5, search_type="macro"), news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro"), research_crawler.get_latest_industry_reports(limit=8), "수동 요청")
             else:
-                if (!portfolio): return say("[결과] 보유 종목이 없습니다.")
+                if not portfolio: return say("[결과] 보유 종목이 없습니다.")
                 news_dict = {i["name"]: news_crawler.get_latest_news(i["name"], limit=5, search_type="stock") for i in portfolio.values() if i.get("quantity", 0) > 0}
                 if "!주간" in text: report = ai_strategy.get_weekly_portfolio_report(portfolio, news_dict)
                 elif "!월간" in text: report = ai_strategy.get_monthly_portfolio_report(portfolio, news_dict)
