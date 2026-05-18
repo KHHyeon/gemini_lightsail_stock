@@ -17,7 +17,7 @@ class OrderManager:
         self.token = token
         self.acc_no = acc_no 
 
-        def execute_order(self, ticker, name, quantity, current_price, side, reason, mode_type="NORMAL", strategy_tag="UNKNOWN"):
+    def execute_order(self, ticker, name, quantity, current_price, side, reason, mode_type="NORMAL", strategy_tag="UNKNOWN"):
         # [수정됨] 수동 등록 종목의 독립성 보장 로직
         if mode_type == "PAPER_ONLY":
             mode = "PAPER"
