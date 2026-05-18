@@ -34,30 +34,37 @@ def get_macro_trend(ticker_symbol):
 
 def get_macro_indicators():
     """
-    환율, 미국 10년물 국채 금리, WTI 유가, 금 시세, VIX 지수의 1개월 추세를 수집합니다.
+    환율, 미국 10년물 국채 금리, WTI 유가, 금 시세, VIX 지수 및 국내 지수 종가를 수집합니다.
     """
     indicators = {
         "환율(USD/KRW)": get_macro_trend("KRW=X"),
         "미 국채 10년물 금리(%)": get_macro_trend("^TNX"),
         "WTI 원유(달러)": get_macro_trend("CL=F"),
         "국제 금(달러)": get_macro_trend("GC=F"),
-        "VIX 공포지수": get_macro_trend("^VIX")
+        "VIX 공포지수": get_macro_trend("^VIX"),
+        "KOSPI": get_macro_trend("^KS11"),
+        "KOSDAQ": get_macro_trend("^KQ11")
     }
     
     summary_lines = []
     summary_lines.append("[ 주요 매크로 지표 현황 ]")
     for name, data in indicators.items():
-        if data:
+        if data and name not in ["KOSPI", "KOSDAQ"]:
             summary_lines.append(f"- {name}: 현재 {data['current']} / 1주전 {data['week_ago']} / 1달전 {data['month_ago']} (추세: {data['trend']})")
     
     # AI 요약용 텍스트와 하드스탑 판단용 개별 수치를 함께 반환
     vix_data = indicators.get("VIX 공포지수")
     wti_data = indicators.get("WTI 원유(달러)")
     us10y_data = indicators.get("미 국채 10년물 금리(%)")
+    kospi_data = indicators.get("KOSPI")
+    kosdaq_data = indicators.get("KOSDAQ")
     
     return {
         "ai_summary": "\n".join(summary_lines) if len(summary_lines) > 1 else "데이터 수집 실패",
         "VIX": vix_data["current"] if vix_data else 20.0,
         "WTI": wti_data["current"] if wti_data else 70.0,
-        "US10Y": us10y_data["current"] if us10y_data else 4.0
+        "US10Y": us10y_data["current"] if us10y_data else 4.0,
+        "KOSPI": kospi_data["current"] if kospi_data else 0.0,
+        "KOSDAQ": kosdaq_data["current"] if kosdaq_data else 0.0
     }
+

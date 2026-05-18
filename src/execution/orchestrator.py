@@ -58,32 +58,60 @@ class MarketOrchestrator:
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
         self.kis.set_token(token)
         
-        # Track A
-        gem_stocks = quant_screener.run_condition_screener(self.kis, "기대주_발굴")
-        if gem_stocks:
-            passed_gem = quant_screener.run_unified_screener(gem_stocks, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token)
-            top_gems = [p for p in passed_gem if p.get('score', 0) >= 60]
-            msg = ["[ Track A. 기대주 (60점 상회) ]\n"]
-            if not top_gems: msg.append("- 조건을 통과한 유망 종목이 없습니다.")
-            else:
-                for s in top_gems[:5]:
-                    name, _, _ = stock_info_crawler.get_stock_info_naver(s['ticker'])
-                    news = news_crawler.get_latest_news(name, limit=2)
-                    rating = ai_strategy.get_quick_rating(s['ticker'], name, news, "기대주", s)
-                    msg.append(f"- {name} ({s['ticker']}) [{s.get('score')}점]\n{rating}\n")
+        # 조건식 이름과 TRACK 매핑
+        track_mapping = {
+            "기대주_발굴": "TRACK_A",
+            "배당주_발굴": "TRACK_B",
+            "낙폭과대_발굴": "TRACK_C"
+        }
+        
+        for condition_name, track_tag in track_mapping.items():
+            raw_stocks = quant_screener.run_condition_screener(self.kis, condition_name)
+            if not raw_stocks: continue
+            
+            passed_stocks = quant_screener.run_3track_screener(condition_name, raw_stocks, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token)
+            
+            if not passed_stocks:
+                self.send_slack(f"[ Track: {condition_name} ]\n- 2차 검증을 통과한 종목이 없습니다.")
+                continue
+
+            msg = [f"[ Track: {condition_name} ({track_tag}) ]\n"]
+            for s in passed_stocks[:5]:
+                name, _, _ = stock_info_crawler.get_stock_info_naver(s['ticker'])
+                news = news_crawler.get_latest_news(name, limit=3)
+                
+                # AI 정밀 리스크 스캔
+                bad_news_check = ai_strategy.get_sudden_bad_news(s['ticker'], name, " ".join(news))
+                if "[위험]" in bad_news_check:
+                    msg.append(f"- {name} ({s['ticker']}) [제외]\n  ㄴ 사유: {bad_news_check}\n")
+                    continue
+                
+                # 종목 등급 및 사유 생성
+                if condition_name == "배당주_발굴":
+                    rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, s)
+                else:
+                    rating = ai_strategy.get_quick_rating(s['ticker'], name, news, condition_name, s)
+                    
+                details_str = ", ".join(s.get('score_details', []))
+                msg.append(f"- {name} ({s['ticker']})\n  ㄴ 검증: {details_str}\n  ㄴ AI판정: {rating}\n")
+                
+                # 자동 매수 등록 (예: 100만원 예산, 10일 분할)
+                if "[매수추천]" in rating or "[매수]" in rating:
+                    split_orders = load_json_from_gdrive("split_orders.json") or {}
+                    oid = f"auto_{s['ticker']}_{datetime.now().strftime('%m%d%H%M')}"
+                    if not any(v['ticker'] == s['ticker'] for v in split_orders.values()):
+                        split_orders[oid] = {
+                            "ticker": s['ticker'], "name": name, "daily_budget": 100000, 
+                            "remaining_days": 10, "reason": f"AI 자동발굴 ({condition_name})", 
+                            "mode_type": "NORMAL", "score": s.get("score", 0),
+                            "strategy_tag": track_tag
+                        }
+                        save_json_to_gdrive(split_orders, "split_orders.json")
+                        msg.append(f"  ㄴ [자동등록] {track_tag} 전략으로 분할매수 시작.")
+
             self.send_slack("\n".join(msg))
 
-        # Track B
-        div_stocks = quant_screener.run_condition_screener(self.kis, "배당주_발굴")
-        if div_stocks:
-            msg = ["[ Track B. 배당 가치주 ]\n"]
-            for s in div_stocks[:5]:
-                name, _, _ = stock_info_crawler.get_stock_info_naver(s['ticker'])
-                news = news_crawler.get_latest_news(name, limit=2)
-                val = self.kis.get_valuation_data(s['ticker']) or {}
-                rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, val)
-                msg.append(f"- {name} ({s['ticker']})\n{rating}\n")
-            self.send_slack("\n".join(msg))
+
 
     def weekly_routine(self):
         if not market_hours.is_market_open(): return
@@ -247,7 +275,8 @@ class MarketOrchestrator:
             if current_price <= ma5 * threshold:
                 qty = int(daily_budget // current_price)
                 if qty > 0:
-                    res = order_mgr.execute_order(ticker, name, qty, current_price, "buy", f"{info['reason']} ({11-info['remaining_days']}/10회차)", info.get("mode_type", "PAPER_ONLY"))
+                    res = order_mgr.execute_order(ticker, name, qty, current_price, "buy", f"{info['reason']} ({11-info['remaining_days']}/10회차)", info.get("mode_type", "PAPER_ONLY"), strategy_tag=info.get("strategy_tag", "UNKNOWN"))
+
                     messages.append(res["msg"])
                     info["remaining_days"] -= 1
                 else:

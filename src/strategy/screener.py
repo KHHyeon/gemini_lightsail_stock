@@ -45,37 +45,158 @@ def calculate_envelope_bottom(ohlcv, period=20, spread=15.0):
 
 def check_contrarian_signal(ohlcv):
     """
-    RSI 30 이하, 엔벨로프 하단 터치 + 도지 캔들 + 거래량 급감 시그널 확인
+    [낙폭과대_발굴] 2차 검증: 하락 진정 변곡점 확인 (도지 캔들 또는 거래량 급감)
+    HTS 1차 필터링(RSI, 이격도 등)을 통과한 종목에 대해 정밀 타점을 잡음
     """
-    if not ohlcv or len(ohlcv) < 20: return False, ""
+    if not ohlcv or len(ohlcv) < 5: return False, ""
     
     curr = ohlcv[-1]
     prev = ohlcv[-2]
     
-    rsi = calculate_rsi(ohlcv)
-    env_bottom = calculate_envelope_bottom(ohlcv)
-    
-    # 1차 필터: 과매도권 (RSI 30 이하 또는 엔벨로프 하단 근접)
-    is_oversold = rsi <= 35 or curr['close'] <= env_bottom * 1.02
-    if not is_oversold: return False, ""
-    
-    # 2. 2차 필터: 하락 진정 패턴 (도지 캔들 + 거래량 급감)
+    # 1. 도지 캔들 판정 (몸통이 전체 변동폭의 1.5% 이내)
     body_size = abs(curr['open'] - curr['close'])
     total_size = curr['high'] - curr['low'] if curr['high'] != curr['low'] else 1
-    
-    # 사용자의 정밀 요청: 시가와 종가의 차이가 전체 캔들 길이의 1.5% 이내일 때 도지로 인정
     is_doji = (body_size / total_size) <= 0.015
     
-    # 최근 5일 평균 거래량 대비 급감 (80% 이하)
-    avg_vol = sum([x['volume'] for x in ohlcv[-6:-1]]) / 5
-    is_vol_drop = curr['volume'] < avg_vol * 0.8
+    # 2. 거래량 급감 판정 (최근 5일 평균 대비 50% 이하 또는 전일 대비 50% 이하)
+    avg_vol_5d = sum([x['volume'] for x in ohlcv[-6:-1]]) / 5
+    is_vol_drop = (curr['volume'] < avg_vol_5d * 0.5) or (curr['volume'] < prev['volume'] * 0.5)
     
-    if is_oversold and is_doji and is_vol_drop:
-        return True, f"RSI:{rsi:.1f}/도지/거래량급감"
-    elif is_oversold and curr['close'] > prev['close'] and is_vol_drop:
-        return True, f"RSI:{rsi:.1f}/양봉전환/거래량급감"
+    if is_doji or is_vol_drop:
+        reason = "도지캔들" if is_doji else "거래량급감"
+        if is_doji and is_vol_drop: reason = "도지+거래량급감"
+        return True, f"변곡점확인({reason})"
         
     return False, ""
+
+def validate_contrarian_track(val, ohlcv, mkt_cap):
+    """
+    [낙폭과대_발굴] 2차 검증 로직
+    HTS에서 1차 필터링된 종목을 대상으로 파이썬에서만 가능한 정밀 분석 수행
+    """
+    # 1. 기술적 변곡점 정밀 확인 (도지/거래량)
+    is_signal, signal_desc = check_contrarian_signal(ohlcv)
+    if not is_signal: return False, []
+    
+    details = [f"낙폭과대우량주(시총:{mkt_cap/1e8:.0f}억)", signal_desc]
+    
+    # 2. 실시간 뉴스/공시 리스크 마이닝 (2차 검증의 핵심)
+    # 이 부분은 ai_logic.py 또는 news_crawler.py와 연동하여 호출됨
+    
+    return True, details
+
+
+def validate_growth_track(val, ohlcv, growth_metrics):
+    """ [기대주_발굴] 2차 검증 로직 """
+    if not ohlcv or len(ohlcv) < 60: return False, []
+    details = []
+    
+    # 재무: ROE 10%+, 영업이익증가율 10%+, PER 20배 이하
+    sales_g, op_g, _ = growth_metrics
+    if val['roe'] < 10.0 or op_g < 10.0 or val['per'] > 20.0 or val['per'] <= 0:
+        return False, []
+    
+    # 기술적: 정배열 (1 > 20 > 60), 20일 이격도 95~105%
+    curr_close = ohlcv[-1]['close']
+    ma20 = sum([x['close'] for x in ohlcv[-20:]]) / 20
+    ma60 = sum([x['close'] for x in ohlcv[-60:]]) / 60
+    
+    is_bullish = curr_close > ma20 > ma60
+    disparity_20 = (curr_close / ma20) * 100
+    is_pullback = 95.0 <= disparity_20 <= 105.0
+    
+    if is_bullish and is_pullback:
+        details.append(f"성장성(ROE:{val['roe']:.1f}/OPG:{op_g:.1f})")
+        details.append(f"정배열눌림목(이격:{disparity_20:.1f}%)")
+        return True, details
+    return False, []
+
+def validate_value_track(val, ohlcv):
+    """ [배당주_발굴] 2차 검증 로직 """
+    if not ohlcv or len(ohlcv) < 120: return False, []
+    details = []
+    
+    # 가치: 시가배당률 3.5%+, PER 13배 이하, PBR 1배 이하
+    if val['dvd_yld'] < 3.5 or val['per'] > 13.0 or val['pbr'] > 1.0 or val['per'] <= 0:
+        return False, []
+    
+    # 기술적: 120일 이격도 95~105% (장기 바닥권)
+    curr_close = ohlcv[-1]['close']
+    ma120 = sum([x['close'] for x in ohlcv[-120:]]) / 120
+    disparity_120 = (curr_close / ma120) * 100
+    
+    if 95.0 <= disparity_120 <= 105.0:
+        details.append(f"고배당가치(배당:{val['dvd_yld']:.1f}/PBR:{val['pbr']:.2f})")
+        details.append(f"장기바닥권(이격120:{disparity_120:.1f}%)")
+        return True, details
+    return False, []
+
+def get_market_cap(base_url, app_key, secret_key, token, ticker):
+    """ 시가총액 조회 (FHKST01010100 활용) """
+    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
+    headers = {
+        "Content-Type": "application/json", "authorization": f"Bearer {token}",
+        "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST01010100"
+    }
+    params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            return int(res.json().get("output", {}).get("hts_avls", "0")) * 1000000 # 백만원 단위 -> 원
+    except: pass
+    return 0
+
+def run_3track_screener(track_name, raw_candidates, base_url, app_key, secret_key, token):
+    """ HTS 트랙별 특화 스크리너 """
+    if not raw_candidates: return []
+    final_list = []
+    
+    for c in raw_candidates:
+        ticker = c.get("ticker")
+        stock_name = c.get("name", ticker)
+        
+        # 1. 공통 데이터 수집
+        val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
+        if val["current_price"] <= 0: continue
+        
+        # 유동성 체크 (5일 평균 거래대금 10억~30억 이상)
+        min_tr_amount = 3000000000 if track_name in ["기대주_발굴", "낙폭과대_발굴"] else 1000000000
+        if val["tr_amount"] < min_tr_amount: continue
+        
+        ohlcv = chart_data.get_daily_ohlcv(base_url, app_key, secret_key, token, ticker, count=130)
+        if not ohlcv: continue
+        
+        passed = False
+        details = []
+        
+        # 2. 트랙별 개별 검증
+        if track_name == "기대주_발굴":
+            growth_metrics = get_kis_growth_metrics(base_url, app_key, secret_key, token, ticker)
+            passed, details = validate_growth_track(val, ohlcv, growth_metrics)
+        
+        elif track_name == "배당주_발굴":
+            passed, details = validate_value_track(val, ohlcv)
+            
+        elif track_name == "낙폭과대_발굴":
+            mkt_cap = get_market_cap(base_url, app_key, secret_key, token, ticker)
+            passed, details = validate_contrarian_track(val, ohlcv, mkt_cap)
+
+
+        
+        if passed:
+            # 수급 데이터 추가 (최종 점수 반영용)
+            frgn, orgn = get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker)
+            if frgn > 0 or orgn > 0: details.append("수급유입 확인")
+            
+            c.update({
+                "current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"], 
+                "roe": val["roe"], "dvd_yld": val["dvd_yld"],
+                "score_details": details, "track": track_name
+            })
+            final_list.append(c)
+            
+    return final_list
+
 
 def get_basic_valuation(base_url, app_key, secret_key, token, ticker):
     # FHKST01010100: 주식 현재가 시세

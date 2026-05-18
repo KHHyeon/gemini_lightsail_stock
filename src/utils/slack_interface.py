@@ -11,20 +11,122 @@ from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
 pending_orders = {}
 
 def register_slack_handlers(app, kis, config):
-    
+
     @app.message(re.compile(r"^!명령어", re.IGNORECASE))
     def cmd_help(message, say):
         help_text = """[ 봇 명령어 매뉴얼 ]
 - !잔고 : 실계좌 현금 및 포트폴리오 요약 조회
-- !기대주테스트 : 기대주 발굴 (60점 커트 + AI 5단계 검증)
-- !배당주테스트 : 배당주 발굴 (AI 배당컷 5단계 검증)
+- !HTS스캔 : 3-Track(기대주/배당주/낙폭과대) 통합 스캔 및 검증
+- !타점분석 [코드] : 특정 종목의 도지/거래량 정밀 타점 진단
 - !역발상 : RSI 과매도 및 하락 진정 패턴 포착 스캔
-- !발굴 [배당률/테마] : 기존 100점 만점 펀더멘탈 스크리닝
+- !발굴 [배당률/테마] : 기존 100점 만점 펀더멘털 스크리닝
 - !ai매수 [코드] [예산] : 정밀 분석 후 10일 분할매수 세팅
-- !수동등록 [코드] : 내 보유종목 방어막 감시망에 편입
+- !수동등록 [코드] [트랙] : 내 보유종목 방어막 감시망에 편입 (트랙: A, B, C, M)
+- !성과 : AI vs 수동 트랙별 승률 및 수익률 비교 리포트
 - !일일보고 / !주간보고 / !월간보고 / !분기보고 : 각종 리포트 수동 생성
 - !초기화 : 장부 및 주문 데이터 초기화"""
         say(help_text)
+
+    @app.message(re.compile(r"^!HTS스캔", re.IGNORECASE))
+    def cmd_hts_scan_all(message, say):
+        say("[System] HTS 3-Track(기대주/배당주/낙폭과대) 통합 정밀 스캔을 시작합니다...")
+        def bg_task():
+            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+            kis.set_token(token)
+            
+            tracks = {
+                "기대주_발굴": "TRACK_A (성장)",
+                "배당주_발굴": "TRACK_B (가치)",
+                "낙폭과대_발굴": "TRACK_C (역발상)"
+            }
+            
+            summary = ["[ HTS 3-Track 통합 스캔 결과 ]\n"]
+            
+            for cond_name, display_name in tracks.items():
+                raw = quant_screener.run_condition_screener(kis, cond_name)
+                if not raw:
+                    summary.append(f"* {display_name}: 후보 없음")
+                    continue
+                
+                passed = quant_screener.run_3track_screener(cond_name, raw, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
+                if not passed:
+                    summary.append(f"* {display_name}: 2차 검증 통과 종목 없음")
+                    continue
+                
+                summary.append(f"* {display_name}: {len(passed)}종목 포착")
+                for s in passed[:3]:
+                    summary.append(f"  ㄴ {s['name']}({s['ticker']}): {', '.join(s['score_details'])}")
+                summary.append("")
+                
+            say("\n".join(summary))
+        threading.Thread(target=bg_task, daemon=True).start()
+
+    @app.message(re.compile(r"^!타점분석", re.IGNORECASE))
+    def cmd_timing_check(message, say):
+        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
+        parts = text.split()
+        if len(parts) < 2: return say("[Error] 사용법: !타점분석 [종목코드]")
+        ticker = re.sub(r'[^A-Za-z0-9]', '', parts[1])[:6].upper()
+        
+        say(f"[System] {ticker} 종목의 기술적 정밀 타점(Doji/Volume)을 분석합니다...")
+        def bg_task():
+            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+            ohlcv = chart_data.get_daily_ohlcv(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, ticker, count=30)
+            if not ohlcv or len(ohlcv) < 5: return say(f"[Error] {ticker} 차트 데이터를 불러올 수 없습니다.")
+            
+            curr = ohlcv[-1]
+            prev = ohlcv[-2]
+            
+            rsi = quant_screener.calculate_rsi(ohlcv)
+            body_size = abs(curr['open'] - curr['close'])
+            total_size = curr['high'] - curr['low'] if curr['high'] != curr['low'] else 1
+            body_ratio = (body_size / total_size) * 100
+            
+            avg_vol_5d = sum([x['volume'] for x in ohlcv[-6:-1]]) / 5
+            vol_ratio_avg = (curr['volume'] / avg_vol_5d) * 100
+            vol_ratio_prev = (curr['volume'] / prev['volume']) * 100
+            
+            is_signal, signal_desc = quant_screener.check_contrarian_signal(ohlcv)
+            
+            status = "\\U0001F4E2 [타점 진단 결과]"
+            if is_signal:
+                status = "\\U0001F6A8 [타점 포착!]"
+            
+            report = f"{status}\n- 종목코드: {ticker}\n- 현재 RSI(14): {rsi:.1f} {'(과매도)' if rsi <= 35 else ''}\n- 캔들 몸통 비중: {body_ratio:.2f}% {'(도지형)' if body_ratio <= 1.5 else ''}\n- 거래량 분석:\n  ㄴ 5일 평균 대비: {vol_ratio_avg:.1f}%\n  ㄴ 전일 대비: {vol_ratio_prev:.1f}%\n- 최종 판정: {signal_desc if is_signal else '시그널 없음'}"
+            say(report)
+        threading.Thread(target=bg_task, daemon=True).start()
+
+    @app.message(re.compile(r"^!성과", re.IGNORECASE))
+    def cmd_performance(message, say):
+        say("[System] 전략 트랙별 성과 분석 리포트를 생성합니다...")
+        def bg_task():
+            trades = load_json_from_gdrive("paper_trades.json") or []
+            if not trades: return say("[결과] 거래 기록이 없어 성과를 분석할 수 없습니다.")
+            
+            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+            kis.set_token(token)
+            
+            msg = ["[ 전략별 성과 비교 리포트 ]\n"]
+            all_tags = set([t.get("strategy_tag", "UNKNOWN") for t in trades])
+            for tag in sorted(all_tags):
+                tag_trades = [t for t in trades if t.get("strategy_tag") == tag and t["action"] == "BUY"]
+                if not tag_trades: continue
+                total_ret, win_count, trade_count = 0.0, 0, 0
+                for t in tag_trades:
+                    ticker, buy_price = t["ticker"], t["price"]
+                    if buy_price <= 0: continue
+                    val = kis.get_valuation_data(ticker)
+                    curr_price = int(val["current_price"]) if val else buy_price
+                    ret = (curr_price - buy_price) / buy_price
+                    total_ret += ret
+                    if ret > 0: win_count += 1
+                    trade_count += 1
+                avg_ret = (total_ret / trade_count) * 100 if trade_count > 0 else 0
+                win_rate = (win_count / trade_count) * 100 if trade_count > 0 else 0
+                tag_name = "AI-기대주(A)" if tag == "TRACK_A" else "AI-배당주(B)" if tag == "TRACK_B" else "AI-낙폭과대(C)" if tag == "TRACK_C" else "수동매수" if tag == "MANUAL" else tag
+                msg.append(f"* {tag_name} :\n  - 평균 수익률: {avg_ret:+.2f}%\n  - 승률: {win_rate:.1f}% ({win_count}/{trade_count}건)")
+            say("\n".join(msg))
+        threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!기대주테스트", re.IGNORECASE))
     def cmd_test_gem(message, say):
@@ -70,51 +172,31 @@ def register_slack_handlers(app, kis, config):
         def bg_task():
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
             kis.set_token(token)
-            
-            # 1단계: 기술적 분석 후보군 추출
             candidates = quant_screener.run_condition_screener(kis, "기대주_발굴")
             if not candidates: return say("[결과] 분석 대상 후보 종목이 없습니다.")
-            
             tech_passed = []
             for c in candidates:
-                ticker = c['ticker']
-                name = c['name']
+                ticker, name = c['ticker'], c['name']
                 ohlcv = chart_data.get_daily_ohlcv(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, ticker, count=30)
                 is_signal, tech_reason = quant_screener.check_contrarian_signal(ohlcv)
-                if is_signal:
-                    tech_passed.append({"ticker": ticker, "name": name, "tech_reason": tech_reason})
-            
-            if not tech_passed:
-                return say("[결과] 현재 하락 진정 패턴(도지/거래량 급감)이 포착된 과매도 종목이 없습니다.")
-            
-            # 2단계: 펀더멘털 안전 마진 검증 (70점 이상)
+                if is_signal: tech_passed.append({"ticker": ticker, "name": name, "tech_reason": tech_reason})
+            if not tech_passed: return say("[결과] 현재 하락 진정 패턴(도지/거래량 급감)이 포착된 과매도 종목이 없습니다.")
             say(f"[System] 기술적 반등 시그널 포착({len(tech_passed)}종목). 2단계 펀더멘털(70점 이상) 검증 중...")
             fund_passed = quant_screener.run_unified_screener(tech_passed, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
             safe_candidates = [p for p in fund_passed if p.get('score', 0) >= 70]
-            
-            if not safe_candidates:
-                return say("[결과] 기술적 지표는 양호하나, 펀더멘털(70점 미만) 안전 마진을 충족하는 우량주가 없습니다.")
-            
-            # 3단계: AI 돌발 악재 뉴스 스캔
+            if not safe_candidates: return say("[결과] 기술적 지표는 양호하나, 펀더멘털(70점 미만) 안전 마진을 충족하는 우량주가 없습니다.")
             say(f"[System] 펀더멘털 우량주 선별 완료({len(safe_candidates)}종목). 3단계 AI 돌발 악재 뉴스 스캔 중...")
             final_matched = []
             for s in safe_candidates:
-                ticker = s['ticker']
-                name = s['name']
+                ticker, name = s['ticker'], s['name']
                 news = news_crawler.get_latest_news(name, limit=10, search_type="stock")
                 risk_res = ai_strategy.check_sudden_bad_news(ticker, name, news)
-                if "[위험]" not in risk_res:
-                    final_matched.append(f"- {name}({ticker}): {s['tech_reason']} (펀더멘털 {s['score']}점, AI 안전)")
-                else:
-                    say(f"[주의] {name}({ticker}) 패턴은 좋으나 돌발 악재 감지: {risk_res.replace('[위험]', '').strip()}")
-
-            if not final_matched:
-                return say("[결과] 모든 필터를 통과한 '진짜 바닥' 종목이 현재 시장에 없습니다.")
-            
+                if "[위험]" not in risk_res: final_matched.append(f"- {name}({ticker}): {s['tech_reason']} (펀더멘털 {s['score']}점, AI 안전)")
+                else: say(f"[주의] {name}({ticker}) 패턴은 좋으나 돌발 악재 감지: {risk_res.replace('[위험]', '').strip()}")
+            if not final_matched: return say("[결과] 모든 필터를 통과한 '진짜 바닥' 종목이 현재 시장에 없습니다.")
             msg = ["[ 역발상 3중 필터 저가 매수 포착 ]\n"] + final_matched
             msg.append("\n* 3중 필터: RSI/도지(기술적) + 70점 이상(재무) + 뉴스 클린(AI)")
             say("\n".join(msg))
-        
         threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!잔고", re.IGNORECASE))
@@ -151,8 +233,7 @@ def register_slack_handlers(app, kis, config):
         unique_candidates = []
         seen = set()
         for c in candidates:
-            if c['ticker'] not in seen:
-                seen.add(c['ticker']); unique_candidates.append(c)
+            if c['ticker'] not in seen: seen.add(c['ticker']); unique_candidates.append(c)
         if not unique_candidates: return say(f"[Error] {keyword_msg} 소속 종목을 추출하지 못했습니다.")
         say(f"[System] 총 {len(unique_candidates)}개 종목 대상 100점 만점 펀더멘털 스크리닝을 시작합니다.")
         token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
@@ -206,7 +287,6 @@ def register_slack_handlers(app, kis, config):
         if len(parts) < 3: return say("[Error] 사용법: !ai매수 [종목코드] [총예산]")
         ticker = re.sub(r'[^A-Za-z0-9]', '', parts[1])[:6].upper()
         budget = int(re.sub(r'[^\d]', '', parts[2]))
-        
         def bg_task():
             try:
                 name, div, is_etf = stock_info_crawler.get_stock_info_naver(ticker)
@@ -259,18 +339,20 @@ def register_slack_handlers(app, kis, config):
     def manual_register_stock(message, say):
         text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
         parts = text.split()
-        if len(parts) < 2: return say("[Error] 사용법: !수동등록 [종목코드]")
+        if len(parts) < 2: return say("[Error] 사용법: !수동등록 [종목코드] [트랙(A/B/C/M)]")
         ticker = re.sub(r'[^A-Za-z0-9]', '', parts[1])[:6].upper()
-        say(f"[System] {ticker} 수동 등록 및 AI 팩트체크를 시작합니다...")
+        track_map = {"A": "TRACK_A", "B": "TRACK_B", "C": "TRACK_C", "M": "MANUAL"}
+        raw_track = parts[2].upper() if len(parts) > 2 else "M"
+        strategy_tag = track_map.get(raw_track, "MANUAL")
+        say(f"[System] {ticker} 수동 등록({strategy_tag}) 및 AI 팩트체크를 시작합니다...")
         def bg_task():
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
             kis.set_token(token)
-            qty, avg_price, found_mode = 0, 0.0, "PAPER_ONLY"
+            qty, avg_price = 0, 0.0
             for m in ["LIVE", "PAPER"]:
                 q, a = kis.get_real_holding_qty(ticker, m)
-                if q > 0: qty, avg_price, found_mode = q, a, ("LIVE_MANUAL" if m == "LIVE" else "PAPER_ONLY"); break
-            if qty <= 0:
-                say(f"[알림] 잔고 미보유 종목. 관심 종목으로 등록."); val = kis.get_valuation_data(ticker); avg_price = float(val.get("current_price", "0")) if val else 0.0
+                if q > 0: qty, avg_price = q, a; break
+            if qty <= 0: say(f"[알림] 잔고 미보유 종목. 관심 종목으로 등록."); val = kis.get_valuation_data(ticker); avg_price = float(val.get("current_price", "0")) if val else 0.0
             name, div, is_etf = stock_info_crawler.get_stock_info_naver(ticker)
             if is_etf: return say(f"[거절] {name}은(는) ETF입니다.")
             val = kis.get_valuation_data(ticker); val.update({"div_yield": div, "name": name})
@@ -281,9 +363,9 @@ def register_slack_handlers(app, kis, config):
             report = ai_strategy.get_multi_agent_investment_report(ticker, name, chart_30d, macro, portfolio, val, "수동 발굴", news)
             sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
             reason = f"수동등록 | {sum_match.group(1).strip() if sum_match else 'AI 팩트체크 완료'}"
-            portfolio[ticker] = {"name": name, "quantity": qty, "avg_price": avg_price, "high_water_mark": max(portfolio.get(ticker, {}).get("high_water_mark", avg_price), avg_price), "mode_type": found_mode, "reason": reason, "buy_date": datetime.now().strftime("%Y-%m-%d")}
-            save_json_to_gdrive(portfolio, "paper_portfolio.json")
-            say(f"[Success] {name}({ticker}) 등록 완료.\n\n{report}")
+            from src.utils import logger
+            logger.record_trade(ticker, name, "BUY", avg_price, qty, reason, strategy_tag=strategy_tag)
+            say(f"[Success] {name}({ticker}) {strategy_tag} 등록 완료.\n\n{report}")
         threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!(일일|주간|월간|분기)보고", re.IGNORECASE))
@@ -297,7 +379,7 @@ def register_slack_handlers(app, kis, config):
                 us_kw, kr_kw = ai_strategy.infer_news_keywords().split(',')[:2]
                 report = ai_strategy.get_daily_market_report(macro, news_crawler.get_latest_news(us_kw, limit=5, search_type="macro"), news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro"), research_crawler.get_latest_industry_reports(limit=8), "수동 요청")
             else:
-                if not portfolio: return say("[결과] 보유 종목이 없습니다.")
+                if (!portfolio): return say("[결과] 보유 종목이 없습니다.")
                 news_dict = {i["name"]: news_crawler.get_latest_news(i["name"], limit=5, search_type="stock") for i in portfolio.values() if i.get("quantity", 0) > 0}
                 if "!주간" in text: report = ai_strategy.get_weekly_portfolio_report(portfolio, news_dict)
                 elif "!월간" in text: report = ai_strategy.get_monthly_portfolio_report(portfolio, news_dict)
