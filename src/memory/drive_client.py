@@ -39,8 +39,24 @@ def _project_root():
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def get_service_account_path():
+    """서비스 계정 JSON 경로 (신규·레거시 env 모두 지원)."""
+    return (
+        os.getenv("GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", "").strip()
+        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    )
+
+
+def get_root_folder_id_env():
+    """Drive 루트 폴더 ID (신규·레거시 env 모두 지원)."""
+    return (
+        os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "").strip()
+        or os.getenv("GDRIVE_FOLDER_ID", "").strip()
+    )
+
+
 def is_drive_configured():
-    sa = os.getenv("GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", "").strip()
+    sa = get_service_account_path()
     oauth = os.getenv("GOOGLE_DRIVE_OAUTH_CLIENT_FILE", "").strip()
     return bool(sa or oauth)
 
@@ -54,9 +70,11 @@ def _get_service():
     if _DRIVE_SERVICE is not None:
         return _DRIVE_SERVICE
     if not is_drive_configured():
-        raise DriveNotConfiguredError("GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE 또는 GOOGLE_DRIVE_OAUTH_CLIENT_FILE 미설정")
+        raise DriveNotConfiguredError(
+            "GOOGLE_APPLICATION_CREDENTIALS 또는 GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE 미설정"
+        )
 
-    sa_path = os.getenv("GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", "").strip()
+    sa_path = get_service_account_path()
     if sa_path and os.path.isfile(sa_path):
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -176,7 +194,7 @@ def is_ready():
 
 
 def _resolve_root_folder_id(svc):
-    env_id = os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "").strip()
+    env_id = get_root_folder_id_env()
     if env_id:
         return env_id
     manifest = _load_manifest_local()
