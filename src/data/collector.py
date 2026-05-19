@@ -32,6 +32,21 @@ def get_macro_trend(ticker_symbol):
         print(f"Log: [Macro Error] {ticker_symbol} 수집 실패: {str(e)}")
         return None
 
+def _daily_change_pct(ticker_symbol):
+    """전일 대비 등락률(%)"""
+    try:
+        hist = yf.Ticker(ticker_symbol).history(period="5d")
+        if hist is None or len(hist) < 2:
+            return 0.0
+        prev_close = float(hist["Close"].iloc[-2])
+        curr = float(hist["Close"].iloc[-1])
+        if prev_close <= 0:
+            return 0.0
+        return round(((curr - prev_close) / prev_close) * 100, 2)
+    except Exception:
+        return 0.0
+
+
 def get_macro_indicators():
     """
     환율, 미국 10년물 국채 금리, WTI 유가, 금 시세, VIX 지수 및 국내 지수 종가를 수집합니다.
@@ -59,12 +74,17 @@ def get_macro_indicators():
     kospi_data = indicators.get("KOSPI")
     kosdaq_data = indicators.get("KOSDAQ")
     
+    kospi_chg = _daily_change_pct("^KS11")
+    kosdaq_chg = _daily_change_pct("^KQ11")
+
     return {
         "ai_summary": "\n".join(summary_lines) if len(summary_lines) > 1 else "데이터 수집 실패",
         "VIX": vix_data["current"] if vix_data else 20.0,
         "WTI": wti_data["current"] if wti_data else 70.0,
         "US10Y": us10y_data["current"] if us10y_data else 4.0,
         "KOSPI": kospi_data["current"] if kospi_data else 0.0,
-        "KOSDAQ": kosdaq_data["current"] if kosdaq_data else 0.0
+        "KOSDAQ": kosdaq_data["current"] if kosdaq_data else 0.0,
+        "KOSPI_CHG": kospi_chg,
+        "KOSDAQ_CHG": kosdaq_chg,
     }
 

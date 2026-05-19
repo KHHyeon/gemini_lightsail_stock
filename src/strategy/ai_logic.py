@@ -18,6 +18,21 @@ def generate_text(prompt, model_name=None):
         print(f"Log: [AI Error] {e}")
         return "AI 리포트 생성 실패"
 
+
+def generate_text_with_chronicle(prompt, macro=None, news_snippets=None, model_name=None):
+    """Market Chronicles Context Injection 후 Gemini 호출."""
+    try:
+        from src.memory.context_retriever import build_context_injection_block, extract_market_context
+
+        if macro is not None:
+            keywords, regime = extract_market_context(macro, news_snippets)
+            block = build_context_injection_block(keywords, regime)
+            if block:
+                prompt = f"{block}\n\n{prompt}"
+    except Exception as e:
+        print(f"Log: [Chronicles Inject Skip] {e}")
+    return generate_text(prompt, model_name)
+
 def infer_news_keywords():
     prompt = "현재 주식시장에서 가장 중요한 핵심 키워드(산업, 매크로 등)를 미국용 1개, 한국용 1개만 쉼표로 구분하여 알려줘. (예: 금리인하, 반도체)"
     return generate_text(prompt)
@@ -45,7 +60,8 @@ def get_daily_market_report(macro, us_news, kr_news, research_reports, extra):
     - 근거: (행동의 원리와 근거를 초보자도 알기 쉽게 1~2줄로 설명)
     - 대상 섹터: (명시)
     """
-    return generate_text(prompt)
+    news_snippets = list(us_news or []) + list(kr_news or [])
+    return generate_text_with_chronicle(prompt, macro=macro, news_snippets=news_snippets)
 
 def get_deep_market_report(macro, kr_news, research_reports):
     prompt = f"""
@@ -60,7 +76,7 @@ def get_deep_market_report(macro, kr_news, research_reports):
     - 근거: (행동의 원리와 근거를 초보자도 알기 쉽게 1~2줄로 설명)
     - 대상 섹터: (명시)
     """
-    return generate_text(prompt)
+    return generate_text_with_chronicle(prompt, macro=macro, news_snippets=kr_news)
 
 def get_weekly_portfolio_report(portfolio, news_dict):
     prompt = f"보유 종목({portfolio})의 투자 이유 유효성을 뉴스({news_dict}) 기반으로 냉정히 점검하세요. 스마트폰 가독성을 위해 짧은 개조식으로 작성."
@@ -143,7 +159,8 @@ def get_multi_agent_investment_report(ticker, stock_name, chart_30d, macro, pf, 
     
     [한줄요약] [의견: 매수적극찬성/매수찬성/매수주의/매수반대/매수적극반대 중 택1] (기업의 기초체력과 매수 근거를 포함한 견고한 펀더멘털 요약 문장) | [상승조건] (상승 시나리오) | [손절조건] (손절 트리거)
     """
-    return generate_text(final_prompt)
+    news_flat = recent_news if isinstance(recent_news, list) else [str(recent_news)]
+    return generate_text_with_chronicle(final_prompt, macro=macro, news_snippets=news_flat)
 
 def check_fundamental_damage(ticker, stock_name, chart_30d, macro, valuation, theme_context):
     prompt = f"""
@@ -178,7 +195,7 @@ def match_naver_themes(keyword, theme_list):
     res = generate_text(prompt)
     return [t for t in [x.strip() for x in res.split(',')] if t in theme_list]
 
-def get_quick_rating(ticker, name, news_text, strategy_type, val):
+def get_quick_rating(ticker, name, news_text, strategy_type, val, macro=None):
     prompt = f"""
     스마트폰 가독성을 위해 아주 짧고 명확하게 5단계 등급과 이유를 판정하세요.
     종목: {name} / 전략: {strategy_type} / 재무: PER {val.get('per')}, ROE {val.get('roe')}% / 뉴스: {news_text}
@@ -187,9 +204,13 @@ def get_quick_rating(ticker, name, news_text, strategy_type, val):
     등급: [매수추천 / 매수 / 관망 / 매수주의 / 매수반대 중 택 1]
     사유: [기사 및 재무 팩트 기반 1문장 요약]
     """
-    return generate_text(prompt)
+    snippets = [news_text] if isinstance(news_text, str) else list(news_text or [])
+    if macro is None:
+        from src.data import collector
+        macro = collector.get_macro_indicators()
+    return generate_text_with_chronicle(prompt, macro=macro, news_snippets=snippets)
 
-def get_dividend_risk_check(ticker, name, news_text, val):
+def get_dividend_risk_check(ticker, name, news_text, val, macro=None):
     prompt = f"""
     배당주 컷 위험을 검증합니다. 스마트폰 가독성을 위해 아주 짧고 명확하게 출력하세요. 
     종목: {name} / 재무: PER {val.get('per')}, PBR {val.get('pbr')} / 뉴스: {news_text}
@@ -198,4 +219,8 @@ def get_dividend_risk_check(ticker, name, news_text, val):
     등급: [매수추천 / 매수 / 관망 / 매수주의 / 매수반대 중 택 1]
     사유: [배당 삭감 위험성 유무 등 팩트 기반 1문장 요약]
     """
-    return generate_text(prompt)
+    if macro is None:
+        from src.data import collector
+        macro = collector.get_macro_indicators()
+    snippets = [news_text] if isinstance(news_text, str) else list(news_text or [])
+    return generate_text_with_chronicle(prompt, macro=macro, news_snippets=snippets)

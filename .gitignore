@@ -3,6 +3,8 @@ venv/
 *.log
 __pycache__/
 gcp_key.json
+drive_oauth_token.json
+.drive_pause_local.json
 *.pem
 *.json
 docs_cache/

@@ -43,6 +43,22 @@ class MarketOrchestrator:
         report = ai_strategy.get_daily_market_report(macro, us_news, kr_news, research_reports, "특이사항 없음")
         self.send_slack(f"[일간 마감 브리핑]\n\n{report}")
 
+    def chronicle_routine(self):
+        """15:35 T-Day Market Chronicles (지수 급변/VIX 경계 시)."""
+        self.send_slack("[System] Market Chronicles T-Day 분석을 시작합니다.")
+        macro = macro_collector.get_macro_indicators()
+        us_kw, kr_kw = self.get_parsed_keywords()
+        us_news = news_crawler.get_latest_news(us_kw, limit=8, search_type="macro")
+        kr_news = news_crawler.get_latest_news(kr_kw, limit=8, search_type="macro")
+        from src.memory import chronicle_writer, lifecycle
+
+        ok, msg = chronicle_writer.write_chronicle_for_today(
+            macro, us_news, kr_news, notify_fn=self.send_slack
+        )
+        if not ok:
+            self.send_slack(f"[Market Chronicles] {msg}")
+        lifecycle.purge_expired_temp_files(notify_fn=self.send_slack)
+
     def deep_market_routine(self):
         if not market_hours.is_market_open(): return
         self.send_slack("[System] 10:00 장 초반 자금 흐름 기반 심층 시황 보고를 시작합니다.")
@@ -70,7 +86,8 @@ class MarketOrchestrator:
             if not raw_stocks: continue
             
             passed_stocks = quant_screener.run_3track_screener(condition_name, raw_stocks, self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token)
-            
+            macro = macro_collector.get_macro_indicators()
+
             if not passed_stocks:
                 self.send_slack(f"[ Track: {condition_name} ]\n- 2차 검증을 통과한 종목이 없습니다.")
                 continue
@@ -88,9 +105,9 @@ class MarketOrchestrator:
                 
                 # 종목 등급 및 사유 생성
                 if condition_name == "배당주_발굴":
-                    rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, s)
+                    rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, s, macro=macro)
                 else:
-                    rating = ai_strategy.get_quick_rating(s['ticker'], name, news, condition_name, s)
+                    rating = ai_strategy.get_quick_rating(s['ticker'], name, news, condition_name, s, macro=macro)
                     
                 details_str = ", ".join(s.get('score_details', []))
                 msg.append(f"- {name} ({s['ticker']})\n  ㄴ 검증: {details_str}\n  ㄴ AI판정: {rating}\n")
@@ -224,11 +241,11 @@ class MarketOrchestrator:
 
     def execute_daily_split_buys(self, check_news=False):
         if not market_hours.is_market_open(): return
-        macro = macro_collector.get_macro_indicators()
+        macro_buy = macro_collector.get_macro_indicators()
         try:
-            vix = float(macro.get("VIX", 20.0))
-            wti = float(macro.get("WTI", 70.0))
-            us10y = float(macro.get("US10Y", 4.0))
+            vix = float(macro_buy.get("VIX", 20.0))
+            wti = float(macro_buy.get("WTI", 70.0))
+            us10y = float(macro_buy.get("US10Y", 4.0))
         except: vix, wti, us10y = 20.0, 70.0, 4.0
             
         shutdown_reason, half_buy_reason = "", ""
@@ -324,7 +341,8 @@ class MarketOrchestrator:
 
             # AI 정밀 검증
             news = news_crawler.get_latest_news(name, limit=3, search_type="stock")
-            rating = ai_strategy.get_quick_rating(ticker, name, news, "당일주도주", s)
+            macro_noon = macro_collector.get_macro_indicators()
+            rating = ai_strategy.get_quick_rating(ticker, name, news, "당일주도주", s, macro=macro_noon)
             
             if "[매수추천]" in rating or "[매수]" in rating:
                 # 자동 편입 (기본 예산 100만원 가정 또는 계좌 잔고 기반 설정 가능)

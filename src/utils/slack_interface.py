@@ -24,8 +24,36 @@ def register_slack_handlers(app, kis, config):
 - !수동등록 [코드] [트랙] : 내 보유종목 방어막 감시망에 편입 (트랙: A, B, C, M)
 - !성과 : AI vs 수동 트랙별 승률 및 수익률 비교 리포트
 - !일일보고 / !주간보고 / !월간보고 / !분기보고 : 각종 리포트 수동 생성
-- !초기화 : 장부 및 주문 데이터 초기화"""
+- !초기화 : 장부 및 주문 데이터 초기화
+- !크로니클 : T-Day 시장 크로니클 수동 작성 (트리거 충족 시)
+- 완료 : Google Drive Pause 해제 후 재검증"""
         say(help_text)
+
+    @app.message(re.compile(r"^완료\s*$"))
+    def cmd_drive_resume(message, say):
+        from src.memory import drive_client
+
+        result = drive_client.try_resume_after_user_ack()
+        say(result)
+
+    @app.message(re.compile(r"^!크로니클", re.IGNORECASE))
+    def cmd_chronicle_manual(message, say):
+        say("[System] Market Chronicles 수동 작성을 시작합니다.")
+
+        def bg_task():
+            from src.memory import chronicle_writer
+
+            macro = macro_collector.get_macro_indicators()
+            us_kw, kr_kw = ai_strategy.infer_news_keywords().split(",")[:2]
+            us_news = news_crawler.get_latest_news(us_kw.strip() or "미국증시", limit=8, search_type="macro")
+            kr_news = news_crawler.get_latest_news(kr_kw.strip() or "한국증시", limit=8, search_type="macro")
+            ok, msg = chronicle_writer.write_chronicle_for_today(macro, us_news, kr_news, notify_fn=say)
+            if ok:
+                say(f"[완료] 크로니클 저장: {msg}")
+            else:
+                say(f"[결과] {msg}")
+
+        threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!HTS스캔", re.IGNORECASE))
     def cmd_hts_scan_all(message, say):

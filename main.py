@@ -32,6 +32,16 @@ app = App(token=os.getenv("SLACK_TOKEN"))
 kis = kis_api.KISClient()
 orchestrator = MarketOrchestrator(kis, app, CONFIG)
 
+
+def _bootstrap_market_chronicles():
+    try:
+        from src.memory import drive_client
+
+        drive_client.init_drive_or_pause(notify_fn=orchestrator.send_slack)
+    except Exception as e:
+        print(f"Log: [Chronicles Bootstrap] {e}", flush=True)
+
+
 def run_scheduler():
     schedule.every().day.at("08:00").do(orchestrator.issue_daily_token)
     schedule.every().day.at("08:45").do(orchestrator.daily_routine)
@@ -40,6 +50,7 @@ def run_scheduler():
     schedule.every().day.at("11:45").do(orchestrator.noon_routine)
     schedule.every().day.at("14:20").do(orchestrator.alert_manual_stocks)
     schedule.every().day.at("14:30").do(orchestrator.afternoon_routine)
+    schedule.every().day.at("15:35").do(orchestrator.chronicle_routine)
     schedule.every().monday.at("09:45").do(orchestrator.weekly_routine)
     
     schedule.every(30).minutes.do(lambda: risk_manager.run_risk_monitor(
@@ -53,6 +64,7 @@ def run_scheduler():
 
 if __name__ == "__main__":
     print("Log: [System] Active KST", flush=True)
+    _bootstrap_market_chronicles()
     slack_interface.register_slack_handlers(app, kis, CONFIG)
     threading.Thread(target=run_scheduler, daemon=True).start()
     SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN")).start()
