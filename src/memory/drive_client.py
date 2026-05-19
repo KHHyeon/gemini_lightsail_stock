@@ -65,6 +65,68 @@ def is_drive_enabled():
     return os.getenv("GOOGLE_DRIVE_ENABLED", "1").strip() not in ("0", "false", "False")
 
 
+def uses_shared_drive():
+    """Google Workspace 공유 드라이브(팀 드라이브) 사용 여부."""
+    flag = os.getenv("GDRIVE_USE_SHARED_DRIVE", "").strip().lower()
+    if flag in ("1", "true", "yes"):
+        return True
+    return bool(os.getenv("GDRIVE_SHARED_DRIVE_ID", "").strip())
+
+
+def get_transfer_owner_email():
+    """
+    서비스 계정이 만든 파일의 소유권을 넘길 Google 계정.
+    개인 Drive 폴더를 SA와 공유해 쓸 때 필수 (Quant_Logs 소유 Gmail).
+    """
+    return os.getenv("GDRIVE_TRANSFER_OWNERSHIP_EMAIL", "").strip()
+
+
+def _shared_drive_kwargs():
+    if not uses_shared_drive():
+        return {}
+    kw = {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
+    drive_id = os.getenv("GDRIVE_SHARED_DRIVE_ID", "").strip()
+    if drive_id:
+        kw["driveId"] = drive_id
+        kw["corpora"] = "drive"
+    return kw
+
+
+def _transfer_ownership_if_needed(svc, file_id):
+    """SA 소유 파일을 사용자 계정으로 이전 (storage quota 403 방지)."""
+    if uses_shared_drive():
+        return
+    email = get_transfer_owner_email()
+    if not email:
+        raise DriveNotConfiguredError(
+            "서비스 계정은 Drive 저장 용량이 없습니다. .env에 "
+            "GDRIVE_TRANSFER_OWNERSHIP_EMAIL=Quant_Logs_소유_Gmail 을 설정하거나 "
+            "GDRIVE_USE_SHARED_DRIVE=1 (공유 드라이브)을 사용하세요."
+        )
+    svc.permissions().create(
+        fileId=file_id,
+        body={"type": "user", "role": "owner", "emailAddress": email},
+        transferOwnership=True,
+        **_shared_drive_kwargs(),
+    ).execute()
+
+
+def get_folder_owner_email(svc, folder_id):
+    """루트 폴더 소유자 이메일 (설정 힌트용)."""
+    try:
+        meta = svc.files().get(
+            fileId=folder_id,
+            fields="owners(emailAddress)",
+            **_shared_drive_kwargs(),
+        ).execute()
+        owners = meta.get("owners") or []
+        if owners:
+            return owners[0].get("emailAddress", "")
+    except Exception:
+        pass
+    return ""
+
+
 def _get_service():
     global _DRIVE_SERVICE
     if _DRIVE_SERVICE is not None:
@@ -204,12 +266,14 @@ def _resolve_root_folder_id(svc):
         f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' "
         "and trashed=false"
     )
-    res = svc.files().list(q=q, fields="files(id,name)", pageSize=5).execute()
+    res = svc.files().list(
+        q=q, fields="files(id,name)", pageSize=5, **_shared_drive_kwargs()
+    ).execute()
     files = res.get("files", [])
     if files:
         return files[0]["id"]
     meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
-    created = svc.files().create(body=meta, fields="id").execute()
+    created = svc.files().create(body=meta, fields="id", **_shared_drive_kwargs()).execute()
     return created["id"]
 
 
@@ -256,19 +320,30 @@ def _write_bytes_to_parent(svc, parent_id, filename, data_bytes, mime_type):
     stream = io.BytesIO(data_bytes)
     media = MediaIoBaseUpload(stream, mimetype=mime_type, resumable=False)
     existing = _find_file_in_parent(svc, parent_id, filename)
+    api_kw = _shared_drive_kwargs()
     if existing:
-        svc.files().update(fileId=existing["id"], media_body=media).execute()
+        svc.files().update(fileId=existing["id"], media_body=media, **api_kw).execute()
         return existing["id"]
     meta = {"name": filename, "parents": [parent_id]}
-    return svc.files().create(body=meta, media_body=media, fields="id").execute()["id"]
+    file_id = svc.files().create(
+        body=meta, media_body=media, fields="id", **api_kw
+    ).execute()["id"]
+    _transfer_ownership_if_needed(svc, file_id)
+    return file_id
+
+
+def _escape_query_value(value):
+    return str(value).replace("'", "\\'")
 
 
 def _find_child_folder(svc, parent_id, name):
     q = (
-        f"'{parent_id}' in parents and name='{name}' "
+        f"'{parent_id}' in parents and name='{_escape_query_value(name)}' "
         "and mimeType='application/vnd.google-apps.folder' and trashed=false"
     )
-    res = svc.files().list(q=q, fields="files(id)", pageSize=1).execute()
+    res = svc.files().list(
+        q=q, fields="files(id)", pageSize=1, **_shared_drive_kwargs()
+    ).execute()
     files = res.get("files", [])
     return files[0]["id"] if files else None
 
@@ -279,7 +354,9 @@ def _create_folder(svc, parent_id, name):
         "mimeType": "application/vnd.google-apps.folder",
         "parents": [parent_id],
     }
-    return svc.files().create(body=meta, fields="id").execute()["id"]
+    file_id = svc.files().create(body=meta, fields="id", **_shared_drive_kwargs()).execute()["id"]
+    _transfer_ownership_if_needed(svc, file_id)
+    return file_id
 
 
 def _ensure_path_folders(svc, root_id, parts, manifest=None, save_manifest=True):
@@ -362,8 +439,13 @@ def _folder_id_for_relative(rel_path, svc=None, root_id=None):
 
 
 def _find_file_in_parent(svc, parent_id, filename):
-    q = f"'{parent_id}' in parents and name='{filename}' and trashed=false"
-    res = svc.files().list(q=q, fields="files(id,name,mimeType)", pageSize=5).execute()
+    q = (
+        f"'{parent_id}' in parents and name='{_escape_query_value(filename)}' "
+        "and trashed=false"
+    )
+    res = svc.files().list(
+        q=q, fields="files(id,name,mimeType)", pageSize=5, **_shared_drive_kwargs()
+    ).execute()
     files = res.get("files", [])
     return files[0] if files else None
 
@@ -429,6 +511,7 @@ def list_files_under(relative_folder_prefix):
             fields="nextPageToken, files(id,name,createdTime,modifiedTime,mimeType)",
             pageSize=100,
             pageToken=page_token,
+            **_shared_drive_kwargs(),
         ).execute()
         items.extend(res.get("files", []))
         page_token = res.get("nextPageToken")
@@ -440,7 +523,7 @@ def list_files_under(relative_folder_prefix):
 def delete_file_by_id(file_id):
     _check_pause_guard()
     svc = _get_service()
-    svc.files().delete(fileId=file_id).execute()
+    svc.files().delete(fileId=file_id, **_shared_drive_kwargs()).execute()
 
 
 def init_drive_or_pause(notify_fn=None):

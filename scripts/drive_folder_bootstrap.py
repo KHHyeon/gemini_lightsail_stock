@@ -60,6 +60,10 @@ def _check_env():
         print(f"    파일 존재: {os.path.isfile(creds_path)}")
     print(f"  GDRIVE_FOLDER_ID: {_mask(folder_id)}")
     print(f"  GOOGLE_API_KEY: {'설정됨' if api_key else '미설정'} (Gemini용)")
+    transfer = os.getenv("GDRIVE_TRANSFER_OWNERSHIP_EMAIL", "").strip()
+    shared = os.getenv("GDRIVE_USE_SHARED_DRIVE", "").strip()
+    print(f"  GDRIVE_TRANSFER_OWNERSHIP_EMAIL: {_mask(transfer) if transfer else '(미설정)'}")
+    print(f"  GDRIVE_USE_SHARED_DRIVE: {shared or '0'}")
     print()
 
     if not creds_path:
@@ -81,8 +85,23 @@ def _test_connection():
     try:
         svc = drive_client._get_service()
         root_id = drive_client.get_root_folder_id_env()
-        meta = svc.files().get(fileId=root_id, fields="id,name,mimeType").execute()
+        meta = svc.files().get(
+            fileId=root_id,
+            fields="id,name,mimeType",
+            **drive_client._shared_drive_kwargs(),
+        ).execute()
         print(f"  [OK] 루트 폴더 접근: name={meta.get('name')}, id={meta.get('id')}")
+
+        if not drive_client.uses_shared_drive() and not drive_client.get_transfer_owner_email():
+            owner = drive_client.get_folder_owner_email(svc, root_id)
+            print()
+            print("  [WARN] 서비스 계정은 Drive 용량이 없습니다.")
+            print("  .env에 아래 중 하나를 추가하세요:")
+            if owner:
+                print(f"    GDRIVE_TRANSFER_OWNERSHIP_EMAIL={owner}")
+            else:
+                print("    GDRIVE_TRANSFER_OWNERSHIP_EMAIL=Quant_Logs_폴더_소유_Gmail")
+            print("  (또는 Workspace 공유 드라이브: GDRIVE_USE_SHARED_DRIVE=1)")
         return svc, root_id
     except Exception as e:
         print(f"  [FAIL] {e}")
