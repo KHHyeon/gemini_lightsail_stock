@@ -92,31 +92,38 @@ def _test_connection():
         return None, None
 
 
+def _log(msg):
+    print(msg, flush=True)
+
+
 def _bootstrap_folders(svc, root_id):
     from src.memory import drive_client
 
-    print()
-    print("=== Market Chronicles 폴더 구조 생성 ===")
+    _log("")
+    _log("=== Market Chronicles 폴더 구조 생성 ===")
+    _log("  [1/3] MarketChronicles 트리 생성 중...")
     drive_client._ensure_chronicle_structure(svc, root_id, force_refresh=True)
-
-    app_prefix = drive_client.APP_DATA_PREFIX
-    drive_client._ensure_path_folders(svc, root_id, [app_prefix])
-
-    manifest = drive_client.read_json_relative(drive_client.MANIFEST_REL_PATH) or {}
+    _log("  [2/3] app_data 폴더 생성 중...")
+    manifest = drive_client._load_manifest_cached(svc, root_id)
+    drive_client._ensure_path_folders(
+        svc, root_id, [drive_client.APP_DATA_PREFIX], manifest=manifest, save_manifest=True
+    )
+    _log("  [3/3] manifest 확인 중...")
+    manifest = drive_client.read_json_relative(drive_client.MANIFEST_REL_PATH) or manifest or {}
     paths = manifest.get("paths", {})
 
-    print(f"  루트 ID: {root_id}")
-    print("  생성/확인된 경로:")
+    _log(f"  루트 ID: {root_id}")
+    _log("  생성/확인된 경로:")
     for key in sorted(paths.keys()):
-        print(f"    - {key}  ->  {paths[key]}")
+        _log(f"    - {key}  ->  {paths[key]}")
 
     if drive_client.file_exists_relative(drive_client.MASTER_INDEX_REL):
-        print(f"  [OK] {drive_client.MASTER_INDEX_REL}")
+        _log(f"  [OK] {drive_client.MASTER_INDEX_REL}")
     else:
-        print(f"  [WARN] {drive_client.MASTER_INDEX_REL} 없음")
+        _log(f"  [WARN] {drive_client.MASTER_INDEX_REL} 없음")
 
-    print()
-    print("[완료] Drive 연결 및 폴더 구조 준비가 끝났습니다.")
+    _log("")
+    _log("[완료] Drive 연결 및 폴더 구조 준비가 끝났습니다.")
 
 
 def main():

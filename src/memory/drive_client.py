@@ -197,9 +197,8 @@ def _resolve_root_folder_id(svc):
     env_id = get_root_folder_id_env()
     if env_id:
         return env_id
-    manifest = _load_manifest_local()
-    if manifest and manifest.get("root_folder_id"):
-        return manifest["root_folder_id"]
+    if _FOLDER_CACHE and _FOLDER_CACHE.get("root_folder_id"):
+        return _FOLDER_CACHE["root_folder_id"]
     folder_name = os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_NAME", "AutoStockBot_Data")
     q = (
         f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' "
@@ -214,21 +213,54 @@ def _resolve_root_folder_id(svc):
     return created["id"]
 
 
-def _load_manifest_local():
+def _load_manifest_cached(svc, root_id):
+    """manifest 읽기 (재귀 없음)."""
     global _FOLDER_CACHE
-    if _FOLDER_CACHE is not None:
+    if _FOLDER_CACHE is not None and _FOLDER_CACHE.get("root_folder_id") == root_id:
         return _FOLDER_CACHE
+
+    manifest = {"root_folder_id": root_id, "paths": {}}
     try:
-        _FOLDER_CACHE = read_json_relative(MANIFEST_REL_PATH) or {}
+        sys_parts = [CHRONICLES_ROOT, "_system"]
+        parent_id = root_id
+        for part in sys_parts:
+            fid = _find_child_folder(svc, parent_id, part)
+            if not fid:
+                break
+            parent_id = fid
+        else:
+            f = _find_file_in_parent(svc, parent_id, "folder_manifest.json")
+            if f:
+                raw = svc.files().get_media(fileId=f["id"]).execute()
+                manifest = json.loads(raw.decode("utf-8"))
+                manifest.setdefault("root_folder_id", root_id)
     except Exception:
-        _FOLDER_CACHE = {}
-    return _FOLDER_CACHE
+        pass
+
+    _FOLDER_CACHE = manifest
+    return manifest
 
 
-def _save_manifest(manifest):
+def _persist_manifest(svc, root_id, manifest):
+    """manifest 저장 (재귀 없음)."""
     global _FOLDER_CACHE
     _FOLDER_CACHE = manifest
-    write_json_relative(MANIFEST_REL_PATH, manifest)
+    parent_id = _ensure_path_folders(svc, root_id, [CHRONICLES_ROOT, "_system"], manifest=manifest, save_manifest=False)
+    body = json.dumps(manifest, ensure_ascii=False, indent=2)
+    _write_bytes_to_parent(svc, parent_id, "folder_manifest.json", body.encode("utf-8"), "application/json")
+
+
+def _write_bytes_to_parent(svc, parent_id, filename, data_bytes, mime_type):
+    from googleapiclient.http import MediaIoBaseUpload
+
+    stream = io.BytesIO(data_bytes)
+    media = MediaIoBaseUpload(stream, mimetype=mime_type, resumable=False)
+    existing = _find_file_in_parent(svc, parent_id, filename)
+    if existing:
+        svc.files().update(fileId=existing["id"], media_body=media).execute()
+        return existing["id"]
+    meta = {"name": filename, "parents": [parent_id]}
+    return svc.files().create(body=meta, media_body=media, fields="id").execute()["id"]
 
 
 def _find_child_folder(svc, parent_id, name):
@@ -250,10 +282,12 @@ def _create_folder(svc, parent_id, name):
     return svc.files().create(body=meta, fields="id").execute()["id"]
 
 
-def _ensure_path_folders(svc, root_id, parts):
-    manifest = _load_manifest_local() or {}
+def _ensure_path_folders(svc, root_id, parts, manifest=None, save_manifest=True):
+    if manifest is None:
+        manifest = _load_manifest_cached(svc, root_id)
     if manifest.get("root_folder_id") != root_id:
-        manifest = {"root_folder_id": root_id, "paths": {}}
+        manifest = {"root_folder_id": root_id, "paths": manifest.get("paths", {})}
+
     paths = manifest.setdefault("paths", {})
     current = root_id
     built = []
@@ -268,7 +302,9 @@ def _ensure_path_folders(svc, root_id, parts):
             fid = _create_folder(svc, current, part)
         paths[key] = fid
         current = fid
-    _save_manifest(manifest)
+
+    if save_manifest:
+        _persist_manifest(svc, root_id, manifest)
     return current
 
 
@@ -287,23 +323,42 @@ def _ensure_chronicle_structure(svc, root_id, force_refresh=False):
     parts.append(f"{CHRONICLES_ROOT}/reports")
     parts.append(f"{CHRONICLES_ROOT}/reports/{y}")
     parts.append(f"{CHRONICLES_ROOT}/reports/{y}/{m}")
+    manifest = _load_manifest_cached(svc, root_id)
     for p in parts:
-        segs = p.split("/")
-        _ensure_path_folders(svc, root_id, segs)
-    if not file_exists_relative(MASTER_INDEX_REL):
-        write_json_relative(MASTER_INDEX_REL, {"version": 1, "entries": []})
+        _ensure_path_folders(svc, root_id, p.split("/"), manifest=manifest, save_manifest=False)
+    _persist_manifest(svc, root_id, manifest)
+
+    index_parts = MASTER_INDEX_REL.split("/")
+    parent_id = _ensure_path_folders(
+        svc, root_id, index_parts[:-1], manifest=manifest, save_manifest=False
+    )
+    if not _find_file_in_parent(svc, parent_id, index_parts[-1]):
+        _write_bytes_to_parent(
+            svc,
+            parent_id,
+            index_parts[-1],
+            json.dumps({"version": 1, "entries": []}, ensure_ascii=False, indent=2).encode("utf-8"),
+            "application/json",
+        )
+    _persist_manifest(svc, root_id, manifest)
 
 
-def _folder_id_for_relative(rel_path):
+def _folder_id_for_relative(rel_path, svc=None, root_id=None):
     _check_pause_guard()
-    svc = _get_service()
-    root_id = _resolve_root_folder_id(svc)
-    _ensure_chronicle_structure(svc, root_id)
+    if svc is None:
+        svc = _get_service()
+    if root_id is None:
+        root_id = _resolve_root_folder_id(svc)
     parts = rel_path.split("/")
     filename = parts[-1]
     parent_parts = parts[:-1]
-    parent_id = _ensure_path_folders(svc, root_id, parent_parts) if parent_parts else root_id
-    return parent_id, filename
+    manifest = _load_manifest_cached(svc, root_id)
+    parent_id = (
+        _ensure_path_folders(svc, root_id, parent_parts, manifest=manifest, save_manifest=False)
+        if parent_parts
+        else root_id
+    )
+    return svc, root_id, parent_id, filename
 
 
 def _find_file_in_parent(svc, parent_id, filename):
@@ -315,19 +370,15 @@ def _find_file_in_parent(svc, parent_id, filename):
 
 def file_exists_relative(rel_path):
     try:
-        svc = _get_service()
-        root_id = _resolve_root_folder_id(svc)
-        parts = rel_path.split("/")
-        parent_id = _ensure_path_folders(svc, root_id, parts[:-1])
-        return _find_file_in_parent(svc, parent_id, parts[-1]) is not None
+        svc, root_id, parent_id, filename = _folder_id_for_relative(rel_path)
+        return _find_file_in_parent(svc, parent_id, filename) is not None
     except Exception:
         return False
 
 
 def read_text_relative(rel_path):
     _check_pause_guard()
-    svc = _get_service()
-    parent_id, filename = _folder_id_for_relative(rel_path)
+    svc, root_id, parent_id, filename = _folder_id_for_relative(rel_path)
     f = _find_file_in_parent(svc, parent_id, filename)
     if not f:
         return None
@@ -337,24 +388,8 @@ def read_text_relative(rel_path):
 
 def write_text_relative(rel_path, text, mime_type="text/plain"):
     _check_pause_guard()
-    svc = _get_service()
-    parent_id, filename = _folder_id_for_relative(rel_path)
-    data = io.BytesIO(text.encode("utf-8"))
-    media = None
-    try:
-        from googleapiclient.http import MediaIoBaseUpload
-
-        media = MediaIoBaseUpload(data, mimetype=mime_type, resumable=False)
-    except ImportError:
-        raise DriveNotConfiguredError("google-api-python-client 설치 필요")
-
-    existing = _find_file_in_parent(svc, parent_id, filename)
-    if existing:
-        svc.files().update(fileId=existing["id"], media_body=media).execute()
-        return existing["id"]
-    meta = {"name": filename, "parents": [parent_id]}
-    created = svc.files().create(body=meta, media_body=media, fields="id").execute()
-    return created["id"]
+    svc, root_id, parent_id, filename = _folder_id_for_relative(rel_path)
+    _write_bytes_to_parent(svc, parent_id, filename, text.encode("utf-8"), mime_type)
 
 
 def read_json_relative(rel_path):
@@ -376,10 +411,6 @@ def read_app_json(filename):
 
 def write_app_json(filename, data):
     rel = f"{APP_DATA_PREFIX}/{filename}"
-    _check_pause_guard()
-    svc = _get_service()
-    root_id = _resolve_root_folder_id(svc)
-    _ensure_path_folders(svc, root_id, [APP_DATA_PREFIX])
     write_json_relative(rel, data)
 
 
