@@ -464,17 +464,153 @@ def run_backfill(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS):
 
 
 def _delete_file_at_rel_path(rel_path):
-    """rel_path 위치의 파일을 Drive 에서 찾아 삭제. 없으면 False."""
+    """rel_path 위치의 파일을 Drive 에서 찾아 삭제한다.
+
+    Returns:
+        True  - 실제 삭제 수행
+        False - 파일이 처음부터 없거나 이미 삭제됨 (idempotent)
+
+    주의: ``drive_client._find_file_in_parent`` 는 file ID 문자열이 아니라
+    ``{"id", "name", "mimeType"}`` 형태의 dict 를 반환한다. file_id 만 추출해서
+    ``delete_file_by_id`` 로 넘겨야 한다.
+    """
     try:
         svc, _root_id, parent_id, filename = drive_client._folder_id_for_relative(rel_path)
-        file_id = drive_client._find_file_in_parent(svc, parent_id, filename)
-        if not file_id:
-            return False
+        found = drive_client._find_file_in_parent(svc, parent_id, filename)
+    except Exception as exc:
+        print(f"Log: [Backfill] {rel_path} 조회 실패: {exc}", flush=True)
+        return False
+
+    if not found:
+        return False
+    file_id = found.get("id") if isinstance(found, dict) else str(found)
+    if not file_id:
+        return False
+
+    try:
         drive_client.delete_file_by_id(file_id)
         return True
     except Exception as exc:
-        print(f"Log: [Backfill reset] {rel_path} 삭제 실패: {exc}", flush=True)
+        msg = str(exc)
+        if "404" in msg or "notFound" in msg or "File not found" in msg:
+            return False
+        print(f"Log: [Backfill] {rel_path} 삭제 실패: {exc}", flush=True)
         return False
+
+
+BACKFILL_HEADER_MARKER = "Market Chronicle (Backfill)"
+REPORTS_ROOT_REL = f"{drive_client.CHRONICLES_ROOT}/reports"
+
+
+def _list_folder_items(rel_folder):
+    try:
+        return drive_client.list_files_under(rel_folder)
+    except Exception as exc:
+        print(f"Log: [Backfill scan] {rel_folder} 목록 조회 실패: {exc}", flush=True)
+        return []
+
+
+def _collect_md_files_recursive(rel_folder):
+    """rel_folder 하위의 모든 .md 파일을 재귀 수집 (Drive folder mimeType 기반)."""
+    results = []
+    for item in _list_folder_items(rel_folder):
+        name = item.get("name", "")
+        mime = item.get("mimeType", "")
+        if mime == "application/vnd.google-apps.folder":
+            sub = f"{rel_folder}/{name}"
+            results.extend(_collect_md_files_recursive(sub))
+        elif name.lower().endswith(".md"):
+            results.append(
+                {
+                    "id": item.get("id"),
+                    "name": name,
+                    "rel_path": f"{rel_folder}/{name}",
+                }
+            )
+    return results
+
+
+def purge_orphan_backfill_reports(notify_fn=None, dry_run=False):
+    """
+    master_index 외부에 남은 **백필 표식(.md)** 리포트를 청소한다.
+
+    안전장치:
+        - 헤더 첫 줄이 ``# Market Chronicle (Backfill)`` 인 파일만 식별 대상.
+          T-Day 자동 작성 리포트(헤더가 ``# Market Chronicle YYYY-MM-DD``)는 건드리지 않음.
+        - master_index 의 어떤 엔트리에도 등록되지 않은 파일만 실제 삭제.
+        - dry_run=True 면 보고만 하고 삭제는 수행하지 않음.
+
+    Returns:
+        {"scanned": int, "backfill_orphans": int, "deleted": int}
+    """
+    def _emit(msg):
+        if notify_fn:
+            notify_fn(msg)
+        else:
+            print(msg, flush=True)
+
+    if not drive_client.is_drive_enabled():
+        _emit("[Backfill Purge] Drive 가 비활성 상태입니다.")
+        return {"scanned": 0, "backfill_orphans": 0, "deleted": 0}
+    if not drive_client.is_ready():
+        ok, msg = drive_client.init_drive_or_pause(notify_fn)
+        if not ok:
+            _emit(f"[Backfill Purge] Drive 초기화 실패: {msg}")
+            return {"scanned": 0, "backfill_orphans": 0, "deleted": 0}
+
+    try:
+        index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"entries": []}
+    except Exception:
+        index = {"entries": []}
+    registered_paths = {
+        (e or {}).get("report_rel_path")
+        for e in index.get("entries", [])
+        if isinstance(e, dict) and e.get("report_rel_path")
+    }
+
+    md_files = _collect_md_files_recursive(REPORTS_ROOT_REL)
+    _emit(f"[Backfill Purge] reports 트리 .md 총 {len(md_files)}건 스캔.")
+
+    orphan_targets = []
+    for f in md_files:
+        rel = f["rel_path"]
+        if rel in registered_paths:
+            continue
+        try:
+            head = drive_client.read_text_relative(rel) or ""
+        except Exception as exc:
+            _emit(f"[Backfill Purge] {rel} 헤더 읽기 실패 (스킵): {exc}")
+            continue
+        head_top = head[:300]
+        if BACKFILL_HEADER_MARKER in head_top:
+            orphan_targets.append(f)
+
+    _emit(f"[Backfill Purge] 백필 표식 보유 + 인덱스 미등록 .md = {len(orphan_targets)}건")
+
+    deleted = 0
+    if not dry_run:
+        for f in orphan_targets:
+            try:
+                drive_client.delete_file_by_id(f["id"])
+                deleted += 1
+                _emit(f"[Backfill Purge] 삭제: {f['rel_path']}")
+            except Exception as exc:
+                msg = str(exc)
+                if "404" in msg or "notFound" in msg or "File not found" in msg:
+                    deleted += 1
+                    continue
+                _emit(f"[Backfill Purge] {f['rel_path']} 삭제 실패: {exc}")
+    else:
+        _emit("[Backfill Purge] dry_run=True 이므로 실제 삭제는 수행하지 않았습니다.")
+
+    _emit(
+        f"[Backfill Purge] 종료. 스캔 {len(md_files)} / 백필 고아 {len(orphan_targets)} / 삭제 {deleted}"
+    )
+    return {
+        "scanned": len(md_files),
+        "backfill_orphans": len(orphan_targets),
+        "deleted": deleted,
+    }
 
 
 def reset_backfill(delete_reports=False, notify_fn=None):

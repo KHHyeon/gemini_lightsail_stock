@@ -88,6 +88,13 @@ class MarketOrchestrator:
             notify_fn=self.send_slack, delay_sec=delay_sec
         )
 
+    def backfill_purge_orphans(self, dry_run=False):
+        """v3.2.2 백필 고아 청소: master_index 외부의 백필 표식 .md 만 삭제."""
+        from src.memory import backfill
+        return backfill.purge_orphan_backfill_reports(
+            notify_fn=self.send_slack, dry_run=dry_run
+        )
+
     def deep_market_routine(self):
         if not market_hours.is_market_open(): return
         self.send_slack("[System] 10:00 장 초반 자금 흐름 기반 심층 시황 보고를 시작합니다.")
