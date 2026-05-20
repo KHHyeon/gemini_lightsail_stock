@@ -24,10 +24,13 @@ Market Chronicles v3.1 - 과거 데이터 소급 구축 (Back-filling) CLI.
     # AI 호출 비용 최소화 - .md 리포트는 그대로 두고 keyphrases 만 v3.2 포맷으로 재추출
     python scripts/backfill_chronicles.py --reindex --delay 3
 
-    # master_index 와 분리된 백필 표식(.md) 만 청소 (T-Day 리포트는 절대 안 건드림)
-    python scripts/backfill_chronicles.py --purge-orphan-reports
+    # 현재 reports 트리와 master_index 정합 상태만 보고 (절대 수정/삭제 없음)
+    python scripts/backfill_chronicles.py --diagnose-reports
+
+    # master_index 외부에 남은 백필 표식(.md) "잔여" 만 청소 (T-Day 리포트는 절대 안 건드림)
+    python scripts/backfill_chronicles.py --purge-leftover-reports
     # 실삭제 없이 어떤 파일이 대상인지만 보고 (드라이런)
-    python scripts/backfill_chronicles.py --purge-orphan-reports --dry-run
+    python scripts/backfill_chronicles.py --purge-leftover-reports --dry-run
 
 전제 조건:
     - drive_oauth_token.json 발급 완료 (scripts/drive_oauth_setup.py)
@@ -103,14 +106,24 @@ def main():
         help="기존 .md 리포트는 보존하고 keyphrases 만 v3.2 포맷으로 재추출하여 master_index 갱신",
     )
     parser.add_argument(
+        "--diagnose-reports",
+        action="store_true",
+        help="reports 트리와 master_index 정합 상태만 보고 (읽기 전용, 절대 수정/삭제 없음)",
+    )
+    parser.add_argument(
+        "--purge-leftover-reports",
+        action="store_true",
+        help="master_index 에 없는 백필 표식 .md (헤더 '(Backfill)') 만 정리. T-Day 리포트는 보호.",
+    )
+    parser.add_argument(
         "--purge-orphan-reports",
         action="store_true",
-        help="master_index 에 없는 백필 표식 .md (헤더 '(Backfill)') 만 청소. T-Day 리포트는 보호.",
+        help="(deprecated alias) --purge-leftover-reports 와 동일",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="--purge-orphan-reports 와 함께 사용 시 실제 삭제 없이 대상만 보고",
+        help="--purge-leftover-reports 와 함께 사용 시 실제 삭제 없이 대상만 보고",
     )
     parser.add_argument(
         "--env-file",
@@ -162,12 +175,17 @@ def main():
         )
         return
 
-    if args.purge_orphan_reports:
+    if args.diagnose_reports:
+        print("\n[진단] reports 트리와 master_index 정합 상태 확인 중...")
+        backfill.diagnose_reports(notify_fn=_print)
+        return
+
+    if args.purge_leftover_reports or args.purge_orphan_reports:
         mode = "DRY-RUN" if args.dry_run else "실삭제"
-        print(f"\n[고아 청소 - {mode}] reports 트리에서 백필 표식 .md 식별 중...")
-        result = backfill.purge_orphan_backfill_reports(notify_fn=_print, dry_run=args.dry_run)
+        print(f"\n[잔여 정리 - {mode}] reports 트리에서 인덱스 미등록 백필 .md 식별 중...")
+        result = backfill.purge_leftover_backfill_reports(notify_fn=_print, dry_run=args.dry_run)
         print(
-            f"\n[고아 청소 결과] 스캔 {result['scanned']} / 백필 고아 {result['backfill_orphans']} / 삭제 {result['deleted']}"
+            f"\n[잔여 정리 결과] 스캔 {result['scanned']} / 잔여 {result['leftover_targets']} / 삭제 {result['deleted']}"
         )
         return
 

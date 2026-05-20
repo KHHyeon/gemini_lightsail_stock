@@ -30,7 +30,8 @@ def register_slack_handlers(app, kis, config):
 - !백필실행 [건당대기초] : 저장된 백필 큐 1건씩 소급 작성 (기본 3초)
 - !백필초기화 [purge] : 기존 백필 결과 정리 (purge 입력 시 .md 리포트까지 삭제)
 - !백필재인덱싱 [건당대기초] : 기존 .md 보존, keyphrases 만 v3.2 포맷으로 재추출
-- !백필고아청소 [dry] : master_index 에 없는 백필 .md 청소 (dry 입력 시 미실행 보고)
+- !백필상태 : reports 트리와 master_index 정합 상태 진단 (읽기 전용)
+- !백필잔여정리 [dry] : master_index 외부의 백필 .md 만 정리 (dry 입력 시 미실행 보고)
 - 확인 : 직전 백필 스캔 결과를 그대로 실행
 - 완료 : Google Drive Pause 해제 후 재검증"""
         say(help_text)
@@ -82,19 +83,29 @@ def register_slack_handlers(app, kis, config):
 
         threading.Thread(target=bg_task, daemon=True).start()
 
-    @app.message(re.compile(r"^!백필고아청소(?:\s+(dry))?\s*$", re.IGNORECASE))
-    def cmd_backfill_purge_orphans(message, say):
+    @app.message(re.compile(r"^!백필상태\s*$", re.IGNORECASE))
+    def cmd_backfill_diagnose(message, say):
+        say("[System] reports 트리와 master_index 정합 상태를 진단합니다 (읽기 전용).")
+
+        def bg_task():
+            from src.memory import backfill
+            backfill.diagnose_reports(notify_fn=say)
+
+        threading.Thread(target=bg_task, daemon=True).start()
+
+    @app.message(re.compile(r"^!백필(?:잔여정리|고아청소)(?:\s+(dry))?\s*$", re.IGNORECASE))
+    def cmd_backfill_purge_leftover(message, say):
         text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
-        m = re.match(r"^!백필고아청소(?:\s+(dry))?\s*$", text, re.IGNORECASE)
+        m = re.match(r"^!백필(?:잔여정리|고아청소)(?:\s+(dry))?\s*$", text, re.IGNORECASE)
         dry = bool(m and m.group(1))
         say(
-            "[System] master_index 외부의 백필 표식 .md 만 청소합니다. "
+            "[System] master_index 외부의 백필 표식 .md (인덱스 미등록 잔여 파일) 만 정리합니다. "
             + ("(드라이런: 미삭제 보고)" if dry else "(실삭제)")
         )
 
         def bg_task():
             from src.memory import backfill
-            backfill.purge_orphan_backfill_reports(notify_fn=say, dry_run=dry)
+            backfill.purge_leftover_backfill_reports(notify_fn=say, dry_run=dry)
 
         threading.Thread(target=bg_task, daemon=True).start()
 

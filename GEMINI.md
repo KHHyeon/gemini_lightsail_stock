@@ -17,7 +17,7 @@
 *   **v3.1 Market Chronicles 과거 데이터 소급 구축 (Back-filling) — 실전 검증 완료 (구현율 98%):** 최근 60일 KOSPI/KOSDAQ/VIX(yfinance) 일봉 스캔으로 트리거($\pm 1.5\%$ 또는 VIX$\ge$25) '이벤트 데이' 추출 → 과거 시점 뉴스 + AI 사후 분석 → `.md` 리포트 + `master_index.json` 색인. **신규 모듈** `src/memory/backfill.py`, **CLI** `scripts/backfill_chronicles.py`, **슬랙** `!백필스캔`/`!백필실행`/`확인`. **운영 검증(2026-05-20):** 60일 윈도우에서 **완료 32 / 스킵 0 / 실패 0** 으로 첫 회 백필 종결. 가동 즉시 Context Injection 가능한 32건의 과거 행동 지침 DB 확보. (상세: **§5**)
 *   **v3.2 Semantic Keyphrase Indexing & Retrieval — 적용 완료 (구현율 92%):** "외국인 매수"와 "외국인 매도" 같은 정반대 의미를 단순 단어 매칭이 같은 항목으로 오인하는 문제를 해결. 인덱싱 단계는 **[주체 + 동사] 결합 핵심 구문(keyphrases)** 을 Gemini로 추출(실패 시 정규식 사전 폴백) 후 `subject/action/tone` 메타데이터까지 함께 보존. 검색 단계는 **구문 자카드 유사도 + subject·action 정규형 일치 + tone 일치 + regime 그룹 매칭 + 최근성(recency)** 의 5단계 가중 합으로 의미적 유사도를 우선 적용하고, 단어 토큰 매칭은 폴백으로만 사용. **신규 모듈** `src/memory/keyphrase_extractor.py`. **호환:** 기존 엔트리는 `keywords` 만으로도 토큰 폴백으로 검색되어 무중단 전환. (상세: **§6**)
 *   **v3.2.1 Backfill 초기화·재인덱싱 운영 도구 — 적용 완료 (구현율 95%):** v3.1 백필이 이미 진행된 상태에서도 v3.2 의미 색인으로 안전하게 전환·재구축할 수 있도록 두 가지 모드 제공. **`--reset`/`!백필초기화`:** `master_index.json` 의 `source="backfill"` 엔트리와 `backfill_state.json` 을 비우고(옵션으로 `.md` 리포트까지 삭제) 처음부터 다시 채울 수 있는 상태 복원. **`--reindex`/`!백필재인덱싱`:** 기존 `.md` 리포트는 보존한 채 AI 1회 호출로 `keyphrases` 만 v3.2 포맷으로 재추출(비용·시간 최소 경로). T-Day(`source != "backfill"`) 엔트리는 어떤 경우에도 보호. (상세: **§5.6**)
-*   **v3.2.2 Backfill `--purge-orphan-reports` 운영 핫픽스 — 적용 완료 (구현율 96%):** v3.2.1 `--reset --purge-reports` 시 `drive_client._find_file_in_parent` 가 file ID 문자열이 아닌 메타데이터 dict 를 반환하여 `delete_file_by_id` 호출 URL 이 깨지는 버그(`HttpError 404`) 수정. 이 결과 인덱스는 비워졌지만 일부 `.md` 가 고아 상태로 남는 케이스가 발견되어, **`--purge-orphan-reports`/`!백필고아청소`** 보조 명령 신설. `reports/` 트리를 재귀 스캔하여 헤더 첫 줄에 `Market Chronicle (Backfill)` 표식이 있는 `.md` 만 식별 → master_index 외부의 항목만 삭제. T-Day 리포트는 헤더 라벨이 달라 자동 보호. `--dry-run` 으로 미실행 보고 지원. (상세: **§5.6**)
+*   **v3.2.3 Backfill 운영 핫픽스 + 잔여 정리·진단 명령 — 적용 완료 (구현율 97%):** v3.2.1 `--reset --purge-reports` 시 `drive_client._find_file_in_parent` 가 file ID 문자열이 아닌 메타데이터 dict 를 반환하여 `delete_file_by_id` 호출 URL 이 깨지는 버그(`HttpError 404`) 수정. 인덱스는 비워졌지만 일부 `.md` 가 인덱스 외부에 남는 "잔여(leftover)" 상태를 위해 **`--purge-leftover-reports`/`!백필잔여정리`** 보조 명령 신설(헤더 표식 + 인덱스 미등록 조건 동시 충족만 삭제, T-Day 자동 보호, `--dry-run` 지원). 또한 "왜 잔여가 0건만 보고되는가" 와 같은 운영 의문을 즉답하기 위해 **`--diagnose-reports`/`!백필상태`** 진단 명령 신설 — reports 트리와 master_index 정합 상태를 읽기 전용으로 보고. 기존 `--purge-orphan-reports`/`!백필고아청소` 는 deprecated alias 로 호환 유지. (상세: **§5.6**)
 
 
 # 목차
@@ -248,14 +248,16 @@
         - 슬랙: `!백필초기화 [purge]` / `!백필재인덱싱 [건당대기초]`
         - Orchestrator: `MarketOrchestrator.backfill_reset(delete_reports=False)` / `backfill_reindex(delay_sec=3)`
     *   **변경 파일:** `src/memory/backfill.py`, `scripts/backfill_chronicles.py`, `src/utils/slack_interface.py`, `src/execution/orchestrator.py`.
-*  **v3.2.2 업데이트 (Backfill 운영 핫픽스 + 고아 청소 보조 명령 — 적용 완료, 구현율 96%):**
+*  **v3.2.3 업데이트 (Backfill 운영 핫픽스 + 잔여 정리·진단 명령 — 적용 완료, 구현율 97%):**
     *   **운영 보고된 버그(2026-05-20):** `--reset --purge-reports` 실행 중 `HttpError 404 File not found: {'mimeType': ..., 'id': ..., 'name': ...}` 발생. 원인은 `drive_client._find_file_in_parent` 가 file ID **문자열** 이 아닌 메타데이터 **dict 전체** 를 반환하는데, `backfill._delete_file_at_rel_path` 가 그 dict 를 그대로 `delete_file_by_id` 에 전달하여 요청 URL 이 깨진 것.
     *   **수정:** `_delete_file_at_rel_path` 가 반환값을 dict 로 인지하여 `.get("id")` 만 추출하도록 정정. 404/notFound 응답은 "이미 삭제됨"으로 간주하여 idempotent 동작.
-    *   **신규 `purge_orphan_backfill_reports(dry_run=False)`:** 위 버그로 인덱스는 비워졌지만 `.md` 파일이 남아 있는 고아 상태를 청소하기 위한 보조 명령. `MarketChronicles/reports/` 트리를 재귀 스캔하여 헤더 첫 줄에 `Market Chronicle (Backfill)` 표식이 있는 `.md` 만 식별하고, master_index 의 어떤 엔트리에도 등록되지 않은 항목만 실제 삭제. T-Day 자동 리포트(헤더 `# Market Chronicle YYYY-MM-DD`)는 표식 불일치로 자동 보호.
+    *   **신규 `purge_leftover_backfill_reports(dry_run=False)` (이전 명칭: `purge_orphan_backfill_reports`):** 위 버그로 인덱스는 비워졌지만 `.md` 파일이 남아 있는 잔여(leftover) 상태를 정리하기 위한 보조 명령. `MarketChronicles/reports/` 트리를 재귀 스캔하여 헤더 첫 줄에 `Market Chronicle (Backfill)` 표식이 있는 `.md` 만 식별하고, master_index 의 어떤 엔트리에도 등록되지 않은 항목만 실제 삭제. T-Day 자동 리포트(헤더 `# Market Chronicle YYYY-MM-DD`)는 표식 불일치로 자동 보호.
+    *   **신규 `diagnose_reports()` (읽기 전용 진단):** "잔여 정리 명령이 왜 0건만 보고하나" 류의 운영 의문을 즉답한다. reports 트리의 .md 총 갯수 / 인덱스 등록·미등록 분포 / 헤더 표식별 분포(백필 vs T-Day) / 잔여 정리 대상 갯수 / master_index 의 백필·T-Day 분포를 한 번에 출력. 파일을 절대 수정·삭제하지 않는다.
+    *   **명칭 정정:** 사용자 피드백에 따라 "고아(orphan)" 표현을 **"잔여(leftover)"** 로 변경. 기존 명칭은 deprecated alias 로 호환 유지(`purge_orphan_backfill_reports` 함수, `--purge-orphan-reports` 플래그, `!백필고아청소` 슬랙 명령, `backfill_purge_orphans()` 오케스트레이터 메서드 모두 새 명칭과 동일 동작).
     *   **인터페이스:**
-        - CLI: `python scripts/backfill_chronicles.py --purge-orphan-reports [--dry-run]`
-        - 슬랙: `!백필고아청소 [dry]`
-        - Orchestrator: `MarketOrchestrator.backfill_purge_orphans(dry_run=False)`
+        - CLI: `python scripts/backfill_chronicles.py --diagnose-reports` (진단) / `--purge-leftover-reports [--dry-run]` (정리)
+        - 슬랙: `!백필상태` (진단) / `!백필잔여정리 [dry]` (정리)
+        - Orchestrator: `MarketOrchestrator.backfill_diagnose()` / `backfill_purge_leftover(dry_run=False)`
     *   **변경 파일:** `src/memory/backfill.py`, `scripts/backfill_chronicles.py`, `src/utils/slack_interface.py`, `src/execution/orchestrator.py`.
 
 ---
@@ -447,15 +449,17 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 | Slack | `!백필실행` | 저장된 queue에 대해 즉시 `run_backfill` 실행 |
 | Slack | `!백필초기화 [purge]` | 기존 백필 엔트리·state 초기화 (`purge` 입력 시 `.md` 까지 삭제) |
 | Slack | `!백필재인덱싱 [건당대기초]` | `.md` 보존, `keyphrases` 만 v3.2 포맷으로 재추출 |
-| Slack | `!백필고아청소 [dry]` | master_index 외부의 백필 `.md` 만 청소 (`dry` 입력 시 미실행 보고) |
+| Slack | `!백필상태` | reports 트리와 master_index 정합 상태 진단 (읽기 전용) |
+| Slack | `!백필잔여정리 [dry]` | master_index 외부의 백필 `.md` 잔여 정리 (`dry` 입력 시 미실행 보고) |
 | CLI | `python scripts/backfill_chronicles.py --scan-only --lookback 60` | 스캔만 수행하고 콘솔/Drive에 저장 |
 | CLI | `python scripts/backfill_chronicles.py --run --delay 3` | 저장된 queue를 1건씩 실행 |
 | CLI | `python scripts/backfill_chronicles.py --lookback 60 --run` | 스캔 후 즉시 실행 |
 | CLI | `python scripts/backfill_chronicles.py --reset [--purge-reports]` | 기존 백필 결과 초기화 |
 | CLI | `python scripts/backfill_chronicles.py --reset --purge-reports --run` | 완전 재구축 |
 | CLI | `python scripts/backfill_chronicles.py --reindex --delay 3` | `.md` 보존, keyphrases만 v3.2 재추출 |
-| CLI | `python scripts/backfill_chronicles.py --purge-orphan-reports [--dry-run]` | reports 트리의 고아 백필 `.md` 청소 |
-| Orchestrator | `MarketOrchestrator.backfill_scan()` / `backfill_run()` / `backfill_reset()` / `backfill_reindex()` / `backfill_purge_orphans()` | 슬랙·스케줄 통합 진입점 |
+| CLI | `python scripts/backfill_chronicles.py --diagnose-reports` | reports 트리/master_index 정합 진단 (읽기 전용) |
+| CLI | `python scripts/backfill_chronicles.py --purge-leftover-reports [--dry-run]` | reports 트리의 잔여 백필 `.md` 정리 |
+| Orchestrator | `MarketOrchestrator.backfill_scan()` / `backfill_run()` / `backfill_reset()` / `backfill_reindex()` / `backfill_diagnose()` / `backfill_purge_leftover()` | 슬랙·스케줄 통합 진입점 |
 
 ### 5.5 v3.1 구현 체크리스트
 
@@ -496,24 +500,48 @@ python scripts/backfill_chronicles.py --reindex --delay 3
 python scripts/backfill_chronicles.py --reset --purge-reports --lookback 60 --run --delay 3
 ```
 
-`--reset` 도중 일부 `.md` 가 청소되지 못해 **고아 상태** 로 남았다면 (예: v3.2.1 시점의 `_find_file_in_parent` 반환값 처리 버그 영향), 보조 명령으로 청소한다.
+**잔여 정리(leftover purge) 의 정의와 사용 흐름**
+
+`--reset` 도중 일부 `.md` 가 정상 삭제되지 못해 master_index 외부에 남은 상태를 **잔여(leftover)** 로 정의한다. 무엇이 잔여이고 무엇이 정상인지는 진단 명령으로 먼저 확인한다.
 
 ```bash
-# 어떤 파일이 청소 대상인지만 먼저 확인 (드라이런)
-python scripts/backfill_chronicles.py --purge-orphan-reports --dry-run
-
-# 실삭제
-python scripts/backfill_chronicles.py --purge-orphan-reports
+# 1) 현재 상태 진단 (읽기 전용)
+python scripts/backfill_chronicles.py --diagnose-reports
 ```
 
-| 식별 기준 | 동작 |
+진단 출력은 다음 6개 수치를 한 번에 보고한다.
+
+| 항목 | 의미 |
+|---|---|
+| `reports/*.md` 총 N건 | 트리 전체의 `.md` 갯수 |
+| 인덱스 등록 / 미등록 | `master_index.json` 의 `report_rel_path` 와 일치 여부별 분포 |
+| 백필 헤더 표식 / T-Day 헤더 표식 | 헤더 첫 200자의 `Market Chronicle (Backfill)` / `Market Chronicle ` 매칭 별 분포 |
+| master_index 엔트리 (백필 / T-Day) | `source` 필드 기준 분포 |
+| **잔여 정리 대상** | "인덱스 미등록 + 백필 표식" 동시 충족 갯수 |
+
+```bash
+# 2) 잔여가 있다면 먼저 dry-run 으로 대상 확인
+python scripts/backfill_chronicles.py --purge-leftover-reports --dry-run
+
+# 3) 실삭제
+python scripts/backfill_chronicles.py --purge-leftover-reports
+```
+
+| 잔여 판정 기준 | 동작 |
 |---|---|
 | `MarketChronicles/reports/YYYY/MM/*.md` 재귀 스캔 | reports 트리 전체를 BFS |
 | 헤더 첫 200자에 `Market Chronicle (Backfill)` 포함 | 백필 표식 보유 파일만 식별 |
-| `master_index.json` 의 어떤 `report_rel_path` 와도 일치하지 않음 | "고아" 로 판정 |
+| `master_index.json` 의 어떤 `report_rel_path` 와도 일치하지 않음 | "잔여" 로 판정 |
 | 위 세 조건 동시 충족 시에만 삭제 | T-Day 자동 작성 리포트(`# Market Chronicle YYYY-MM-DD`)는 자동 제외 |
 
+**잔여 정리 vs 전체 재구축 — 명확한 구분**
+
+- **잔여 정리(`--purge-leftover-reports`)**: master_index 외부의 백필 `.md` "만" 삭제. 인덱스 등록된 32건은 절대 건드리지 않음. 잔여 0건이 곧 "정상 상태" 보고임.
+- **전체 재구축(`--reset --purge-reports --run`)**: 32건 모두 인덱스에서 제거하고 `.md` 까지 삭제 후 새로 채우는 완전 재구축. 인덱스에 정상 등록된 32건을 통째로 비우고 싶다면 잔여 정리가 아니라 이 명령을 사용해야 한다.
+
 안전장치: T-Day 자동 작성 엔트리(`source != "backfill"`)와 그 리포트 파일은 본 섹션의 모든 함수에서 보호된다.
+
+호환성: 기존 `--purge-orphan-reports` / `!백필고아청소` / `purge_orphan_backfill_reports()` / `backfill_purge_orphans()` 명칭은 deprecated alias 로 새 명칭과 동일 동작.
 
 ---
 

@@ -530,18 +530,46 @@ def _collect_md_files_recursive(rel_folder):
     return results
 
 
-def purge_orphan_backfill_reports(notify_fn=None, dry_run=False):
-    """
-    master_index 외부에 남은 **백필 표식(.md)** 리포트를 청소한다.
+TDAY_HEADER_MARKER = "Market Chronicle "
 
-    안전장치:
-        - 헤더 첫 줄이 ``# Market Chronicle (Backfill)`` 인 파일만 식별 대상.
-          T-Day 자동 작성 리포트(헤더가 ``# Market Chronicle YYYY-MM-DD``)는 건드리지 않음.
-        - master_index 의 어떤 엔트리에도 등록되지 않은 파일만 실제 삭제.
-        - dry_run=True 면 보고만 하고 삭제는 수행하지 않음.
+
+def _classify_md(rel_path):
+    """rel_path 의 헤더를 읽어 종류를 분류한다.
 
     Returns:
-        {"scanned": int, "backfill_orphans": int, "deleted": int}
+        ("backfill" | "tday" | "unknown" | "unreadable", head_top_str)
+    """
+    try:
+        head = drive_client.read_text_relative(rel_path) or ""
+    except Exception:
+        return "unreadable", ""
+    head_top = head[:300]
+    if BACKFILL_HEADER_MARKER in head_top:
+        return "backfill", head_top
+    if TDAY_HEADER_MARKER in head_top:
+        return "tday", head_top
+    return "unknown", head_top
+
+
+def diagnose_reports(notify_fn=None):
+    """
+    reports 트리의 .md 와 master_index 의 정합 상태를 보고한다.
+
+    "왜 잔여 청소 명령이 0건만 보고하나" 와 같은 운영 의문을 즉답하기 위한 진단 명령.
+    파일을 절대 수정/삭제하지 않는다.
+
+    Returns:
+        {
+            "md_total": int,
+            "md_indexed": int,
+            "md_unindexed": int,
+            "md_backfill_marker": int,
+            "md_tday_marker": int,
+            "leftover_purge_targets": int,  # 인덱스 미등록 + 백필 표식
+            "index_total": int,
+            "index_backfill": int,
+            "index_tday": int,
+        }
     """
     def _emit(msg):
         if notify_fn:
@@ -550,13 +578,96 @@ def purge_orphan_backfill_reports(notify_fn=None, dry_run=False):
             print(msg, flush=True)
 
     if not drive_client.is_drive_enabled():
-        _emit("[Backfill Purge] Drive 가 비활성 상태입니다.")
-        return {"scanned": 0, "backfill_orphans": 0, "deleted": 0}
+        _emit("[Backfill Diagnose] Drive 가 비활성 상태입니다.")
+        return {}
     if not drive_client.is_ready():
         ok, msg = drive_client.init_drive_or_pause(notify_fn)
         if not ok:
-            _emit(f"[Backfill Purge] Drive 초기화 실패: {msg}")
-            return {"scanned": 0, "backfill_orphans": 0, "deleted": 0}
+            _emit(f"[Backfill Diagnose] Drive 초기화 실패: {msg}")
+            return {}
+
+    try:
+        index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"entries": []}
+    except Exception:
+        index = {"entries": []}
+    entries = [e for e in index.get("entries", []) if isinstance(e, dict)]
+    registered_paths = {e.get("report_rel_path") for e in entries if e.get("report_rel_path")}
+    index_backfill = sum(1 for e in entries if e.get("source") == "backfill")
+    index_tday = sum(1 for e in entries if e.get("source") != "backfill")
+
+    md_files = _collect_md_files_recursive(REPORTS_ROOT_REL)
+    md_indexed = 0
+    md_unindexed = 0
+    md_backfill_marker = 0
+    md_tday_marker = 0
+    leftover_targets = 0
+    for f in md_files:
+        rel = f["rel_path"]
+        if rel in registered_paths:
+            md_indexed += 1
+        else:
+            md_unindexed += 1
+        kind, _ = _classify_md(rel)
+        if kind == "backfill":
+            md_backfill_marker += 1
+            if rel not in registered_paths:
+                leftover_targets += 1
+        elif kind == "tday":
+            md_tday_marker += 1
+
+    _emit("[Backfill Diagnose] === reports 트리 vs master_index 정합 보고 ===")
+    _emit(f"  reports/*.md 총 {len(md_files)}건 (재귀 스캔)")
+    _emit(f"    - 인덱스 등록: {md_indexed}건 / 인덱스 미등록: {md_unindexed}건")
+    _emit(f"    - 백필 헤더 표식: {md_backfill_marker}건 / T-Day 헤더 표식: {md_tday_marker}건")
+    _emit(f"  master_index 엔트리 총 {len(entries)}건 (백필 {index_backfill} / T-Day {index_tday})")
+    _emit(f"  >> 잔여 정리(--purge-leftover-reports) 대상: {leftover_targets}건")
+    _emit(
+        "  해설: 잔여 정리는 '인덱스 미등록 + 백필 표식' 인 파일만 삭제합니다. "
+        "전체 재구축은 '--reset --purge-reports --run' 을 사용하십시오."
+    )
+
+    return {
+        "md_total": len(md_files),
+        "md_indexed": md_indexed,
+        "md_unindexed": md_unindexed,
+        "md_backfill_marker": md_backfill_marker,
+        "md_tday_marker": md_tday_marker,
+        "leftover_purge_targets": leftover_targets,
+        "index_total": len(entries),
+        "index_backfill": index_backfill,
+        "index_tday": index_tday,
+    }
+
+
+def purge_leftover_backfill_reports(notify_fn=None, dry_run=False):
+    """
+    master_index 에 등록되지 않은 채 reports 트리에 남아 있는 **백필 표식(.md)** 잔여 파일을 정리한다.
+
+    "잔여(leftover)" = ``--reset`` 직후 일부 .md 가 정상 삭제되지 못해 인덱스 외부에 떠다니는 상태.
+
+    안전장치:
+        - 헤더 첫 줄이 ``# Market Chronicle (Backfill)`` 인 파일만 식별 대상.
+          T-Day 자동 작성 리포트(헤더가 ``# Market Chronicle YYYY-MM-DD``)는 건드리지 않음.
+        - master_index 의 어떤 엔트리에도 등록되지 않은 파일만 실제 삭제.
+        - dry_run=True 면 보고만 하고 삭제는 수행하지 않음.
+
+    Returns:
+        {"scanned": int, "leftover_targets": int, "deleted": int}
+    """
+    def _emit(msg):
+        if notify_fn:
+            notify_fn(msg)
+        else:
+            print(msg, flush=True)
+
+    if not drive_client.is_drive_enabled():
+        _emit("[Backfill Leftover] Drive 가 비활성 상태입니다.")
+        return {"scanned": 0, "leftover_targets": 0, "deleted": 0}
+    if not drive_client.is_ready():
+        ok, msg = drive_client.init_drive_or_pause(notify_fn)
+        if not ok:
+            _emit(f"[Backfill Leftover] Drive 초기화 실패: {msg}")
+            return {"scanned": 0, "leftover_targets": 0, "deleted": 0}
 
     try:
         index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"entries": []}
@@ -569,48 +680,52 @@ def purge_orphan_backfill_reports(notify_fn=None, dry_run=False):
     }
 
     md_files = _collect_md_files_recursive(REPORTS_ROOT_REL)
-    _emit(f"[Backfill Purge] reports 트리 .md 총 {len(md_files)}건 스캔.")
+    _emit(f"[Backfill Leftover] reports 트리 .md 총 {len(md_files)}건 스캔.")
 
-    orphan_targets = []
+    targets = []
     for f in md_files:
         rel = f["rel_path"]
         if rel in registered_paths:
             continue
-        try:
-            head = drive_client.read_text_relative(rel) or ""
-        except Exception as exc:
-            _emit(f"[Backfill Purge] {rel} 헤더 읽기 실패 (스킵): {exc}")
-            continue
-        head_top = head[:300]
-        if BACKFILL_HEADER_MARKER in head_top:
-            orphan_targets.append(f)
+        kind, _ = _classify_md(rel)
+        if kind == "backfill":
+            targets.append(f)
 
-    _emit(f"[Backfill Purge] 백필 표식 보유 + 인덱스 미등록 .md = {len(orphan_targets)}건")
+    _emit(f"[Backfill Leftover] 인덱스 미등록 + 백필 표식 .md = {len(targets)}건")
+    if not targets:
+        _emit(
+            "  >> 정리 대상이 없습니다. 보유 중인 .md 32건이 모두 인덱스에 정상 등록된 상태로 보입니다. "
+            "전체 재구축을 원하신다면 '--reset --purge-reports --run' 을 사용하십시오. "
+            "(현재 상태 진단: '--diagnose-reports' 또는 '!백필상태')"
+        )
 
     deleted = 0
     if not dry_run:
-        for f in orphan_targets:
+        for f in targets:
             try:
                 drive_client.delete_file_by_id(f["id"])
                 deleted += 1
-                _emit(f"[Backfill Purge] 삭제: {f['rel_path']}")
+                _emit(f"[Backfill Leftover] 삭제: {f['rel_path']}")
             except Exception as exc:
                 msg = str(exc)
                 if "404" in msg or "notFound" in msg or "File not found" in msg:
                     deleted += 1
                     continue
-                _emit(f"[Backfill Purge] {f['rel_path']} 삭제 실패: {exc}")
+                _emit(f"[Backfill Leftover] {f['rel_path']} 삭제 실패: {exc}")
     else:
-        _emit("[Backfill Purge] dry_run=True 이므로 실제 삭제는 수행하지 않았습니다.")
+        _emit("[Backfill Leftover] dry_run=True 이므로 실제 삭제는 수행하지 않았습니다.")
 
     _emit(
-        f"[Backfill Purge] 종료. 스캔 {len(md_files)} / 백필 고아 {len(orphan_targets)} / 삭제 {deleted}"
+        f"[Backfill Leftover] 종료. 스캔 {len(md_files)} / 잔여 {len(targets)} / 삭제 {deleted}"
     )
     return {
         "scanned": len(md_files),
-        "backfill_orphans": len(orphan_targets),
+        "leftover_targets": len(targets),
         "deleted": deleted,
     }
+
+
+purge_orphan_backfill_reports = purge_leftover_backfill_reports
 
 
 def reset_backfill(delete_reports=False, notify_fn=None):

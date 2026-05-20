@@ -88,12 +88,19 @@ class MarketOrchestrator:
             notify_fn=self.send_slack, delay_sec=delay_sec
         )
 
-    def backfill_purge_orphans(self, dry_run=False):
-        """v3.2.2 백필 고아 청소: master_index 외부의 백필 표식 .md 만 삭제."""
+    def backfill_diagnose(self):
+        """v3.2.3 백필 진단: reports 트리와 master_index 정합 상태 보고 (읽기 전용)."""
         from src.memory import backfill
-        return backfill.purge_orphan_backfill_reports(
+        return backfill.diagnose_reports(notify_fn=self.send_slack)
+
+    def backfill_purge_leftover(self, dry_run=False):
+        """v3.2.3 백필 잔여 정리: master_index 외부의 백필 표식 .md 만 삭제."""
+        from src.memory import backfill
+        return backfill.purge_leftover_backfill_reports(
             notify_fn=self.send_slack, dry_run=dry_run
         )
+
+    backfill_purge_orphans = backfill_purge_leftover
 
     def deep_market_routine(self):
         if not market_hours.is_market_open(): return
