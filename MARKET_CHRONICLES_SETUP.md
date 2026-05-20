@@ -31,6 +31,15 @@ GDRIVE_TRANSFER_OWNERSHIP_EMAIL=you@gmail.com
 | **Google Workspace** | `GDRIVE_DELEGATED_USER_EMAIL=user@company.com` + Admin Domain-Wide Delegation |
 | **팀 드라이브** | `GDRIVE_USE_SHARED_DRIVE=1` |
 
+### OAuth `invalid_request` / `Missing redirect_uri`
+
+**원인:** client_secret JSON 이 **웹 애플리케이션** 유형이거나, `redirect_uri` 미설정.
+
+**해결:**
+1. Google Cloud Console -> 사용자 인증 정보 -> **데스크톱 앱** 으로 새 OAuth 클라이언트 생성
+2. JSON 최상위에 `"installed": { ... }` 가 있어야 함 (`"web"` 이면 안 됨)
+3. `python scripts/drive_oauth_setup.py --check-client` 로 유형 확인
+
 OAuth 설정 (개인 Gmail, 서버 SSH):
 
 ```bash
@@ -38,6 +47,9 @@ GOOGLE_DRIVE_OAUTH_CLIENT_FILE=/path/to/client_secret.json
 ```
 
 ```bash
+# JSON 유형 검증 (데스크톱 앱 여부)
+python scripts/drive_oauth_setup.py --check-client
+
 # 최초 발급 (브라우저 없는 서버)
 python scripts/drive_oauth_setup.py --no-browser
 

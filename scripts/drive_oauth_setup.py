@@ -2,35 +2,21 @@
 """
 [1회 실행] 개인 Gmail Drive 쓰기용 OAuth 토큰 발급.
 
-서버(Ubuntu SSH)에는 브라우저가 없으므로 기본값은 --no-browser (콘솔 인증).
+필수: Google Cloud OAuth 클라이언트 유형 = **데스크톱 앱 (Desktop app)**
+      (웹 애플리케이션 JSON 은 redirect_uri 오류 발생)
 
-사전 준비 (Google Cloud Console):
-  1. Drive API 활성화
-  2. OAuth 2.0 클라이언트 ID (데스크톱 앱)
-  3. OAuth 동의 화면: Testing 이면 테스트 사용자에 Gmail 등록
-  4. client_secret JSON 다운로드
-
-.env:
-  GOOGLE_DRIVE_OAUTH_CLIENT_FILE=/path/to/client_secret.json
-
-사용법:
-  # 서버 SSH (권장)
+서버 SSH:
   python scripts/drive_oauth_setup.py --no-browser
 
-  # PC 브라우저 자동 열기
-  python scripts/drive_oauth_setup.py
-
-  # SSH 포트 포워딩 후 로컬 콜백 (다른 터미널에서 ssh -L 8080:127.0.0.1:8080 ...)
-  python scripts/drive_oauth_setup.py --local-server --port 8080
-
-토큰 상태/갱신:
-  python scripts/drive_oauth_refresh.py
-  python scripts/drive_oauth_refresh.py --refresh
+클라이언트 JSON 검증만:
+  python scripts/drive_oauth_setup.py --check-client
 """
 import argparse
+import json
 import os
 import sys
 import webbrowser
+from urllib.parse import parse_qs, urlparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -48,6 +34,131 @@ def _load_env():
         pass
 
 
+def validate_client_secrets(client_path):
+    """
+  client_secret JSON 유형 검증.
+  Returns: (client_type, section_dict)
+  """
+    with open(client_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if "installed" in data:
+        section = data["installed"]
+        return "installed", section
+
+    if "web" in data:
+        print("[FAIL] 이 JSON 은 '웹 애플리케이션' 유형입니다.")
+        print("  InstalledAppFlow 는 '데스크톱 앱' 클라이언트 ID 가 필요합니다.")
+        print()
+        print("  Google Cloud Console -> 사용자 인증 정보 ->")
+        print("  + 사용자 인증 정보 만들기 -> OAuth 클라이언트 ID ->")
+        print("  애플리케이션 유형: **데스크톱 앱** -> JSON 다시 다운로드")
+        sys.exit(1)
+
+    print("[FAIL] client_secret JSON 에 'installed' 또는 'web' 키가 없습니다.")
+    sys.exit(1)
+
+
+def resolve_redirect_uri(installed_section, port=8080, prefer_oob=False):
+    """
+    redirect_uri 결정 (authorization_url / fetch_token 에 동일하게 사용).
+    """
+    uris = installed_section.get("redirect_uris") or []
+
+    if prefer_oob and "urn:ietf:wg:oauth:oauth2:out-of-band" in uris:
+        return "urn:ietf:wg:oauth:oauth2:out-of-band"
+
+    port_uri = f"http://localhost:{port}/"
+    port_uri_alt = f"http://127.0.0.1:{port}/"
+
+    for candidate in (port_uri, port_uri_alt, "http://localhost", "http://127.0.0.1"):
+        if candidate in uris:
+            return candidate
+
+    # 데스크톱 앱은 loopback 동적 포트 허용 (JSON 에 포트 없어도 됨)
+    return port_uri
+
+
+def create_flow(client_path):
+    """InstalledAppFlow 생성 + redirect_uri 사전 검증."""
+    client_type, section = validate_client_secrets(client_path)
+    if client_type != "installed":
+        sys.exit(1)
+
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    flow = InstalledAppFlow.from_client_secrets_file(client_path, SCOPES)
+    return flow, section
+
+
+def _parse_auth_code(user_input):
+    """인증 코드 또는 리다이렉트 전체 URL 에서 code 추출."""
+    text = (user_input or "").strip()
+    if not text:
+        return None
+
+    if "code=" in text:
+        if text.startswith("http"):
+            qs = parse_qs(urlparse(text).query)
+        else:
+            qs = parse_qs(text.lstrip("?"))
+        codes = qs.get("code", [])
+        return codes[0] if codes else None
+
+    return text
+
+
+def _run_manual_flow(flow, redirect_uri):
+    """서버 SSH: URL 출력 -> 브라우저 인증 -> code 붙여넣기."""
+    flow.redirect_uri = redirect_uri
+
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+
+    print("=" * 60)
+    print(f"redirect_uri: {redirect_uri}")
+    print()
+    print("1) 아래 URL 을 PC/휴대폰 브라우저에서 엽니다.")
+    print("2) Gmail 로그인 후 Drive 권한 허용.")
+    print("3) 리다이렉트 후 주소창 URL 전체 또는 code= 뒤 값을 붙여넣습니다.")
+    print("   (localhost 연결 실패 화면이어도 주소창 URL 은 복사 가능)")
+    print("   Testing 모드: OAuth 테스트 사용자에 Gmail 등록 필수")
+    print("=" * 60)
+    print(auth_url)
+    print("=" * 60)
+
+    raw = input("인증 코드 또는 리다이렉트 URL: ").strip()
+    code = _parse_auth_code(raw)
+    if not code:
+        print("[FAIL] code 를 찾을 수 없습니다.")
+        sys.exit(1)
+
+    flow.fetch_token(code=code)
+    return flow.credentials
+
+
+def _run_local_server_flow(flow, redirect_uri, port, open_browser):
+    flow.redirect_uri = redirect_uri
+    if open_browser:
+        print("브라우저에서 Google 로그인 및 Drive 권한을 허용하세요.")
+    else:
+        print("=" * 60)
+        print(f"redirect_uri: {redirect_uri}")
+        print(f"SSH 터널 (PC에서): ssh -L {port}:127.0.0.1:{port} user@서버")
+        print("이후 아래 URL 을 브라우저에서 엽니다.")
+        print("=" * 60)
+    return flow.run_local_server(
+        host="localhost",
+        port=port,
+        open_browser=open_browser,
+        authorization_prompt_message="인증 URL:",
+        success_message="인증 완료. 터미널로 돌아가세요.",
+    )
+
+
 def _has_gui_browser():
     try:
         webbrowser.get()
@@ -56,60 +167,23 @@ def _has_gui_browser():
         return False
 
 
-def _run_console_flow(flow):
-    """브라우저 없음: URL 출력 후 인증 코드 붙여넣기 (refresh_token 확보용 offline)."""
-    print("=" * 60)
-    print("1) 아래 URL을 PC/휴대폰 브라우저에서 엽니다.")
-    print("2) Quant_Logs 소유 Gmail 로 로그인 후 Drive 권한 허용.")
-    print("3) 화면에 나온 인증 코드를 복사해 이 터미널에 붙여넣습니다.")
-    print("   (Testing 모드: OAuth 동의 화면에 테스트 사용자로 등록된 계정만 가능)")
-    print("=" * 60)
-
-    try:
-        if hasattr(flow, "run_console"):
-            return flow.run_console(
-                authorization_prompt_message="인증 URL:",
-                code_verifier_prompt_message="인증 코드 입력: ",
-            )
-    except TypeError:
-        pass
-
-    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
-    print(auth_url)
-    print("=" * 60)
-    code = input("인증 코드: ").strip()
-    flow.fetch_token(code=code)
-    return flow.credentials
-
-
-def _run_local_server_flow(flow, port, open_browser):
-    if open_browser:
-        print("브라우저에서 Google 계정 로그인 및 Drive 권한을 허용하세요.")
-    else:
-        print("=" * 60)
-        print(f"1) 다른 PC에서 SSH 터널: ssh -L {port}:127.0.0.1:{port} user@서버")
-        print("2) 아래에 표시될 URL을 브라우저에서 엽니다.")
-        print("=" * 60)
-    return flow.run_local_server(
-        port=port,
-        open_browser=open_browser,
-        authorization_prompt_message="인증 URL (브라우저에서 열기):",
-        success_message="인증 완료. 이 창을 닫고 터미널로 돌아가세요.",
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(description="Drive OAuth 토큰 최초 발급")
     parser.add_argument("--client-file", help="OAuth client_secret.json 경로")
     parser.add_argument(
+        "--check-client",
+        action="store_true",
+        help="JSON 이 데스크톱 앱 유형인지만 검사",
+    )
+    parser.add_argument(
         "--no-browser",
         action="store_true",
-        help="콘솔 인증 (서버 SSH 기본 권장)",
+        help="수동 code 입력 (서버 SSH 기본)",
     )
     parser.add_argument(
         "--local-server",
         action="store_true",
-        help="localhost 콜백 (SSH -L 포워딩 필요)",
+        help="localhost 콜백 서버 (SSH -L 포워딩)",
     )
     parser.add_argument("--port", type=int, default=8080, help="local server 포트")
     args = parser.parse_args()
@@ -121,15 +195,25 @@ def main():
         print("[FAIL] GOOGLE_DRIVE_OAUTH_CLIENT_FILE 경로가 없습니다.")
         sys.exit(1)
 
-    from google_auth_oauthlib.flow import InstalledAppFlow
+    client_type, section = validate_client_secrets(client_path)
+    uris = section.get("redirect_uris", [])
+    print(f"[OK] 클라이언트 유형: {client_type} (데스크톱 앱)")
+    print(f"     등록된 redirect_uris: {uris}")
 
-    flow = InstalledAppFlow.from_client_secrets_file(client_path, SCOPES)
+    if args.check_client:
+        return
 
-    use_console = args.no_browser or (not args.local_server and not _has_gui_browser())
-    if use_console:
-        creds = _run_console_flow(flow)
+    flow, section = create_flow(client_path)
+    redirect_uri = resolve_redirect_uri(section, port=args.port)
+
+    if args.local_server:
+        creds = _run_local_server_flow(
+            flow, redirect_uri, args.port, open_browser=not args.no_browser
+        )
+    elif args.no_browser or not _has_gui_browser():
+        creds = _run_manual_flow(flow, redirect_uri)
     else:
-        creds = _run_local_server_flow(flow, args.port, open_browser=not args.no_browser)
+        creds = _run_local_server_flow(flow, redirect_uri, args.port, open_browser=True)
 
     from src.memory.oauth_token import get_token_path
 
@@ -137,9 +221,11 @@ def main():
     with open(out, "w", encoding="utf-8") as f:
         f.write(creds.to_json())
 
+    has_refresh = bool(getattr(creds, "refresh_token", None))
     print(f"[OK] 토큰 저장: {out}")
-    print("상태 확인: python scripts/drive_oauth_refresh.py")
-    print("폴더 생성: python scripts/drive_folder_bootstrap.py")
+    print(f"     refresh_token: {'있음' if has_refresh else '없음 (재실행 시 --no-browser 로 consent 재요청)'}")
+    print("다음: python scripts/drive_oauth_refresh.py")
+    print("      python scripts/drive_folder_bootstrap.py")
 
 
 if __name__ == "__main__":
