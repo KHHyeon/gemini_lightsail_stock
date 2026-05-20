@@ -14,7 +14,7 @@
 *   **v2.8 시스템 안정화 및 명세 고도화 완료 (구현율 99%):** 슬랙 인터페이스 핸들러 중첩 오류 수정, 거시경제(유가, 금리) 셧다운 임계치 구체화, ETF 자동 필터링 및 매수 시점 지수 연동형 RS(Relative Strength) 계산 로직 정밀화 완료.
 *   **v2.9 HTS 통합 스캔 및 정밀 타점 진단 인터페이스 구축 완료:** `!HTS스캔` 명령어를 통한 3-Track 동시 검증 및 `!타점분석` 명령어를 통한 개별 종목 도지/거래량 변곡점 판별 로직 연동 완료.
 *   **v3.0 Market Chronicles (지능형 메모리 아키텍처) — Drive 실연동 완료 (구현율 85%):** OAuth(데스크톱 앱, headless `--no-browser`) 인증·자동 토큰 갱신·storage quota 우회 적용. 실서버(`Quant_Logs/MarketChronicles/{index,reports,temp,_system}`, `app_data/`) 폴더 구조 자동 생성 및 `master_index.json` 초기화 완료. `src/memory/` 4모듈, AI Context Injection, 15:35 스케줄, `!크로니클`/`완료` 슬랙 명령 동작. (설정: `MARKET_CHRONICLES_SETUP.md`, 상세: **§4**)
-*   **v3.1 Market Chronicles 과거 데이터 소급 구축 (Back-filling) — 1차 구현 완료 (구현율 90%):** 가동 즉시 참조 가능한 '과거 대응 지침 DB' 확보를 위해 최근 60일 KOSPI/KOSDAQ/VIX(yfinance) 일봉을 스캔하여 트리거($\pm 1.5\%$ 또는 VIX$\ge$25) 충족 '이벤트 데이'를 추출하고, 사용자 승인(`확인`/`!백필실행`) 시 과거 시점 뉴스를 수집해 Gemini로 [장중 흐름·사건 원인·미래 행동 지침] 리포트(.md)를 생성·`master_index.json`에 색인. **신규 모듈** `src/memory/backfill.py`, **CLI** `scripts/backfill_chronicles.py`, **슬랙** `!백필스캔`/`!백필실행` 추가. **안정성:** 리포트 1건당 3초 대기(Rate Limit), 실패 일자 자동 스킵+로그, Drive 기반 진행 상태 보존(`backfill_state.json`)으로 중단 후 이어쓰기 지원. (상세: **§5**)
+*   **v3.1 Market Chronicles 과거 데이터 소급 구축 (Back-filling) — 실전 검증 완료 (구현율 98%):** 최근 60일 KOSPI/KOSDAQ/VIX(yfinance) 일봉 스캔으로 트리거($\pm 1.5\%$ 또는 VIX$\ge$25) '이벤트 데이' 추출 → 과거 시점 뉴스 + AI 사후 분석 → `.md` 리포트 + `master_index.json` 색인. **신규 모듈** `src/memory/backfill.py`, **CLI** `scripts/backfill_chronicles.py`, **슬랙** `!백필스캔`/`!백필실행`/`확인`. **운영 검증(2026-05-20):** 60일 윈도우에서 **완료 32 / 스킵 0 / 실패 0** 으로 첫 회 백필 종결. 가동 즉시 Context Injection 가능한 32건의 과거 행동 지침 DB 확보. (상세: **§5**)
 
 
 # 목차
@@ -208,7 +208,7 @@
     *   **출력 원칙:** 금융 전문 용어 배제, 초보자용 일상 언어 리포트.
     *   **구현 모듈:** `src/memory/{drive_client, oauth_token, chronicle_writer, context_retriever, lifecycle}.py`; `scripts/{drive_oauth_setup, drive_oauth_refresh, drive_folder_bootstrap}.py`; 스케줄 15:35; 슬랙 `!크로니클`, `완료`.
     *   **미완:** 실제 T-Day 크로니클 작성 검증(트리거 충족 일자 대기), 키워드 검색 고도화(임베딩), `temp/tech` 자동 업로드 파이프라인.
-*  **v3.1 업데이트 (Market Chronicles 과거 데이터 소급 구축 — 1차 구현 완료, 구현율 90%):**
+*  **v3.1 업데이트 (Market Chronicles 과거 데이터 소급 구축 — 실전 검증 완료, 구현율 98%):**
     *   **목적:** 가동 즉시 AI 판단에 주입 가능한 **'과거 대응 지침 DB'** 확보. T-Day 트리거 발생만을 기다리지 않고, 최근 60일치 변동성 장세를 사전 분석하여 마스터 인덱스를 두텁게 만든다.
     *   **이벤트 데이 추출:** `yfinance`로 ^KS11/^KQ11/^VIX 일봉을 받아 등락률 $\pm 1.5\%$ 이상 또는 VIX $\ge 25$ 인 거래일을 식별.
     *   **2단계 동의 흐름:** ① `!백필스캔`(또는 `scripts/backfill_chronicles.py --scan-only`)로 후보 N건을 슬랙에 보고하고 대기. ② 사용자가 `확인` 또는 `!백필실행`을 입력하면 ③ 과거 시점 뉴스 수집·AI 사후 분석·리포트 저장·인덱스 색인 일괄 실행.
@@ -217,6 +217,7 @@
     *   **상태 보존(중단 대비):** 진행 상황을 Drive `MarketChronicles/_system/backfill_state.json`에 기록(processed/skipped/queue). 중단되어도 다음 실행 시 미처리 일자만 이어서 처리.
     *   **예외 처리:** 한 일자 처리 중 오류 발생 시 해당 날짜를 `skipped`로 기록하고 다음 날짜로 진행. 이미 같은 날짜의 크로니클이 존재하면 자동 스킵.
     *   **구현 모듈:** `src/memory/backfill.py`, `scripts/backfill_chronicles.py`, 슬랙 `!백필스캔`/`!백필실행`/`확인`, `MarketOrchestrator.backfill_scan`/`backfill_run`.
+    *   **운영 검증(2026-05-20, terminal 수동 실행):** lookback=60, delay=3s, 결과 **완료 32 / 스킵 0 / 실패 0**. `master_index.json` 누적 엔트리 +32(`source="backfill"`). 향후 모든 AI 매매·시황 판단에 Context Injection 즉시 가동.
 
 ---
 
@@ -420,7 +421,8 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 | 5. 사후 통찰 프롬프트(과거 분석 강화) | **완료** | "현재 시점에서 돌이켜 본 교훈" 포함 |
 | 6. Drive `backfill_state.json` 상태 저장·이어쓰기 | **완료** | 중단 후 재개 안전 |
 | 7. T-Day 본 크로니클과 동일 색인 규격(`master_index.json`) | **완료** | `source="backfill"` 표식만 추가 |
-| 8. 임베딩 기반 유사도 검색·실시간 매크로 스냅샷 통합 | 미완 | v3.x 향후 고도화 |
+| 8. **실전 운영 검증** | **완료 (2026-05-20)** | lookback 60일, **완료 32 / 스킵 0 / 실패 0** (terminal 수동 실행) |
+| 9. 임베딩 기반 유사도 검색·실시간 매크로 스냅샷 통합 | 미완 | v3.x 향후 고도화 (§6 참고) |
 
 ---
 
