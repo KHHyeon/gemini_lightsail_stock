@@ -108,9 +108,14 @@ def _load_oauth_credentials():
 
 
 def _build_drive_service(creds):
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
     from googleapiclient.discovery import build
 
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+    timeout = int(os.getenv("GOOGLE_DRIVE_HTTP_TIMEOUT", "60"))
+    http = httplib2.Http(timeout=timeout)
+    authorized = AuthorizedHttp(creds, http=http)
+    return build("drive", "v3", http=authorized, cache_discovery=False)
 
 
 def _shared_drive_kwargs():
@@ -227,27 +232,36 @@ def _now_iso():
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def get_pause_state():
-    if not is_drive_enabled() or not is_drive_configured():
+def _local_pause_path():
+    return os.path.join(_project_root(), ".drive_pause_local.json")
+
+
+def _read_local_pause_state():
+    path = _local_pause_path()
+    if not os.path.isfile(path):
         return None
     try:
-        return read_json_relative(PAUSE_REL_PATH)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return None
 
 
 def is_paused():
-    state = get_pause_state()
-    if state and state.get("paused"):
-        return True
-    local = os.path.join(_project_root(), ".drive_pause_local.json")
-    if os.path.isfile(local):
-        try:
-            with open(local, "r", encoding="utf-8") as f:
-                return bool(json.load(f).get("paused"))
-        except Exception:
-            pass
-    return False
+    """Pause 검사 (Drive API 호출 없음 - read 재귀 방지)."""
+    local = _read_local_pause_state()
+    return bool(local and local.get("paused"))
+
+
+def get_pause_state():
+    if not is_drive_enabled() or not is_drive_configured():
+        return _read_local_pause_state()
+    if is_paused():
+        return _read_local_pause_state()
+    try:
+        return _read_json_direct(PAUSE_REL_PATH)
+    except Exception:
+        return _read_local_pause_state()
 
 
 def pause(reason, action_required):
@@ -257,15 +271,23 @@ def pause(reason, action_required):
         "action_required": action_required,
         "since": _now_iso(),
     }
-    write_json_relative(PAUSE_REL_PATH, state)
+    _write_local_pause_flag(reason, action_required)
+    try:
+        write_json_relative(PAUSE_REL_PATH, state)
+    except Exception:
+        pass
     return state
 
 
 def clear_pause():
-    write_json_relative(
-        PAUSE_REL_PATH,
-        {"paused": False, "cleared_at": _now_iso()},
-    )
+    _clear_local_pause_flag()
+    try:
+        write_json_relative(
+            PAUSE_REL_PATH,
+            {"paused": False, "cleared_at": _now_iso()},
+        )
+    except Exception:
+        pass
 
 
 def try_resume_after_user_ack():
@@ -458,8 +480,6 @@ def _ensure_chronicle_structure(svc, root_id, force_refresh=False):
     manifest = _load_manifest_cached(svc, root_id)
     for p in parts:
         _ensure_path_folders(svc, root_id, p.split("/"), manifest=manifest, save_manifest=False)
-    _persist_manifest(svc, root_id, manifest)
-
     index_parts = MASTER_INDEX_REL.split("/")
     parent_id = _ensure_path_folders(
         svc, root_id, index_parts[:-1], manifest=manifest, save_manifest=False
@@ -473,6 +493,7 @@ def _ensure_chronicle_structure(svc, root_id, force_refresh=False):
             "application/json",
         )
     _persist_manifest(svc, root_id, manifest)
+    return manifest
 
 
 def _folder_id_for_relative(rel_path, svc=None, root_id=None):
@@ -513,14 +534,30 @@ def file_exists_relative(rel_path):
         return False
 
 
-def read_text_relative(rel_path):
-    _check_pause_guard()
-    svc, root_id, parent_id, filename = _folder_id_for_relative(rel_path)
+def _read_text_direct(rel_path, svc=None, root_id=None):
+    """Pause guard 없이 Drive 파일 읽기."""
+    if svc is None:
+        svc = _get_service()
+    if root_id is None:
+        root_id = _resolve_root_folder_id(svc)
+    svc, root_id, parent_id, filename = _folder_id_for_relative(rel_path, svc=svc, root_id=root_id)
     f = _find_file_in_parent(svc, parent_id, filename)
     if not f:
         return None
     content = svc.files().get_media(fileId=f["id"]).execute()
     return content.decode("utf-8")
+
+
+def _read_json_direct(rel_path, svc=None, root_id=None):
+    raw = _read_text_direct(rel_path, svc=svc, root_id=root_id)
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+def read_text_relative(rel_path):
+    _check_pause_guard()
+    return _read_text_direct(rel_path)
 
 
 def write_text_relative(rel_path, text, mime_type="text/plain"):
@@ -530,10 +567,8 @@ def write_text_relative(rel_path, text, mime_type="text/plain"):
 
 
 def read_json_relative(rel_path):
-    raw = read_text_relative(rel_path)
-    if raw is None:
-        return None
-    return json.loads(raw)
+    _check_pause_guard()
+    return _read_json_direct(rel_path)
 
 
 def write_json_relative(rel_path, data):
@@ -609,13 +644,22 @@ def init_drive_or_pause(notify_fn=None):
         return False, str(e)
 
 
-def _write_local_pause_flag(reason):
-    path = os.path.join(_project_root(), ".drive_pause_local.json")
+def _write_local_pause_flag(reason, action_required=""):
+    path = _local_pause_path()
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"paused": True, "reason": reason, "since": _now_iso()}, f, ensure_ascii=False)
+        json.dump(
+            {
+                "paused": True,
+                "reason": reason,
+                "action_required": action_required,
+                "since": _now_iso(),
+            },
+            f,
+            ensure_ascii=False,
+        )
 
 
 def _clear_local_pause_flag():
-    path = os.path.join(_project_root(), ".drive_pause_local.json")
+    path = _local_pause_path()
     if os.path.isfile(path):
         os.remove(path)

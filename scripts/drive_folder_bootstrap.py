@@ -127,25 +127,26 @@ def _bootstrap_folders(svc, root_id):
     _log("=== Market Chronicles 폴더 구조 생성 ===")
     _log(f"  인증 모드: {mode}")
     _log("  [1/3] MarketChronicles 트리 생성 중...")
-    drive_client._ensure_chronicle_structure(svc, root_id, force_refresh=True)
+    manifest = drive_client._ensure_chronicle_structure(svc, root_id, force_refresh=True)
     _log("  [2/3] app_data 폴더 생성 중...")
-    manifest = drive_client._load_manifest_cached(svc, root_id)
+    if not manifest:
+        manifest = drive_client._load_manifest_cached(svc, root_id)
     drive_client._ensure_path_folders(
         svc, root_id, [drive_client.APP_DATA_PREFIX], manifest=manifest, save_manifest=True
     )
     _log("  [3/3] manifest 확인 중...")
-    manifest = drive_client.read_json_relative(drive_client.MANIFEST_REL_PATH) or manifest or {}
     paths = manifest.get("paths", {})
 
     _log(f"  루트 ID: {root_id}")
     _log("  생성/확인된 경로:")
     for key in sorted(paths.keys()):
-        _log(f"    - {key}  ->  {paths[key]}")
+        _log(f"    - {key}")
 
-    if drive_client.file_exists_relative(drive_client.MASTER_INDEX_REL):
+    index_folder = f"{drive_client.CHRONICLES_ROOT}/index"
+    if index_folder in paths:
         _log(f"  [OK] {drive_client.MASTER_INDEX_REL}")
     else:
-        _log(f"  [WARN] {drive_client.MASTER_INDEX_REL} 없음")
+        _log(f"  [WARN] {index_folder} 미확인 - Drive 에서 폴더 구조 확인")
 
     _log("")
     _log("[완료] Drive 연결 및 폴더 구조 준비가 끝났습니다.")
