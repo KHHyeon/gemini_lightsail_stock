@@ -92,16 +92,17 @@ def _test_connection():
         ).execute()
         print(f"  [OK] 루트 폴더 접근: name={meta.get('name')}, id={meta.get('id')}")
 
-        if not drive_client.uses_shared_drive() and not drive_client.get_transfer_owner_email():
+        mode = drive_client.get_auth_mode()
+        print(f"  인증 모드: {mode}")
+        if mode == "sa_plain":
             owner = drive_client.get_folder_owner_email(svc, root_id)
             print()
-            print("  [WARN] 서비스 계정은 Drive 용량이 없습니다.")
-            print("  .env에 아래 중 하나를 추가하세요:")
-            if owner:
-                print(f"    GDRIVE_TRANSFER_OWNERSHIP_EMAIL={owner}")
-            else:
-                print("    GDRIVE_TRANSFER_OWNERSHIP_EMAIL=Quant_Logs_폴더_소유_Gmail")
-            print("  (또는 Workspace 공유 드라이브: GDRIVE_USE_SHARED_DRIVE=1)")
+            print("  [WARN] 서비스 계정 단독 모드는 파일 생성이 불가합니다.")
+            print("  개인 Gmail (권장):")
+            print("    python scripts/drive_oauth_setup.py")
+            print("  Google Workspace:")
+            print(f"    GDRIVE_DELEGATED_USER_EMAIL={owner or 'user@company.com'}")
+            print("    + Admin Domain-Wide Delegation 설정")
         return svc, root_id
     except Exception as e:
         print(f"  [FAIL] {e}")
@@ -118,8 +119,13 @@ def _log(msg):
 def _bootstrap_folders(svc, root_id):
     from src.memory import drive_client
 
+    mode = drive_client.get_auth_mode()
+    if mode == "sa_plain":
+        drive_client._raise_storage_quota_help()
+
     _log("")
     _log("=== Market Chronicles 폴더 구조 생성 ===")
+    _log(f"  인증 모드: {mode}")
     _log("  [1/3] MarketChronicles 트리 생성 중...")
     drive_client._ensure_chronicle_structure(svc, root_id, force_refresh=True)
     _log("  [2/3] app_data 폴더 생성 중...")

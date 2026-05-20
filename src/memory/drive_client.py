@@ -20,6 +20,7 @@ MASTER_INDEX_REL = f"{CHRONICLES_ROOT}/index/master_index.json"
 
 _DRIVE_SERVICE = None
 _FOLDER_CACHE = None
+_AUTH_MODE = None  # oauth | delegation | shared_drive | sa_plain
 
 
 class DrivePausedError(Exception):
@@ -74,11 +75,50 @@ def uses_shared_drive():
 
 
 def get_transfer_owner_email():
-    """
-    서비스 계정이 만든 파일의 소유권을 넘길 Google 계정.
-    개인 Drive 폴더를 SA와 공유해 쓸 때 필수 (Quant_Logs 소유 Gmail).
-    """
+    """레거시: 소유권 이전 대상 (생성 전 위임이 우선)."""
     return os.getenv("GDRIVE_TRANSFER_OWNERSHIP_EMAIL", "").strip()
+
+
+def get_delegated_user_email():
+    """
+    서비스 계정이 이 사용자로 동작 (Domain-Wide Delegation, Workspace).
+    개인 @gmail.com 은 불가 -> OAuth 사용.
+    """
+    return (
+        os.getenv("GDRIVE_DELEGATED_USER_EMAIL", "").strip()
+        or get_transfer_owner_email()
+    )
+
+
+def get_auth_mode():
+    return _AUTH_MODE
+
+
+def _oauth_token_path():
+    return os.path.join(_project_root(), "drive_oauth_token.json")
+
+
+def _load_oauth_credentials():
+    """OAuth 사용자 토큰 (개인 Gmail Drive 쓰기용)."""
+    token_path = _oauth_token_path()
+    if not os.path.isfile(token_path):
+        return None
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
+    creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            return None
+    return creds
+
+
+def _build_drive_service(creds):
+    from googleapiclient.discovery import build
+
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
 def _shared_drive_kwargs():
@@ -93,22 +133,32 @@ def _shared_drive_kwargs():
 
 
 def _transfer_ownership_if_needed(svc, file_id):
-    """SA 소유 파일을 사용자 계정으로 이전 (storage quota 403 방지)."""
-    if uses_shared_drive():
+    """sa_plain 모드에서만 사용 (생성 후 이전은 대부분 실패하므로 비권장)."""
+    if _AUTH_MODE in ("oauth", "delegation", "shared_drive"):
         return
     email = get_transfer_owner_email()
     if not email:
-        raise DriveNotConfiguredError(
-            "서비스 계정은 Drive 저장 용량이 없습니다. .env에 "
-            "GDRIVE_TRANSFER_OWNERSHIP_EMAIL=Quant_Logs_소유_Gmail 을 설정하거나 "
-            "GDRIVE_USE_SHARED_DRIVE=1 (공유 드라이브)을 사용하세요."
-        )
+        _raise_storage_quota_help()
     svc.permissions().create(
         fileId=file_id,
         body={"type": "user", "role": "owner", "emailAddress": email},
         transferOwnership=True,
         **_shared_drive_kwargs(),
     ).execute()
+
+
+def _raise_storage_quota_help():
+    raise DriveNotConfiguredError(
+        "서비스 계정은 Drive 저장 용량이 없어 파일을 만들 수 없습니다.\n"
+        "해결 1 (개인 Gmail): python scripts/drive_oauth_setup.py 실행 후 OAuth 토큰 생성\n"
+        "해결 2 (Workspace): GDRIVE_DELEGATED_USER_EMAIL=사용자@회사도메인 + 관리자 콘솔 Domain-Wide Delegation\n"
+        "해결 3: Quant_Logs 를 공유 드라이브로 옮기고 GDRIVE_USE_SHARED_DRIVE=1"
+    )
+
+
+def _assert_can_create_files():
+    if _AUTH_MODE == "sa_plain" and not uses_shared_drive():
+        _raise_storage_quota_help()
 
 
 def get_folder_owner_email(svc, folder_id):
@@ -128,45 +178,56 @@ def get_folder_owner_email(svc, folder_id):
 
 
 def _get_service():
-    global _DRIVE_SERVICE
+    global _DRIVE_SERVICE, _AUTH_MODE
     if _DRIVE_SERVICE is not None:
         return _DRIVE_SERVICE
     if not is_drive_configured():
         raise DriveNotConfiguredError(
-            "GOOGLE_APPLICATION_CREDENTIALS 또는 GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE 미설정"
+            "GOOGLE_APPLICATION_CREDENTIALS 또는 GOOGLE_DRIVE_OAUTH_CLIENT_FILE 미설정"
         )
 
+    if uses_shared_drive():
+        _AUTH_MODE = "shared_drive"
+
+    oauth_creds = _load_oauth_credentials()
+    if oauth_creds:
+        _AUTH_MODE = "oauth"
+        _DRIVE_SERVICE = _build_drive_service(oauth_creds)
+        return _DRIVE_SERVICE
+
     sa_path = get_service_account_path()
+    delegate = get_delegated_user_email()
+
     if sa_path and os.path.isfile(sa_path):
         from google.oauth2 import service_account
-        from googleapiclient.discovery import build
 
+        if delegate:
+            _AUTH_MODE = "delegation"
+            creds = service_account.Credentials.from_service_account_file(
+                sa_path, scopes=SCOPES, subject=delegate
+            )
+            _DRIVE_SERVICE = _build_drive_service(creds)
+            return _DRIVE_SERVICE
+
+        _AUTH_MODE = "sa_plain"
         creds = service_account.Credentials.from_service_account_file(sa_path, scopes=SCOPES)
-        _DRIVE_SERVICE = build("drive", "v3", credentials=creds, cache_discovery=False)
+        _DRIVE_SERVICE = _build_drive_service(creds)
         return _DRIVE_SERVICE
 
     oauth_path = os.getenv("GOOGLE_DRIVE_OAUTH_CLIENT_FILE", "").strip()
     if not oauth_path or not os.path.isfile(oauth_path):
-        raise DriveNotConfiguredError("Drive 인증 파일을 찾을 수 없습니다.")
+        raise DriveNotConfiguredError(
+            "Drive 인증 없음. SA JSON 또는 OAuth client_secret.json 이 필요합니다."
+        )
 
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
 
-    token_path = os.path.join(_project_root(), "drive_oauth_token.json")
-    creds = None
-    if os.path.isfile(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(oauth_path, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(token_path, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
-    _DRIVE_SERVICE = build("drive", "v3", credentials=creds, cache_discovery=False)
+    flow = InstalledAppFlow.from_client_secrets_file(oauth_path, SCOPES)
+    creds = flow.run_local_server(port=0)
+    with open(_oauth_token_path(), "w", encoding="utf-8") as f:
+        f.write(creds.to_json())
+    _AUTH_MODE = "oauth"
+    _DRIVE_SERVICE = _build_drive_service(creds)
     return _DRIVE_SERVICE
 
 
@@ -315,6 +376,7 @@ def _persist_manifest(svc, root_id, manifest):
 
 
 def _write_bytes_to_parent(svc, parent_id, filename, data_bytes, mime_type):
+    _assert_can_create_files()
     from googleapiclient.http import MediaIoBaseUpload
 
     stream = io.BytesIO(data_bytes)
@@ -349,6 +411,7 @@ def _find_child_folder(svc, parent_id, name):
 
 
 def _create_folder(svc, parent_id, name):
+    _assert_can_create_files()
     meta = {
         "name": name,
         "mimeType": "application/vnd.google-apps.folder",

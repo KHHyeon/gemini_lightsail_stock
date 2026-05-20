@@ -9,3 +9,5 @@ drive_oauth_token.json
 *.json
 docs_cache/
 lotto/
+*.md
+.cursor/
