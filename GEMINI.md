@@ -13,7 +13,7 @@
 *  **v2.7 지능형 포트폴리오 관리 및 상대 강도(RS) 손절 도입 (구현율 95%):** '기대주(TRACK_A)', '배당주(TRACK_B)', '낙폭과대(TRACK_C)' 태깅 시스템 도입, 지수 대비 상대 강도(RS) 기반 유연 손절(-17%) 및 20일 무반등 종목 교체 알림 로직 구현, Manual vs AI 성과 비교 체계 구축.
 *   **v2.8 시스템 안정화 및 명세 고도화 완료 (구현율 99%):** 슬랙 인터페이스 핸들러 중첩 오류 수정, 거시경제(유가, 금리) 셧다운 임계치 구체화, ETF 자동 필터링 및 매수 시점 지수 연동형 RS(Relative Strength) 계산 로직 정밀화 완료.
 *   **v2.9 HTS 통합 스캔 및 정밀 타점 진단 인터페이스 구축 완료:** `!HTS스캔` 명령어를 통한 3-Track 동시 검증 및 `!타점분석` 명령어를 통한 개별 종목 도지/거래량 변곡점 판별 로직 연동 완료.
-*   **v3.0 Market Chronicles (지능형 메모리 아키텍처) — 1차 구현 완료 (구현율 75%):** `src/memory/` Drive 클라이언트·크로니클 작성·Context Injection·TTL 정리, `logger.py` Drive 연동(폴백: 로컬), AI 매매 판단 프롬프트 주입, 15:35 스케줄·`!크로니클`/`완료` 슬랙 명령. (설정: `MARKET_CHRONICLES_SETUP.md`, 상세: **§5**)
+*   **v3.0 Market Chronicles (지능형 메모리 아키텍처) — Drive 실연동 완료 (구현율 85%):** OAuth(데스크톱 앱, headless `--no-browser`) 인증·자동 토큰 갱신·storage quota 우회 적용. 실서버(`Quant_Logs/MarketChronicles/{index,reports,temp,_system}`, `app_data/`) 폴더 구조 자동 생성 및 `master_index.json` 초기화 완료. `src/memory/` 4모듈, AI Context Injection, 15:35 스케줄, `!크로니클`/`완료` 슬랙 명령 동작. (설정: `MARKET_CHRONICLES_SETUP.md`, 상세: **§5**)
 
 
 # 리팩토링 및 사양서 동기화 규칙
@@ -73,8 +73,9 @@
 * **기술적 정밀 타점 진단 (!타점분석):**
     * 캔들 몸통 비중(1.5% 이하 도지 판정) 및 거래량(5일 평균 대비 50% 이하)을 분석하여 하락 진정 및 반등 변곡점을 수치화하여 제공.
 
-* **Market Chronicles (v3.0, 예정):**
-    * **Cloud-Only 저장:** 로컬 디스크에 시장 지침·크로니클을 저장하지 않고 Google Drive API로만 관리.
+* **Market Chronicles (v3.0, 실연동 완료):**
+    * **Cloud-Only 저장:** 로컬 디스크에 시장 지침·크로니클을 저장하지 않고 Google Drive API로만 관리. 실서버(`Quant_Logs`) 연결 검증 완료.
+    * **OAuth 인증:** 서비스 계정 storage quota 한계를 극복하기 위해 **OAuth 데스크톱 앱** 방식 채택. headless 서버용 `--no-browser` 인증, refresh token 자동 갱신, Testing 모드 만료 감지·재발급 안내.
     * **T-Day 크로니클:** 코스피/코스닥 $\pm 1.5\%$ 이상 또는 VIX $\ge 25$ 시 장 마감 후 인과 분석 리포트 및 **미래 행동 지침** 자동 작성.
     * **Context Injection:** 매수/매도 AI 판단 직전, 고속 마스터 인덱스에서 유사 상황 **행동 지침 3건**을 검색·주입하여 단기 기억 상실을 보완.
     * **쉬운 언어 출력:** 금융 전문 용어를 배제하고 초보자도 이해 가능한 일상 언어로 리포트·분석 결과 제공.
@@ -112,11 +113,16 @@
     *   `helpers.py`: 장 개장 시간 체크 등 공통 계산 도구 (구 market_hours.py).
     *   `messenger.py`: 슬랙 메시지 전송 및 이모지 포맷팅 관리 (구 slack_notifier.py).
     *   `slack_interface.py`: 슬랙 명령어 라우팅 및 이벤트 핸들링.
-*   **`src/memory/` (v3.0 신설 예정)** — Market Chronicles 전용 레이어:
-    *   `drive_client.py`: Google Drive API 인증·폴더·파일 CRUD, Pause/Resume 상태 관리.
+*   **`src/memory/` (v3.0 신설 완료)** — Market Chronicles 전용 레이어:
+    *   `drive_client.py`: Google Drive API 인증(OAuth/SA/위임/공유 드라이브 자동 감지), 폴더·파일 CRUD, Pause/Resume 상태 관리, manifest 캐시.
+    *   `oauth_token.py`: OAuth 토큰(`drive_oauth_token.json`) 상태 점검·자동 갱신, Testing 모드 만료 감지.
     *   `chronicle_writer.py`: T-Day 트리거 판정, 크로니클 리포트(.md) 작성, 마스터 인덱스 색인 갱신.
     *   `context_retriever.py`: [뉴스 키워드 + 시장 국면] 기반 유사 행동 지침 Top-3 검색 및 AI 프롬프트 주입.
     *   `lifecycle.py`: 임시 기술 데이터 30일 자동 삭제, 연월별 리포트 폴더 분할 관리.
+*   **`scripts/` (운영용 스크립트)** — Market Chronicles 초기 셋업 도구:
+    *   `drive_oauth_setup.py`: OAuth 클라이언트 JSON 유형 검증(`--check-client`), headless 토큰 발급(`--no-browser`).
+    *   `drive_oauth_refresh.py`: 토큰 상태 확인 및 access token refresh.
+    *   `drive_folder_bootstrap.py`: `Quant_Logs` 하위 `MarketChronicles/` 폴더 구조 자동 생성·검증.
 ---
 
 ## 3. 변경 이력 (Change Log)
@@ -163,16 +169,19 @@
 *  **v2.7 업데이트:** TRACK_A/B/C 태깅, RS 기반 유연 손절(-17%), 20일 무반등 교체 알림, Manual vs AI 성과 비교.
 *  **v2.8 업데이트:** 슬랙 핸들러 중첩 오류 수정, 매크로 셧다운 임계치 구체화, ETF 필터링, 지수 연동형 RS 계산 정밀화.
 *  **v2.9 업데이트:** `!HTS스캔`(3-Track 동시 검증), `!타점분석`(도지/거래량 변곡점) 인터페이스 구축.
-*  **v3.0 업데이트 (Market Chronicles — 1차 구현, 구현율 75%):**
-    *   **목적:** Gemini API의 호출 단위 맥락 초기화 한계를 극복하는 **Google Drive 전용 외장 메모리** 아키텍처 확정.
+*  **v3.0 업데이트 (Market Chronicles — Drive 실연동 완료, 구현율 85%):**
+    *   **목적:** Gemini API의 호출 단위 맥락 초기화 한계를 극복하는 **Google Drive 전용 외장 메모리** 아키텍처 확정 및 실서버 연결.
     *   **Cloud-Only:** 로컬 저장소 미사용, 모든 크로니클·인덱스·임시 데이터를 Drive API로만 관리.
-    *   **2단계 저장:** 고속 검색용 마스터 인덱스(JSON) + 날짜별 상세 리포트(.md), 연월 폴더 분할·30일 임시 데이터 자동 삭제 가이드라인 반영.
-    *   **Pause/Resume:** 폴더 생성·OAuth 승인·용량 부족 등 사용자 개입 필요 시 프로세스 일시 정지 후 슬랙 안내 및 "완료" 응답 시 재검증·재개.
+    *   **인증 체계 확립:** 서비스 계정 storage quota 403 한계 발견 → **OAuth 데스크톱 앱** 방식으로 전환. 인증 모드(`oauth` / `delegation` / `shared_drive` / `sa_plain`) 자동 감지.
+    *   **Headless OAuth:** 서버(Ubuntu SSH, 브라우저 없음)에서 `--no-browser` 콘솔 인증으로 토큰 발급. JSON 유형(데스크톱 앱 vs 웹 앱) 사전 검증.
+    *   **자동 토큰 갱신:** `oauth_token.py`가 access token 만료 시 refresh, Testing 모드 만료(`invalid_grant`) 감지 및 재발급 안내. 봇 기동 시 자동 점검.
+    *   **폴더 구조 자동 생성:** `Quant_Logs/MarketChronicles/{index, reports/YYYY/MM, temp/tech, _system}`, `app_data/` 자동 생성. `master_index.json` 초기화 완료.
+    *   **Pause/Resume:** 폴더 생성·OAuth 승인·용량 부족 등 사용자 개입 필요 시 로컬 플래그(`.drive_pause_local.json`)로 일시 정지 후 슬랙 안내 및 "완료" 응답 시 재검증·재개. Drive 재호출 무한 재귀 방지 로직 적용.
     *   **T-Day 크로니클:** 코스피/코스닥 $\pm 1.5\%$ 또는 VIX $\ge 25$ 시 장 마감 후 인과 분석·**미래 행동 지침** 도출 및 인덱스 색인.
     *   **Context Injection:** AI 매매 판단 직전 유사 행동 지침 Top-3를 [필수 준수 배경 지식]으로 프롬프트 강제 주입 (`ai_logic.generate_text_with_chronicle`).
     *   **출력 원칙:** 금융 전문 용어 배제, 초보자용 일상 언어 리포트.
-    *   **구현 모듈:** `src/memory/drive_client.py`, `chronicle_writer.py`, `context_retriever.py`, `lifecycle.py`; 스케줄 15:35; 슬랙 `!크로니클`, `완료`.
-    *   **미완:** 실계좌 Drive 마이그레이션 검증, 키워드 검색 고도화(임베딩), temp/tech 자동 업로드 파이프라인.
+    *   **구현 모듈:** `src/memory/{drive_client, oauth_token, chronicle_writer, context_retriever, lifecycle}.py`; `scripts/{drive_oauth_setup, drive_oauth_refresh, drive_folder_bootstrap}.py`; 스케줄 15:35; 슬랙 `!크로니클`, `완료`.
+    *   **미완:** 실제 T-Day 크로니클 작성 검증(트리거 충족 일자 대기), 키워드 검색 고도화(임베딩), `temp/tech` 자동 업로드 파이프라인.
 
 ---
 
@@ -291,21 +300,24 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 
 | 단계 | 상태 | 비고 |
 |------|------|------|
-| 1. `drive_client.py` (Pause/Resume) | 완료 | 서비스 계정·OAuth 지원 |
-| 2. Drive 폴더·`master_index.json` | 완료 | 연월별 reports 분할 |
+| 1. `drive_client.py` (Pause/Resume) | 완료 | OAuth/SA/위임/공유 드라이브 자동 감지 |
+| 2. Drive 폴더·`master_index.json` | **실연동 완료** | `Quant_Logs/MarketChronicles/` 실제 생성 |
 | 3. `chronicle_writer.py` | 완료 | T-Day 트리거, AI 리포트 |
 | 4. `context_retriever.py` + `ai_logic` | 완료 | 키워드 매칭 Top-3 |
 | 5. `lifecycle.py` TTL | 완료 | 15:35 루틴에 포함 |
 | 6. `orchestrator` 15:35 스케줄 | 완료 | |
 | 7. `logger.py` Drive 연동 | 완료 | 미설정 시 로컬 폴백 |
-| 8. 임베딩 RAG / temp 자동 업로드 | 미완 | 향후 고도화 |
+| 8. OAuth 인증 체계 | **실연동 완료** | headless `--no-browser`, 자동 토큰 갱신 |
+| 9. 셋업 스크립트 | 완료 | `scripts/drive_*` 3종 |
+| 10. T-Day 크로니클 실전 검증 | 대기 | 트리거(±1.5% / VIX≥25) 충족 시 |
+| 11. 임베딩 RAG / temp 자동 업로드 | 미완 | 향후 고도화 |
 
 ---
 
 ## 4. 향후 추진 과제 (Next Steps)
 
 1.  **v3.0 Market Chronicles 고도화:**
-    *   임베딩 기반 유사도 검색, temp/tech 자동 업로드, 실서버 Drive 연동 검증.
+    *   임베딩 기반 유사도 검색, temp/tech 자동 업로드, T-Day 크로니클 실전 작성 검증.
 2.  **전문가 인사이트 엔진 (Expert Insight Engine):**
     *   증권사 RSS 피드 또는 리포트 요약 채널 기반의 정성적 데이터 수집.
     *   리포트 내 목표 주가(TP), 투자의견(Rating), 핵심 논거(Thesis) 구조화 추출 및 AI 교차 검증 활용.
