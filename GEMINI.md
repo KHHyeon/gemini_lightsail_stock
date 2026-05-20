@@ -15,6 +15,7 @@
 *   **v2.9 HTS 통합 스캔 및 정밀 타점 진단 인터페이스 구축 완료:** `!HTS스캔` 명령어를 통한 3-Track 동시 검증 및 `!타점분석` 명령어를 통한 개별 종목 도지/거래량 변곡점 판별 로직 연동 완료.
 *   **v3.0 Market Chronicles (지능형 메모리 아키텍처) — Drive 실연동 완료 (구현율 85%):** OAuth(데스크톱 앱, headless `--no-browser`) 인증·자동 토큰 갱신·storage quota 우회 적용. 실서버(`Quant_Logs/MarketChronicles/{index,reports,temp,_system}`, `app_data/`) 폴더 구조 자동 생성 및 `master_index.json` 초기화 완료. `src/memory/` 4모듈, AI Context Injection, 15:35 스케줄, `!크로니클`/`완료` 슬랙 명령 동작. (설정: `MARKET_CHRONICLES_SETUP.md`, 상세: **§4**)
 *   **v3.1 Market Chronicles 과거 데이터 소급 구축 (Back-filling) — 실전 검증 완료 (구현율 98%):** 최근 60일 KOSPI/KOSDAQ/VIX(yfinance) 일봉 스캔으로 트리거($\pm 1.5\%$ 또는 VIX$\ge$25) '이벤트 데이' 추출 → 과거 시점 뉴스 + AI 사후 분석 → `.md` 리포트 + `master_index.json` 색인. **신규 모듈** `src/memory/backfill.py`, **CLI** `scripts/backfill_chronicles.py`, **슬랙** `!백필스캔`/`!백필실행`/`확인`. **운영 검증(2026-05-20):** 60일 윈도우에서 **완료 32 / 스킵 0 / 실패 0** 으로 첫 회 백필 종결. 가동 즉시 Context Injection 가능한 32건의 과거 행동 지침 DB 확보. (상세: **§5**)
+*   **v3.2 Semantic Keyphrase Indexing & Retrieval — 적용 완료 (구현율 92%):** "외국인 매수"와 "외국인 매도" 같은 정반대 의미를 단순 단어 매칭이 같은 항목으로 오인하는 문제를 해결. 인덱싱 단계는 **[주체 + 동사] 결합 핵심 구문(keyphrases)** 을 Gemini로 추출(실패 시 정규식 사전 폴백) 후 `subject/action/tone` 메타데이터까지 함께 보존. 검색 단계는 **구문 자카드 유사도 + subject·action 정규형 일치 + tone 일치 + regime 그룹 매칭 + 최근성(recency)** 의 5단계 가중 합으로 의미적 유사도를 우선 적용하고, 단어 토큰 매칭은 폴백으로만 사용. **신규 모듈** `src/memory/keyphrase_extractor.py`. **호환:** 기존 엔트리는 `keywords` 만으로도 토큰 폴백으로 검색되어 무중단 전환. (상세: **§6**)
 
 
 # 목차
@@ -36,7 +37,13 @@
     - [5.3 진행 상태 보존 및 예외 처리](#53-진행-상태-보존-및-예외-처리)
     - [5.4 사용 인터페이스 (Slack / CLI / Orchestrator)](#54-사용-인터페이스-slack--cli--orchestrator)
     - [5.5 v3.1 구현 체크리스트](#55-v31-구현-체크리스트)
-- [6. 향후 추진 과제 (Next Steps)](#6-향후-추진-과제-next-steps) (항상 문서 마지막)
+- [6. v3.2 Semantic Keyphrase Indexing & Retrieval](#6-v32-semantic-keyphrase-indexing--retrieval)
+    - [6.1 문제 정의 — 단어 매칭의 한계](#61-문제-정의--단어-매칭의-한계)
+    - [6.2 인덱싱 — [주체 + 동사] 구문 추출](#62-인덱싱--주체--동사-구문-추출)
+    - [6.3 검색 — 의미적 유사도 우선 가중치](#63-검색--의미적-유사도-우선-가중치)
+    - [6.4 master_index.json 엔트리 스키마 변경](#64-master_indexjson-엔트리-스키마-변경)
+    - [6.5 v3.2 구현 체크리스트](#65-v32-구현-체크리스트)
+- [7. 향후 추진 과제 (Next Steps)](#7-향후-추진-과제-next-steps) (항상 문서 마지막)
 
 
 # 리팩토링 및 사양서 동기화 규칙
@@ -44,6 +51,7 @@
 2. **반영률 갱신**: 기능이 업데이트, 변경, 분리되거나 최적화될 때마다 버전 별 구현율(%)을 재계산하여 버전과 함께 표기한다.
 3. **출력 형식**: 코드 파일 생성이 끝나면, 이어서 `GEMINI.md`에 추가/수정해야 할 마크다운 텍스트 블록을 별도로 제공한다.
 4. **섹션 순서 고정**: **향후 추진 과제(Next Steps) 섹션은 항상 `GEMINI.md`의 최하단(마지막 섹션)에 위치한다.** 신규 버전·기능 상세 섹션을 추가할 경우 향후 추진 과제 **앞**에 삽입한다.
+5. **커밋 메시지 정책**: 변경 사항의 상세 내역(배경·설계·영향)은 본 `GEMINI.md`에 기록되므로, git 커밋 메시지는 핵심만 담아 **2~3줄 이내**로 간결하게 작성한다. 상세 설명이 필요하면 본문 대신 "자세한 내역은 `GEMINI.md` §N 참조" 한 줄로 대체한다.
 
 # 코딩 가이드라인 (Coding Guidelines)
 본 프로젝트의 모든 코드 작성 및 수정 시 다음 규칙을 반드시 준수한다.
@@ -144,6 +152,7 @@
     *   `context_retriever.py`: [뉴스 키워드 + 시장 국면] 기반 유사 행동 지침 Top-3 검색 및 AI 프롬프트 주입.
     *   `lifecycle.py`: 임시 기술 데이터 30일 자동 삭제, 연월별 리포트 폴더 분할 관리.
     *   **`backfill.py` (v3.1 신설):** 최근 N일(기본 60일) KOSPI/KOSDAQ/VIX 일봉 스캔, 트리거 충족 '이벤트 데이' 추출, 과거 시점 뉴스 수집 + AI 사후 분석 리포트 생성, 마스터 인덱스 색인. Drive 기반 `backfill_state.json` 진행 상태 보존(중단 후 이어쓰기), 1건당 3초 대기, 실패 일자 자동 스킵+로그.
+    *   **`keyphrase_extractor.py` (v3.2 신설):** AI 1차 + 정규식 사전 2차 폴백으로 [주체 + 동사] 결합 핵심 구문 추출. `subject`·`action`(정규형: 매수/매도/상승/하락/긴축/완화 등)·`tone`(positive/negative/neutral) 메타데이터를 함께 산출하여 `chronicle_writer` / `backfill` 양쪽 색인 일관성과 `context_retriever` 의미 매칭 정확도를 동시에 끌어올린다.
 *   **`scripts/` (운영용 스크립트)** — Market Chronicles 초기 셋업/운영 도구:
     *   `drive_oauth_setup.py`: OAuth 클라이언트 JSON 유형 검증(`--check-client`), headless 토큰 발급(`--no-browser`).
     *   `drive_oauth_refresh.py`: 토큰 상태 확인 및 access token refresh.
@@ -218,6 +227,14 @@
     *   **예외 처리:** 한 일자 처리 중 오류 발생 시 해당 날짜를 `skipped`로 기록하고 다음 날짜로 진행. 이미 같은 날짜의 크로니클이 존재하면 자동 스킵.
     *   **구현 모듈:** `src/memory/backfill.py`, `scripts/backfill_chronicles.py`, 슬랙 `!백필스캔`/`!백필실행`/`확인`, `MarketOrchestrator.backfill_scan`/`backfill_run`.
     *   **운영 검증(2026-05-20, terminal 수동 실행):** lookback=60, delay=3s, 결과 **완료 32 / 스킵 0 / 실패 0**. `master_index.json` 누적 엔트리 +32(`source="backfill"`). 향후 모든 AI 매매·시황 판단에 Context Injection 즉시 가동.
+*  **v3.2 업데이트 (Semantic Keyphrase Indexing & Retrieval — 적용 완료, 구현율 92%):**
+    *   **문제:** 기존 `keywords` 는 정규식 `[가-힣]{2,}` 단순 추출이라 "외국인 매수" vs "외국인 매도", "금리 인상" vs "금리 인하" 같은 정반대 의미를 같다고 점수화하는 문맥 왜곡 위험.
+    *   **인덱싱 개선:** `chronicle_writer._build_keyphrases` / `backfill._build_keyphrases` 가 Gemini로 [주체+동사] 결합 구문(`subject`/`action`/`tone` 포함)을 1차 추출, 실패 시 `keyphrase_extractor._regex_extract` 가 사전 기반 폴백.
+    *   **검색 개선:** `context_retriever._score_entry` 가 ① 구문 자카드(±subject/action) ② tone 다수결 일치 ③ regime 그룹 일치 ④ 최근성(30/90/180일) 의 5단계 가중치 합으로 점수화. 단어 토큰 매칭은 `min_score` 미달일 때만 폴백.
+    *   **결과 노출:** `build_context_injection_block` 의 컨텍스트 블록에 매칭 점수와 핵심 구문 목록을 함께 표기하여 AI 가 어떤 과거 사례를 왜 참고하는지 명확히 인지.
+    *   **호환:** 신규 엔트리는 `keyphrases` 와 `keywords` 둘 다 저장. 기존 v3.0/v3.1 엔트리(keywords 만 있음)는 폴백 경로로 그대로 검색됨 → 무중단 업그레이드.
+    *   **신규 모듈:** `src/memory/keyphrase_extractor.py`.
+    *   **변경 파일:** `src/memory/chronicle_writer.py`, `src/memory/backfill.py`, `src/memory/context_retriever.py`, `src/strategy/ai_logic.py`.
 
 ---
 
@@ -339,14 +356,15 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 | 1. `drive_client.py` (Pause/Resume) | 완료 | OAuth/SA/위임/공유 드라이브 자동 감지 |
 | 2. Drive 폴더·`master_index.json` | **실연동 완료** | `Quant_Logs/MarketChronicles/` 실제 생성 |
 | 3. `chronicle_writer.py` | 완료 | T-Day 트리거, AI 리포트 |
-| 4. `context_retriever.py` + `ai_logic` | 완료 | 키워드 매칭 Top-3 |
+| 4. `context_retriever.py` + `ai_logic` | 완료 | Top-3 유사 지침 검색·프롬프트 주입 (※ v3.2 에서 구문 단위 의미 매칭으로 고도화, §6 참조) |
 | 5. `lifecycle.py` TTL | 완료 | 15:35 루틴에 포함 |
 | 6. `orchestrator` 15:35 스케줄 | 완료 | |
 | 7. `logger.py` Drive 연동 | 완료 | 미설정 시 로컬 폴백 |
 | 8. OAuth 인증 체계 | **실연동 완료** | headless `--no-browser`, 자동 토큰 갱신 |
 | 9. 셋업 스크립트 | 완료 | `scripts/drive_*` 3종 |
 | 10. T-Day 크로니클 실전 검증 | 대기 | 트리거(±1.5% / VIX≥25) 충족 시 |
-| 11. 임베딩 RAG / temp 자동 업로드 | 미완 | 향후 고도화 |
+| 11. 색인·검색 의미 매칭 강화 | **v3.2 적용 완료** | 구문(keyphrases) 단위 인덱싱·검색 가중치 (§6) |
+| 12. 임베딩 RAG / temp 자동 업로드 | 미완 | v3.3 후보 (§7 향후 추진 과제 4번 참고) |
 
 ---
 
@@ -422,11 +440,106 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 | 6. Drive `backfill_state.json` 상태 저장·이어쓰기 | **완료** | 중단 후 재개 안전 |
 | 7. T-Day 본 크로니클과 동일 색인 규격(`master_index.json`) | **완료** | `source="backfill"` 표식만 추가 |
 | 8. **실전 운영 검증** | **완료 (2026-05-20)** | lookback 60일, **완료 32 / 스킵 0 / 실패 0** (terminal 수동 실행) |
-| 9. 임베딩 기반 유사도 검색·실시간 매크로 스냅샷 통합 | 미완 | v3.x 향후 고도화 (§6 참고) |
+| 9. 임베딩 기반 유사도 검색·실시간 매크로 스냅샷 통합 | 미완 | v3.x 향후 고도화 (§7 향후 추진 과제 4번 참고) |
 
 ---
 
-## 6. 향후 추진 과제 (Next Steps)
+## 6. v3.2 Semantic Keyphrase Indexing & Retrieval
+
+v3.0/v3.1 의 외장 메모리는 색인 키가 단순 `[가-힣]{2,}` 단어 집합이라, 정반대 의미의 사건도 같은 사례로 묶일 위험이 있었다. v3.2 는 색인과 검색을 **구문(phrase) 단위 의미적 유사도** 로 끌어올린다.
+
+### 6.1 문제 정의 — 단어 매칭의 한계
+
+| 예시 (과거 엔트리 vs 현재 국면) | 단어 일치만 보면 | 실제 의미 |
+|---|---|---|
+| 과거: "외국인 **매도**" / 현재: "외국인 **매수**" | 토큰 "외국인" 1개 일치 → **유사** | **정반대** 국면 (수급 방향 반대) |
+| 과거: "Fed 금리 **인상**" / 현재: "Fed 금리 **인하**" | 토큰 3개 일치 → **매우 유사** | **정반대** 정책 신호 |
+| 과거: "코스피 **급락**" / 현재: "코스피 **반등**" | 토큰 "코스피" 1개 일치 → **유사** | 반대 흐름 |
+
+→ AI 가 "과거에 이렇게 했으니 지금도 그렇게 하자" 라는 행동 지침을 **정반대** 로 적용할 수 있는 치명적 결함.
+
+### 6.2 인덱싱 — [주체 + 동사] 구문 추출
+
+`src/memory/keyphrase_extractor.py` (신규) 가 두 단계로 추출한다.
+
+1. **1차 (AI):** 리포트 본문을 Gemini 에게 주고 JSON 배열로 5~12개의 핵심 구문을 받는다. 각 항목은 `phrase` 외에 `subject`, `action`(정규형), `tone` (`positive`/`negative`/`neutral`) 을 포함.
+2. **2차 (정규식 폴백):** AI 실패·타임아웃·JSON 파싱 실패 시 `SUBJECTS × MODIFIER × ACTION` 사전 매칭으로 직접 구문 추출. 운영 단절을 방지.
+
+`chronicle_writer._build_keyphrases` 와 `backfill._build_keyphrases` 는 위 추출 결과에 매크로 트리거(예: VIX≥25, 코스피 ±1.5%)를 같은 포맷의 phrase 로 덧붙여 저장한다.
+
+```python
+# master_index.json entries[] 예시 (v3.2)
+{
+  "id": "a1b2c3d4",
+  "date": "2026-04-02",
+  "keyphrases": [
+    {"phrase": "외국인 대량 매도",   "subject": "외국인", "action": "매도", "tone": "negative"},
+    {"phrase": "Fed 금리 인상 신호", "subject": "Fed",   "action": "긴축", "tone": "negative"},
+    {"phrase": "VIX 27 경계",       "subject": "VIX",    "action": "경계", "tone": "negative"}
+  ],
+  "keywords": ["외국인", "대량", "매도", "Fed", "금리", "인상", "VIX", "27"],
+  "regime": "공포 확대 (VIX 27+)",
+  "guideline_summary": "...",
+  "report_rel_path": "MarketChronicles/reports/2026/04/2026-04-02_chronicle.md",
+  "trigger": "VIX 27.4",
+  "source": "backfill"
+}
+```
+
+### 6.3 검색 — 의미적 유사도 우선 가중치
+
+`context_retriever._score_entry` 는 점수를 다음 5단계 합으로 산출한다.
+
+| 단계 | 가중치 | 매칭 기준 |
+|---|---|---|
+| ① 구문 자카드 (Exact ≥ 0.95) | **+12.0** | 동일 또는 거의 동일 phrase |
+| ① 구문 자카드 (High ≥ 0.6) | **+8.0** | 토큰 자카드 + subject/action 보너스 |
+| ① 구문 자카드 (Mid ≥ 0.35) | +4.0 | 부분 의미 일치 |
+| ① 구문 자카드 (Low ≥ 0.15) | +2.0 | 약한 부분 일치 |
+| ② subject 또는 action 만 일치 | +1.5 각 | 자카드 낮을 때 보강 |
+| ③ tone 다수결 일치 | +2.0 | 쿼리·엔트리 모두 negative/positive 다수일 때 |
+| ④ regime 그룹 일치 | +5.0 | "VIX 25↑", "급락", "급등" 등 사전 정의 그룹 |
+| ⑤ 단어 토큰 폴백 | +0.5 × overlap | 구문 매칭 점수 0 일 때만 발동 |
+| ⑥ 최근성 보너스 | +2.0 / +1.0 / +0.3 | 30 / 90 / 180일 이내 |
+
+검색 함수 `search_similar_guidelines(query_phrases, regime, top_n=3, min_score=2.0)` 는 `min_score` 미만 항목을 무관 항목으로 배제하여 잡음 주입을 방지한다.
+
+`build_context_injection_block` 이 출력하는 컨텍스트 블록에 **매칭 점수와 핵심 구문 목록** 을 함께 표기해, Gemini 가 어떤 과거 사례를 어떤 이유로 참고하는지 메타 인지하도록 돕는다.
+
+```
+--- 지침 1 (2026-04-02) | 점수 18.5 | 구문: 외국인 대량 매도 / Fed 금리 인상 신호 / VIX 27 경계 ---
+요약: ...
+{본문 발췌}
+```
+
+### 6.4 master_index.json 엔트리 스키마 변경
+
+| 필드 | v3.0/v3.1 | v3.2 | 비고 |
+|---|---|---|---|
+| `keywords` | **메인 색인 키** | 폴백용 단어 토큰 (자동 파생) | 하위 호환 유지 |
+| `keyphrases` | (없음) | **메인 색인 키** (list[dict]) | `phrase/subject/action/tone` |
+| `regime` | 문자열 라벨 | 동일 | 그룹 매칭에 사용 |
+| 기타 (`id`/`date`/`guideline_summary`/`report_rel_path`/`trigger`/`source`) | 동일 | 동일 | 변경 없음 |
+
+기존 엔트리는 `keyphrases` 가 없으므로 점수 ⑤ 토큰 폴백 경로로 검색된다. 향후 새로 작성되는 T-Day/백필 엔트리부터 자연스럽게 의미 매칭 풀에 합류한다.
+
+### 6.5 v3.2 구현 체크리스트
+
+| 단계 | 상태 | 비고 |
+|------|------|------|
+| 1. `src/memory/keyphrase_extractor.py` 신규 | **완료** | AI 1차 + 정규식 폴백 |
+| 2. `chronicle_writer._build_keyphrases` 적용 | **완료** | T-Day 엔트리에 `keyphrases` 저장 |
+| 3. `backfill._build_keyphrases` 적용 | **완료** | 백필 엔트리도 동일 포맷 |
+| 4. `context_retriever._score_entry` 재설계 | **완료** | 구문 자카드 + tone + regime 그룹 + recency |
+| 5. `build_context_injection_block` 점수·구문 노출 | **완료** | AI 메타 인지 향상 |
+| 6. `ai_logic.generate_text_with_chronicle` 시그니처 호환 | **완료** | 변수명 `query_phrases` 로 정정 |
+| 7. 기존 엔트리 무중단 호환(토큰 폴백) | **완료** | `keywords` 단독 엔트리도 검색 가능 |
+| 8. v3.1 백필 32건 재색인(임베딩 도입 시 일괄) | 미완 | `keyphrases` 추가는 v3.x 추후 마이그레이션 스크립트로 |
+| 9. 임베딩 기반 RAG (text-embedding 모델) | 미완 | v3.3 후보 |
+
+---
+
+## 7. 향후 추진 과제 (Next Steps)
 
 > 본 섹션은 `GEMINI.md`의 **최하단(마지막 섹션)** 에 위치해야 한다. 신규 버전·기능 상세 섹션 추가 시 본 섹션 **앞**에 삽입한다.
 
@@ -436,10 +549,15 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
     *   yfinance 외 다중 데이터 소스(예: 한국거래소 KRX 정식 일봉) 교차 검증.
     *   소급 시점의 실제 매크로 스냅샷(VIX·WTI·금리) 동시 보존 및 리포트에 명시.
     *   임베딩 RAG 도입 시 백필 리포트도 자동 재색인.
-3.  **전문가 인사이트 엔진 (Expert Insight Engine):**
+3.  **v3.2 후속 — 기존 엔트리 재색인 마이그레이션:**
+    *   v3.1 백필 32건 등 `keywords` 만 보유한 엔트리를 일괄 재처리하여 `keyphrases` 까지 채우는 `scripts/reindex_keyphrases.py` 신설 검토.
+    *   AI 호출 비용 절감을 위해 캐싱·배치 처리 도입.
+4.  **v3.3 후보 — 임베딩 기반 RAG:**
+    *   `text-embedding` 모델로 phrase·리포트 벡터화 후 코사인 유사도로 v3.2 가중치와 결합(하이브리드 검색).
+5.  **전문가 인사이트 엔진 (Expert Insight Engine):**
     *   증권사 RSS 피드 또는 리포트 요약 채널 기반의 정성적 데이터 수집.
     *   리포트 내 목표 주가(TP), 투자의견(Rating), 핵심 논거(Thesis) 구조화 추출 및 AI 교차 검증 활용.
-4.  **섹터별 특화 HTS 조건식 확장:**
+6.  **섹터별 특화 HTS 조건식 확장:**
     *   금융주 외 제약/바이오(R&D 투자 비율), 조선/기계(수주 잔고) 등 섹터별 핵심 지표를 반영한 HTS 조건식을 추가하여 AI 분석 후보군의 질적 향상.
-5.  **실전(Live) 환경 전환 테스트:**
+7.  **실전(Live) 환경 전환 테스트:**
     *   Paper(모의) 모드에서 충분한 안정성이 검증된 후, `TRADING_MODE_NORMAL` 환경변수를 조정하여 실제 KIS 계좌 매수/매도 체결 딜레이 및 슬랙 알림 응답 속도 최적화.

@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """T-Day 크로니클 리포트 작성 및 마스터 인덱스 갱신."""
-import re
 import uuid
 from datetime import datetime, timezone, timedelta
 
@@ -43,22 +42,48 @@ def _parse_guideline_summary(ai_text):
     return lines[-1][:300] if lines else "행동 지침 요약 없음"
 
 
-def _extract_keywords_from_report(ai_text, macro):
-    kws = set()
-    kws |= set(re.findall(r"[가-힣]{2,}", ai_text)[:30])
+def _build_keyphrases(ai_text, macro):
+    """
+    v3.2: 단순 단어 집합 대신 [주체+동사] 결합 핵심 구문을 추출한다.
+    문맥 왜곡(예: "외국인 매수" vs "외국인 매도"를 같다고 인식)을 방지한다.
+    """
+    from src.memory.keyphrase_extractor import extract_keyphrases
+
+    phrases = extract_keyphrases(ai_text, max_phrases=12, ai_enabled=True)
+
+    seen_phrases = {p.get("phrase") for p in phrases}
+
+    def _append(phrase, subject, action, tone):
+        if phrase in seen_phrases:
+            return
+        phrases.append(
+            {"phrase": phrase, "subject": subject, "action": action, "tone": tone}
+        )
+        seen_phrases.add(phrase)
+
     try:
         if float(macro.get("VIX", 0) or 0) >= 25:
-            kws.add("VIX경계")
+            _append("VIX 25 이상 경계", "VIX", "경계", "negative")
     except (TypeError, ValueError):
         pass
-    for key in ("KOSPI_CHG", "KOSDAQ_CHG"):
+    for key, label in (("KOSPI_CHG", "코스피"), ("KOSDAQ_CHG", "코스닥")):
         try:
             chg = float(macro.get(key, 0) or 0)
-            if abs(chg) >= 1.5:
-                kws.add("지수급변")
+            if chg <= -1.5:
+                _append(f"{label} 급락 ({chg:+.2f}%)", label, "하락", "negative")
+            elif chg >= 1.5:
+                _append(f"{label} 급등 ({chg:+.2f}%)", label, "상승", "positive")
         except (TypeError, ValueError):
             pass
-    return sorted(kws)[:20]
+
+    return phrases[:15]
+
+
+def _legacy_keyword_view(phrases):
+    """검색 폴백/하위 호환용 단어 토큰 (keyphrases 기준 자동 파생)."""
+    from src.memory.keyphrase_extractor import derive_tokens
+
+    return derive_tokens(phrases)[:20]
 
 
 def _build_chronicle_prompt(macro, us_news, kr_news, trigger_reason):
@@ -133,7 +158,8 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
         return False, str(e)
 
     summary = _parse_guideline_summary(report_body)
-    keywords = _extract_keywords_from_report(report_body, macro)
+    keyphrases = _build_keyphrases(report_body, macro)
+    keywords = _legacy_keyword_view(keyphrases)
     regime = ""
     try:
         vix = float(macro.get("VIX", 0) or 0)
@@ -147,6 +173,7 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
         {
             "id": str(uuid.uuid4())[:8],
             "date": today,
+            "keyphrases": keyphrases,
             "keywords": keywords,
             "regime": regime,
             "guideline_summary": summary,

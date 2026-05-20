@@ -11,7 +11,6 @@ Market Chronicles v3.1 - 과거 데이터 소급 구축 (Back-filling).
     3. 1건씩 과거 시점 뉴스 수집 + AI 사후 분석 -> Drive 저장 + master_index 색인 (Backfill)
     4. 1건당 3초 대기, 실패 일자는 skipped 로 격리 후 다음 진행
 """
-import re
 import time
 import traceback
 import uuid
@@ -261,18 +260,45 @@ def _parse_guideline_summary(ai_text):
     return lines[-1][:300] if lines else "행동 지침 요약 없음"
 
 
-def _extract_keywords(ai_text, event):
-    kws = set()
-    kws |= set(re.findall(r"[가-힣]{2,}", ai_text)[:30])
+def _build_keyphrases(ai_text, event):
+    """
+    v3.2: 단순 단어 집합 대신 [주체+동사] 결합 핵심 구문을 추출한다.
+    이벤트 메타데이터(KOSPI/KOSDAQ 등락률, VIX)도 동일 포맷으로 합산하여 검색 정확도 향상.
+    """
+    from src.memory.keyphrase_extractor import extract_keyphrases
+
+    phrases = extract_keyphrases(ai_text, max_phrases=12, ai_enabled=True)
+    seen = {p.get("phrase") for p in phrases}
+
+    def _append(phrase, subject, action, tone):
+        if phrase in seen:
+            return
+        phrases.append(
+            {"phrase": phrase, "subject": subject, "action": action, "tone": tone}
+        )
+        seen.add(phrase)
+
     if event.get("vix_close", 0) >= 25:
-        kws.add("VIX경계")
-    if abs(event.get("kospi_chg", 0)) >= 1.5 or abs(event.get("kosdaq_chg", 0)) >= 1.5:
-        kws.add("지수급변")
-    if event.get("kospi_chg", 0) <= -1.5 or event.get("kosdaq_chg", 0) <= -1.5:
-        kws.add("급락")
-    if event.get("kospi_chg", 0) >= 1.5 or event.get("kosdaq_chg", 0) >= 1.5:
-        kws.add("급등")
-    return sorted(kws)[:20]
+        _append(f"VIX {event['vix_close']:.0f} 경계", "VIX", "경계", "negative")
+    kospi_chg = event.get("kospi_chg", 0)
+    if kospi_chg <= -1.5:
+        _append(f"코스피 급락 ({kospi_chg:+.2f}%)", "코스피", "하락", "negative")
+    elif kospi_chg >= 1.5:
+        _append(f"코스피 급등 ({kospi_chg:+.2f}%)", "코스피", "상승", "positive")
+    kosdaq_chg = event.get("kosdaq_chg", 0)
+    if kosdaq_chg <= -1.5:
+        _append(f"코스닥 급락 ({kosdaq_chg:+.2f}%)", "코스닥", "하락", "negative")
+    elif kosdaq_chg >= 1.5:
+        _append(f"코스닥 급등 ({kosdaq_chg:+.2f}%)", "코스닥", "상승", "positive")
+
+    return phrases[:15]
+
+
+def _legacy_keyword_view(phrases):
+    """검색 폴백/하위 호환용 단어 토큰 (keyphrases 기준 자동 파생)."""
+    from src.memory.keyphrase_extractor import derive_tokens
+
+    return derive_tokens(phrases)[:20]
 
 
 def _build_regime(event):
@@ -311,7 +337,8 @@ def _write_chronicle_for_event(event):
     drive_client.write_text_relative(rel_path, full_md, mime_type="text/markdown")
 
     summary = _parse_guideline_summary(report_body)
-    keywords = _extract_keywords(report_body, event)
+    keyphrases = _build_keyphrases(report_body, event)
+    keywords = _legacy_keyword_view(keyphrases)
     regime = _build_regime(event)
 
     index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"version": 1, "entries": []}
@@ -319,6 +346,7 @@ def _write_chronicle_for_event(event):
         {
             "id": str(uuid.uuid4())[:8],
             "date": date_str,
+            "keyphrases": keyphrases,
             "keywords": keywords,
             "regime": regime,
             "guideline_summary": summary,
