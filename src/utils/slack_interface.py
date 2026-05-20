@@ -26,6 +26,9 @@ def register_slack_handlers(app, kis, config):
 - !일일보고 / !주간보고 / !월간보고 / !분기보고 : 각종 리포트 수동 생성
 - !초기화 : 장부 및 주문 데이터 초기화
 - !크로니클 : T-Day 시장 크로니클 수동 작성 (트리거 충족 시)
+- !백필스캔 [일수] : 최근 N일(기본 60) 변동성 장세 스캔 + 후보 보고
+- !백필실행 [건당대기초] : 저장된 백필 큐 1건씩 소급 작성 (기본 3초)
+- 확인 : 직전 백필 스캔 결과를 그대로 실행
 - 완료 : Google Drive Pause 해제 후 재검증"""
         say(help_text)
 
@@ -35,6 +38,56 @@ def register_slack_handlers(app, kis, config):
 
         result = drive_client.try_resume_after_user_ack()
         say(result)
+
+    @app.message(re.compile(r"^!백필스캔(?:\s+(\d+))?\s*$", re.IGNORECASE))
+    def cmd_backfill_scan(message, say):
+        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
+        m = re.match(r"^!백필스캔(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
+        lookback = int(m.group(1)) if (m and m.group(1)) else 60
+        say(f"[System] 최근 {lookback}일 변동성 장세 스캔을 시작합니다...")
+
+        def bg_task():
+            from src.memory import backfill
+            backfill.scan_and_save(lookback_days=lookback, notify_fn=say)
+
+        threading.Thread(target=bg_task, daemon=True).start()
+
+    @app.message(re.compile(r"^!백필실행(?:\s+(\d+))?\s*$", re.IGNORECASE))
+    def cmd_backfill_run(message, say):
+        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
+        m = re.match(r"^!백필실행(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
+        delay_sec = int(m.group(1)) if (m and m.group(1)) else 3
+        say(f"[System] 저장된 백필 큐를 실행합니다 (건당 {delay_sec}초 대기).")
+
+        def bg_task():
+            from src.memory import backfill
+            backfill.run_backfill(notify_fn=say, delay_sec=delay_sec)
+
+        threading.Thread(target=bg_task, daemon=True).start()
+
+    @app.message(re.compile(r"^(확인)\s*$"))
+    def cmd_backfill_confirm(message, say):
+        from src.memory import backfill, drive_client
+
+        if not drive_client.is_drive_enabled() or not drive_client.is_ready():
+            return say("[Info] Drive 가 준비되지 않았습니다. '!백필스캔' 또는 '완료' 명령을 먼저 사용하세요.")
+
+        state = backfill.get_state()
+        queue = state.get("queue") or []
+        processed = set(state.get("processed") or [])
+        skipped_dates = {it.get("date") for it in state.get("skipped", []) if isinstance(it, dict)}
+        pending = [d for d in queue if d not in processed and d not in skipped_dates]
+        if not pending:
+            return say(
+                "[Info] 현재 대기 중인 백필 큐가 없습니다. 먼저 '!백필스캔' 을 실행해 주세요."
+            )
+
+        say(f"[System] '확인' 응답 수신. 대기 중인 {len(pending)}건의 백필을 실행합니다 (건당 3초 대기).")
+
+        def bg_task():
+            backfill.run_backfill(notify_fn=say, delay_sec=3)
+
+        threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!크로니클", re.IGNORECASE))
     def cmd_chronicle_manual(message, say):

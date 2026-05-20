@@ -14,6 +14,7 @@
 *   **v2.8 시스템 안정화 및 명세 고도화 완료 (구현율 99%):** 슬랙 인터페이스 핸들러 중첩 오류 수정, 거시경제(유가, 금리) 셧다운 임계치 구체화, ETF 자동 필터링 및 매수 시점 지수 연동형 RS(Relative Strength) 계산 로직 정밀화 완료.
 *   **v2.9 HTS 통합 스캔 및 정밀 타점 진단 인터페이스 구축 완료:** `!HTS스캔` 명령어를 통한 3-Track 동시 검증 및 `!타점분석` 명령어를 통한 개별 종목 도지/거래량 변곡점 판별 로직 연동 완료.
 *   **v3.0 Market Chronicles (지능형 메모리 아키텍처) — Drive 실연동 완료 (구현율 85%):** OAuth(데스크톱 앱, headless `--no-browser`) 인증·자동 토큰 갱신·storage quota 우회 적용. 실서버(`Quant_Logs/MarketChronicles/{index,reports,temp,_system}`, `app_data/`) 폴더 구조 자동 생성 및 `master_index.json` 초기화 완료. `src/memory/` 4모듈, AI Context Injection, 15:35 스케줄, `!크로니클`/`완료` 슬랙 명령 동작. (설정: `MARKET_CHRONICLES_SETUP.md`, 상세: **§4**)
+*   **v3.1 Market Chronicles 과거 데이터 소급 구축 (Back-filling) — 1차 구현 완료 (구현율 90%):** 가동 즉시 참조 가능한 '과거 대응 지침 DB' 확보를 위해 최근 60일 KOSPI/KOSDAQ/VIX(yfinance) 일봉을 스캔하여 트리거($\pm 1.5\%$ 또는 VIX$\ge$25) 충족 '이벤트 데이'를 추출하고, 사용자 승인(`확인`/`!백필실행`) 시 과거 시점 뉴스를 수집해 Gemini로 [장중 흐름·사건 원인·미래 행동 지침] 리포트(.md)를 생성·`master_index.json`에 색인. **신규 모듈** `src/memory/backfill.py`, **CLI** `scripts/backfill_chronicles.py`, **슬랙** `!백필스캔`/`!백필실행` 추가. **안정성:** 리포트 1건당 3초 대기(Rate Limit), 실패 일자 자동 스킵+로그, Drive 기반 진행 상태 보존(`backfill_state.json`)으로 중단 후 이어쓰기 지원. (상세: **§5**)
 
 
 # 목차
@@ -21,7 +22,7 @@
 - [리팩토링 및 사양서 동기화 규칙](#리팩토링-및-사양서-동기화-규칙)
 - [코딩 가이드라인 (Coding Guidelines)](#코딩-가이드라인-coding-guidelines)
 - [1. 프로젝트 목적 및 주요 기능](#1-프로젝트-목적-및-주요-기능)
-- [2. 프로젝트 구조 및 파일 설명](#2-프로젝트-구조-및-파일-설명-v29-기준-v30-모듈-예정-포함)
+- [2. 프로젝트 구조 및 파일 설명](#2-프로젝트-구조-및-파일-설명-v31-기준-market-chronicles--back-filling-포함)
 - [3. 변경 이력 (Change Log)](#3-변경-이력-change-log)
 - [4. v3.0 Market Chronicles (지능형 메모리 아키텍처)](#4-v30-market-chronicles-지능형-메모리-아키텍처)
     - [4.1 시스템 핵심 아키텍처 (Cloud-Only & Interaction)](#41-시스템-핵심-아키텍처-cloud-only--interaction)
@@ -29,7 +30,13 @@
     - [4.3 인공지능(AI) 적용 및 실질적 교정 방안](#43-인공지능ai-적용-및-실질적-교정-방안)
     - [4.4 v2.x 대비 구현 갭 (현재 코드베이스)](#44-v2x-대비-구현-갭-현재-코드베이스)
     - [4.5 v3.0 구현 체크리스트](#45-v30-구현-체크리스트)
-- [5. 향후 추진 과제 (Next Steps)](#5-향후-추진-과제-next-steps) (항상 문서 마지막)
+- [5. v3.1 과거 데이터 소급 구축 (Back-filling)](#5-v31-과거-데이터-소급-구축-back-filling)
+    - [5.1 목적 및 트리거](#51-목적-및-트리거)
+    - [5.2 처리 단계 (Scan → Confirm → Backfill → Index)](#52-처리-단계-scan--confirm--backfill--index)
+    - [5.3 진행 상태 보존 및 예외 처리](#53-진행-상태-보존-및-예외-처리)
+    - [5.4 사용 인터페이스 (Slack / CLI / Orchestrator)](#54-사용-인터페이스-slack--cli--orchestrator)
+    - [5.5 v3.1 구현 체크리스트](#55-v31-구현-체크리스트)
+- [6. 향후 추진 과제 (Next Steps)](#6-향후-추진-과제-next-steps) (항상 문서 마지막)
 
 
 # 리팩토링 및 사양서 동기화 규칙
@@ -100,7 +107,7 @@
 
 ---
 
-## 2. 프로젝트 구조 및 파일 설명 (v2.9 기준, v3.0 모듈 예정 포함)
+## 2. 프로젝트 구조 및 파일 설명 (v3.1 기준, Market Chronicles + Back-filling 포함)
 
 시스템의 유지보수성과 확장성을 위해 기능을 계층적으로 분리하였습니다. 모든 핵심 소스코드는 `src/` 디렉토리에 위치합니다.
 
@@ -130,16 +137,18 @@
     *   `helpers.py`: 장 개장 시간 체크 등 공통 계산 도구 (구 market_hours.py).
     *   `messenger.py`: 슬랙 메시지 전송 및 이모지 포맷팅 관리 (구 slack_notifier.py).
     *   `slack_interface.py`: 슬랙 명령어 라우팅 및 이벤트 핸들링.
-*   **`src/memory/` (v3.0 신설 완료)** — Market Chronicles 전용 레이어:
+*   **`src/memory/` (v3.0 신설 완료, v3.1 백필 모듈 추가)** — Market Chronicles 전용 레이어:
     *   `drive_client.py`: Google Drive API 인증(OAuth/SA/위임/공유 드라이브 자동 감지), 폴더·파일 CRUD, Pause/Resume 상태 관리, manifest 캐시.
     *   `oauth_token.py`: OAuth 토큰(`drive_oauth_token.json`) 상태 점검·자동 갱신, Testing 모드 만료 감지.
     *   `chronicle_writer.py`: T-Day 트리거 판정, 크로니클 리포트(.md) 작성, 마스터 인덱스 색인 갱신.
     *   `context_retriever.py`: [뉴스 키워드 + 시장 국면] 기반 유사 행동 지침 Top-3 검색 및 AI 프롬프트 주입.
     *   `lifecycle.py`: 임시 기술 데이터 30일 자동 삭제, 연월별 리포트 폴더 분할 관리.
-*   **`scripts/` (운영용 스크립트)** — Market Chronicles 초기 셋업 도구:
+    *   **`backfill.py` (v3.1 신설):** 최근 N일(기본 60일) KOSPI/KOSDAQ/VIX 일봉 스캔, 트리거 충족 '이벤트 데이' 추출, 과거 시점 뉴스 수집 + AI 사후 분석 리포트 생성, 마스터 인덱스 색인. Drive 기반 `backfill_state.json` 진행 상태 보존(중단 후 이어쓰기), 1건당 3초 대기, 실패 일자 자동 스킵+로그.
+*   **`scripts/` (운영용 스크립트)** — Market Chronicles 초기 셋업/운영 도구:
     *   `drive_oauth_setup.py`: OAuth 클라이언트 JSON 유형 검증(`--check-client`), headless 토큰 발급(`--no-browser`).
     *   `drive_oauth_refresh.py`: 토큰 상태 확인 및 access token refresh.
     *   `drive_folder_bootstrap.py`: `Quant_Logs` 하위 `MarketChronicles/` 폴더 구조 자동 생성·검증.
+    *   **`backfill_chronicles.py` (v3.1 신설):** 백필 CLI 진입점. `--scan-only`(스캔/보고만), `--run`(즉시 실행), `--lookback N`(소급 일수, 기본 60), `--delay N`(건당 대기 초, 기본 3).
 ---
 
 ## 3. 변경 이력 (Change Log)
@@ -199,6 +208,15 @@
     *   **출력 원칙:** 금융 전문 용어 배제, 초보자용 일상 언어 리포트.
     *   **구현 모듈:** `src/memory/{drive_client, oauth_token, chronicle_writer, context_retriever, lifecycle}.py`; `scripts/{drive_oauth_setup, drive_oauth_refresh, drive_folder_bootstrap}.py`; 스케줄 15:35; 슬랙 `!크로니클`, `완료`.
     *   **미완:** 실제 T-Day 크로니클 작성 검증(트리거 충족 일자 대기), 키워드 검색 고도화(임베딩), `temp/tech` 자동 업로드 파이프라인.
+*  **v3.1 업데이트 (Market Chronicles 과거 데이터 소급 구축 — 1차 구현 완료, 구현율 90%):**
+    *   **목적:** 가동 즉시 AI 판단에 주입 가능한 **'과거 대응 지침 DB'** 확보. T-Day 트리거 발생만을 기다리지 않고, 최근 60일치 변동성 장세를 사전 분석하여 마스터 인덱스를 두텁게 만든다.
+    *   **이벤트 데이 추출:** `yfinance`로 ^KS11/^KQ11/^VIX 일봉을 받아 등락률 $\pm 1.5\%$ 이상 또는 VIX $\ge 25$ 인 거래일을 식별.
+    *   **2단계 동의 흐름:** ① `!백필스캔`(또는 `scripts/backfill_chronicles.py --scan-only`)로 후보 N건을 슬랙에 보고하고 대기. ② 사용자가 `확인` 또는 `!백필실행`을 입력하면 ③ 과거 시점 뉴스 수집·AI 사후 분석·리포트 저장·인덱스 색인 일괄 실행.
+    *   **사후 통찰 프롬프트:** 과거 데이터 분석 시 '당시에는 몰랐지만 지금은 알게 된 사실'을 포함하도록 프롬프트를 보강해 더욱 정교한 행동 지침 도출.
+    *   **API Rate Limit 보호:** 리포트 1건 생성마다 기본 3초 대기(설정 가능).
+    *   **상태 보존(중단 대비):** 진행 상황을 Drive `MarketChronicles/_system/backfill_state.json`에 기록(processed/skipped/queue). 중단되어도 다음 실행 시 미처리 일자만 이어서 처리.
+    *   **예외 처리:** 한 일자 처리 중 오류 발생 시 해당 날짜를 `skipped`로 기록하고 다음 날짜로 진행. 이미 같은 날짜의 크로니클이 존재하면 자동 스킵.
+    *   **구현 모듈:** `src/memory/backfill.py`, `scripts/backfill_chronicles.py`, 슬랙 `!백필스캔`/`!백필실행`/`확인`, `MarketOrchestrator.backfill_scan`/`backfill_run`.
 
 ---
 
@@ -331,16 +349,95 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 
 ---
 
-## 5. 향후 추진 과제 (Next Steps)
+## 5. v3.1 과거 데이터 소급 구축 (Back-filling)
+
+본 섹션은 v3.0의 **외장 메모리(Market Chronicles)** 가 가동 첫날부터 비어 있지 않도록, **최근 2개월(기본 60일) 변동성 장세를 사후 분석**하여 마스터 인덱스를 선제 구축하는 절차를 정의한다. v3.0 § 4의 T-Day 실시간 작성 로직과 동일한 산출물 규격(.md 리포트 + `master_index.json` 색인)을 사용한다.
+
+### 5.1 목적 및 트리거
+
+| 항목 | 내용 |
+|------|------|
+| **목적** | 봇 첫 가동 시 곧바로 Context Injection이 가능하도록 과거 사례 DB를 확보 |
+| **소급 기간** | 기본 **60일**(약 2개월), CLI/슬랙에서 조정 가능 |
+| **이벤트 데이 조건** | 코스피(`^KS11`) 또는 코스닥(`^KQ11`) 일간 등락률 **$\pm 1.5\%$ 이상** **또는** VIX(`^VIX`) 종가 **$\ge 25$** |
+| **데이터 소스** | `yfinance` 일봉(`history(period="3mo")`) — 한국 거래소 영업일 기준 자동 정렬 |
+| **출력 규격** | `.md` 리포트(연/월 폴더 분할) + `master_index.json` 엔트리(키워드/요약/regime/trigger/`source: backfill`) |
+
+### 5.2 처리 단계 (Scan → Confirm → Backfill → Index)
+
+```
+[1단계 Scan]
+  yfinance 일봉 -> 트리거 충족 일자 리스트 + (지수변동·VIX) 요약 -> 슬랙 보고
+  Drive: MarketChronicles/_system/backfill_state.json 초기화(queue 등록)
+                |
+                v (사용자가 '확인' 또는 '!백필실행' 입력)
+[2단계 Backfill 1건씩]
+  for 날짜 in queue:
+    - 이미 reports/YYYY/MM/YYYY-MM-DD_chronicle.md 존재? -> 스킵
+    - 뉴스 키워드 수집(news_crawler) + 당시 매크로 추정치 합성
+    - AI 프롬프트(사후 통찰 포함) -> [장중 흐름 / 사건 원인 / 미래 행동 지침]
+    - Drive에 .md 저장 + master_index.json 색인 추가(source="backfill")
+    - 3초 대기 (Rate Limit 보호)
+                |
+                v
+[3단계 결과 보고]
+  슬랙: 완료 N건 / 스킵 M건 / 실패 K건 + 평균 소요시간
+```
+
+**프롬프트 보강(사후 통찰):** 백필 리포트는 *"오늘 시점에서 돌이켜 보면 그 사건의 원인·여파가 어떻게 전개됐는지"* 를 포함하도록 지시하여, 단순 사후 요약이 아닌 **현재 시점의 학습 가능한 행동 지침**으로 가공한다.
+
+### 5.3 진행 상태 보존 및 예외 처리
+
+| 메커니즘 | 위치 | 동작 |
+|----------|------|------|
+| **상태 파일** | Drive `MarketChronicles/_system/backfill_state.json` | `{lookback_days, scanned_at, queue[], processed[], skipped[], updated_at}` |
+| **중복 방지** | 작업 전 `reports/YYYY/MM/YYYY-MM-DD_chronicle.md` 존재 여부 사전 검사 | 존재 시 `skipped(reason=exists)`로 기록 후 다음 |
+| **건당 대기** | `time.sleep(delay_sec)` (기본 3초) | API 호출량 제어 |
+| **에러 격리** | `try/except`로 1일자 처리 단위 보호 | 실패 시 `skipped(reason=error:<msg>)` 기록 후 다음 |
+| **이어쓰기** | 재실행 시 `queue` 중 `processed`/`skipped`가 아닌 항목만 처리 | 중단/재개 안전 |
+| **Drive Pause** | 작업 중 `DrivePausedError` 발생 시 즉시 중단 + 슬랙 안내 | 사용자 `완료` 응답 후 재실행 가능 |
+
+### 5.4 사용 인터페이스 (Slack / CLI / Orchestrator)
+
+| 채널 | 입력 | 동작 |
+|------|------|------|
+| Slack | `!백필스캔` 또는 `!백필스캔 60` | 최근 N일 스캔 후 후보 리스트 보고, `backfill_state.json`에 queue 저장, 대기 안내 |
+| Slack | `확인` | 직전 스캔에 대해 `run_backfill` 실행 (단, `완료`는 Drive Pause 해제 전용으로 분리 유지) |
+| Slack | `!백필실행` | 저장된 queue에 대해 즉시 `run_backfill` 실행 |
+| CLI | `python scripts/backfill_chronicles.py --scan-only --lookback 60` | 스캔만 수행하고 콘솔/Drive에 저장 |
+| CLI | `python scripts/backfill_chronicles.py --run --delay 3` | 저장된 queue를 1건씩 실행 |
+| CLI | `python scripts/backfill_chronicles.py --lookback 60 --run` | 스캔 후 즉시 실행 |
+| Orchestrator | `MarketOrchestrator.backfill_scan()` / `backfill_run()` | 슬랙·스케줄 통합 진입점 |
+
+### 5.5 v3.1 구현 체크리스트
+
+| 단계 | 상태 | 비고 |
+|------|------|------|
+| 1. `src/memory/backfill.py` (스캔/리포트/인덱싱/상태보존) | **완료** | yfinance 기반 이벤트 데이 추출, 3초 대기, 스킵 로그 |
+| 2. `scripts/backfill_chronicles.py` CLI | **완료** | `--scan-only` / `--run` / `--lookback` / `--delay` |
+| 3. 슬랙 `!백필스캔` / `!백필실행` / `확인` 처리 | **완료** | `slack_interface.py` 핸들러 추가 |
+| 4. `MarketOrchestrator.backfill_scan` / `backfill_run` | **완료** | 슬랙 통합 진입점 |
+| 5. 사후 통찰 프롬프트(과거 분석 강화) | **완료** | "현재 시점에서 돌이켜 본 교훈" 포함 |
+| 6. Drive `backfill_state.json` 상태 저장·이어쓰기 | **완료** | 중단 후 재개 안전 |
+| 7. T-Day 본 크로니클과 동일 색인 규격(`master_index.json`) | **완료** | `source="backfill"` 표식만 추가 |
+| 8. 임베딩 기반 유사도 검색·실시간 매크로 스냅샷 통합 | 미완 | v3.x 향후 고도화 |
+
+---
+
+## 6. 향후 추진 과제 (Next Steps)
 
 > 본 섹션은 `GEMINI.md`의 **최하단(마지막 섹션)** 에 위치해야 한다. 신규 버전·기능 상세 섹션 추가 시 본 섹션 **앞**에 삽입한다.
 
 1.  **v3.0 Market Chronicles 고도화:**
     *   임베딩 기반 유사도 검색, temp/tech 자동 업로드, T-Day 크로니클 실전 작성 검증.
-2.  **전문가 인사이트 엔진 (Expert Insight Engine):**
+2.  **v3.1 Back-fill 후속 강화:**
+    *   yfinance 외 다중 데이터 소스(예: 한국거래소 KRX 정식 일봉) 교차 검증.
+    *   소급 시점의 실제 매크로 스냅샷(VIX·WTI·금리) 동시 보존 및 리포트에 명시.
+    *   임베딩 RAG 도입 시 백필 리포트도 자동 재색인.
+3.  **전문가 인사이트 엔진 (Expert Insight Engine):**
     *   증권사 RSS 피드 또는 리포트 요약 채널 기반의 정성적 데이터 수집.
     *   리포트 내 목표 주가(TP), 투자의견(Rating), 핵심 논거(Thesis) 구조화 추출 및 AI 교차 검증 활용.
-3.  **섹터별 특화 HTS 조건식 확장:**
+4.  **섹터별 특화 HTS 조건식 확장:**
     *   금융주 외 제약/바이오(R&D 투자 비율), 조선/기계(수주 잔고) 등 섹터별 핵심 지표를 반영한 HTS 조건식을 추가하여 AI 분석 후보군의 질적 향상.
-4.  **실전(Live) 환경 전환 테스트:**
+5.  **실전(Live) 환경 전환 테스트:**
     *   Paper(모의) 모드에서 충분한 안정성이 검증된 후, `TRADING_MODE_NORMAL` 환경변수를 조정하여 실제 KIS 계좌 매수/매도 체결 딜레이 및 슬랙 알림 응답 속도 최적화.

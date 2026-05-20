@@ -59,6 +59,20 @@ class MarketOrchestrator:
             self.send_slack(f"[Market Chronicles] {msg}")
         lifecycle.purge_expired_temp_files(notify_fn=self.send_slack)
 
+    def backfill_scan(self, lookback_days=60):
+        """v3.1 백필 스캔: 최근 N일 트리거 충족일 추출 + Drive 큐 저장 + 슬랙 보고."""
+        from src.memory import backfill
+        return backfill.scan_and_save(
+            lookback_days=lookback_days, notify_fn=self.send_slack
+        )
+
+    def backfill_run(self, delay_sec=3):
+        """v3.1 백필 실행: 저장된 큐를 1건씩 처리하고 슬랙 보고."""
+        from src.memory import backfill
+        return backfill.run_backfill(
+            notify_fn=self.send_slack, delay_sec=delay_sec
+        )
+
     def deep_market_routine(self):
         if not market_hours.is_market_open(): return
         self.send_slack("[System] 10:00 장 초반 자금 흐름 기반 심층 시황 보고를 시작합니다.")
