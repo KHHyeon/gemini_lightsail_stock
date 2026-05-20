@@ -28,6 +28,8 @@ def register_slack_handlers(app, kis, config):
 - !크로니클 : T-Day 시장 크로니클 수동 작성 (트리거 충족 시)
 - !백필스캔 [일수] : 최근 N일(기본 60) 변동성 장세 스캔 + 후보 보고
 - !백필실행 [건당대기초] : 저장된 백필 큐 1건씩 소급 작성 (기본 3초)
+- !백필초기화 [purge] : 기존 백필 결과 정리 (purge 입력 시 .md 리포트까지 삭제)
+- !백필재인덱싱 [건당대기초] : 기존 .md 보존, keyphrases 만 v3.2 포맷으로 재추출
 - 확인 : 직전 백필 스캔 결과를 그대로 실행
 - 완료 : Google Drive Pause 해제 후 재검증"""
         say(help_text)
@@ -62,6 +64,36 @@ def register_slack_handlers(app, kis, config):
         def bg_task():
             from src.memory import backfill
             backfill.run_backfill(notify_fn=say, delay_sec=delay_sec)
+
+        threading.Thread(target=bg_task, daemon=True).start()
+
+    @app.message(re.compile(r"^!백필초기화(?:\s+(purge))?\s*$", re.IGNORECASE))
+    def cmd_backfill_reset(message, say):
+        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
+        m = re.match(r"^!백필초기화(?:\s+(purge))?\s*$", text, re.IGNORECASE)
+        purge = bool(m and m.group(1))
+        warn = " (리포트 .md 까지 삭제)" if purge else " (master_index 엔트리·state만 제거, .md 보존)"
+        say(f"[System] 백필 초기화를 시작합니다.{warn}")
+
+        def bg_task():
+            from src.memory import backfill
+            backfill.reset_backfill(delete_reports=purge, notify_fn=say)
+
+        threading.Thread(target=bg_task, daemon=True).start()
+
+    @app.message(re.compile(r"^!백필재인덱싱(?:\s+(\d+))?\s*$", re.IGNORECASE))
+    def cmd_backfill_reindex(message, say):
+        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
+        m = re.match(r"^!백필재인덱싱(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
+        delay_sec = int(m.group(1)) if (m and m.group(1)) else 3
+        say(
+            f"[System] 백필 엔트리 재인덱싱을 시작합니다 (.md 보존, keyphrases 재추출, "
+            f"건당 {delay_sec}초 대기)."
+        )
+
+        def bg_task():
+            from src.memory import backfill
+            backfill.reindex_keyphrases(notify_fn=say, delay_sec=delay_sec)
 
         threading.Thread(target=bg_task, daemon=True).start()
 

@@ -12,6 +12,18 @@ Market Chronicles v3.1 - 과거 데이터 소급 구축 (Back-filling) CLI.
     # 스캔과 동시에 실행, 소급 기간 90일, 건당 5초 대기
     python scripts/backfill_chronicles.py --lookback 90 --run --delay 5
 
+    # 기존 백필 결과 초기화 (master_index 에서 source=backfill 엔트리 제거 + state 초기화)
+    python scripts/backfill_chronicles.py --reset
+
+    # 초기화 + .md 리포트 파일까지 Drive 에서 삭제
+    python scripts/backfill_chronicles.py --reset --purge-reports
+
+    # 초기화 후 즉시 새 백필 실행 (가장 깔끔한 재구축)
+    python scripts/backfill_chronicles.py --reset --purge-reports --lookback 60 --run
+
+    # AI 호출 비용 최소화 - .md 리포트는 그대로 두고 keyphrases 만 v3.2 포맷으로 재추출
+    python scripts/backfill_chronicles.py --reindex --delay 3
+
 전제 조건:
     - drive_oauth_token.json 발급 완료 (scripts/drive_oauth_setup.py)
     - Drive 폴더 구조 생성 완료 (scripts/drive_folder_bootstrap.py)
@@ -71,6 +83,21 @@ def main():
         help="저장된 큐를 즉시 실행 (스캔과 함께 호출 시 스캔 -> 실행 순)",
     )
     parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="기존 백필 결과 초기화 (master_index 의 source=backfill 엔트리 + backfill_state 비움)",
+    )
+    parser.add_argument(
+        "--purge-reports",
+        action="store_true",
+        help="--reset 과 함께 사용 시 .md 리포트 파일까지 Drive 에서 삭제",
+    )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help="기존 .md 리포트는 보존하고 keyphrases 만 v3.2 포맷으로 재추출하여 master_index 갱신",
+    )
+    parser.add_argument(
         "--env-file",
         type=str,
         default=None,
@@ -98,6 +125,27 @@ def main():
         if not ok:
             print(f"[FAIL] Drive 초기화 실패: {msg}")
             sys.exit(1)
+
+    if args.reset:
+        print("\n[초기화] 기존 백필 결과 정리 중...")
+        result = backfill.reset_backfill(
+            delete_reports=args.purge_reports, notify_fn=_print
+        )
+        print(
+            f"\n[초기화 결과] master_index 제거 {result['removed_entries']}건 / "
+            f".md 삭제 {result['deleted_reports']}건"
+        )
+        if not (args.run or args.scan_only or args.reindex):
+            print("\n[종료] 초기화만 수행했습니다. 새로 채우려면 --run 을 함께 사용하세요.")
+            return
+
+    if args.reindex:
+        print(f"\n[재인덱싱] 기존 백필 엔트리 keyphrases v3.2 재추출 (건당 {args.delay}초)")
+        result = backfill.reindex_keyphrases(notify_fn=_print, delay_sec=args.delay)
+        print(
+            f"\n[재인덱싱 결과] 갱신 {result['updated']} / 스킵 {result['skipped']} / 실패 {result['failed']}"
+        )
+        return
 
     did_anything = False
 

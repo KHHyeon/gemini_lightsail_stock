@@ -16,6 +16,7 @@
 *   **v3.0 Market Chronicles (지능형 메모리 아키텍처) — Drive 실연동 완료 (구현율 85%):** OAuth(데스크톱 앱, headless `--no-browser`) 인증·자동 토큰 갱신·storage quota 우회 적용. 실서버(`Quant_Logs/MarketChronicles/{index,reports,temp,_system}`, `app_data/`) 폴더 구조 자동 생성 및 `master_index.json` 초기화 완료. `src/memory/` 4모듈, AI Context Injection, 15:35 스케줄, `!크로니클`/`완료` 슬랙 명령 동작. (설정: `MARKET_CHRONICLES_SETUP.md`, 상세: **§4**)
 *   **v3.1 Market Chronicles 과거 데이터 소급 구축 (Back-filling) — 실전 검증 완료 (구현율 98%):** 최근 60일 KOSPI/KOSDAQ/VIX(yfinance) 일봉 스캔으로 트리거($\pm 1.5\%$ 또는 VIX$\ge$25) '이벤트 데이' 추출 → 과거 시점 뉴스 + AI 사후 분석 → `.md` 리포트 + `master_index.json` 색인. **신규 모듈** `src/memory/backfill.py`, **CLI** `scripts/backfill_chronicles.py`, **슬랙** `!백필스캔`/`!백필실행`/`확인`. **운영 검증(2026-05-20):** 60일 윈도우에서 **완료 32 / 스킵 0 / 실패 0** 으로 첫 회 백필 종결. 가동 즉시 Context Injection 가능한 32건의 과거 행동 지침 DB 확보. (상세: **§5**)
 *   **v3.2 Semantic Keyphrase Indexing & Retrieval — 적용 완료 (구현율 92%):** "외국인 매수"와 "외국인 매도" 같은 정반대 의미를 단순 단어 매칭이 같은 항목으로 오인하는 문제를 해결. 인덱싱 단계는 **[주체 + 동사] 결합 핵심 구문(keyphrases)** 을 Gemini로 추출(실패 시 정규식 사전 폴백) 후 `subject/action/tone` 메타데이터까지 함께 보존. 검색 단계는 **구문 자카드 유사도 + subject·action 정규형 일치 + tone 일치 + regime 그룹 매칭 + 최근성(recency)** 의 5단계 가중 합으로 의미적 유사도를 우선 적용하고, 단어 토큰 매칭은 폴백으로만 사용. **신규 모듈** `src/memory/keyphrase_extractor.py`. **호환:** 기존 엔트리는 `keywords` 만으로도 토큰 폴백으로 검색되어 무중단 전환. (상세: **§6**)
+*   **v3.2.1 Backfill 초기화·재인덱싱 운영 도구 — 적용 완료 (구현율 95%):** v3.1 백필이 이미 진행된 상태에서도 v3.2 의미 색인으로 안전하게 전환·재구축할 수 있도록 두 가지 모드 제공. **`--reset`/`!백필초기화`:** `master_index.json` 의 `source="backfill"` 엔트리와 `backfill_state.json` 을 비우고(옵션으로 `.md` 리포트까지 삭제) 처음부터 다시 채울 수 있는 상태 복원. **`--reindex`/`!백필재인덱싱`:** 기존 `.md` 리포트는 보존한 채 AI 1회 호출로 `keyphrases` 만 v3.2 포맷으로 재추출(비용·시간 최소 경로). T-Day(`source != "backfill"`) 엔트리는 어떤 경우에도 보호. (상세: **§5.6**)
 
 
 # 목차
@@ -37,6 +38,7 @@
     - [5.3 진행 상태 보존 및 예외 처리](#53-진행-상태-보존-및-예외-처리)
     - [5.4 사용 인터페이스 (Slack / CLI / Orchestrator)](#54-사용-인터페이스-slack--cli--orchestrator)
     - [5.5 v3.1 구현 체크리스트](#55-v31-구현-체크리스트)
+    - [5.6 v3.2.1 초기화·재인덱싱 운영 도구](#56-v321-초기화재인덱싱-운영-도구)
 - [6. v3.2 Semantic Keyphrase Indexing & Retrieval](#6-v32-semantic-keyphrase-indexing--retrieval)
     - [6.1 문제 정의 — 단어 매칭의 한계](#61-문제-정의--단어-매칭의-한계)
     - [6.2 인덱싱 — [주체 + 동사] 구문 추출](#62-인덱싱--주체--동사-구문-추출)
@@ -235,6 +237,16 @@
     *   **호환:** 신규 엔트리는 `keyphrases` 와 `keywords` 둘 다 저장. 기존 v3.0/v3.1 엔트리(keywords 만 있음)는 폴백 경로로 그대로 검색됨 → 무중단 업그레이드.
     *   **신규 모듈:** `src/memory/keyphrase_extractor.py`.
     *   **변경 파일:** `src/memory/chronicle_writer.py`, `src/memory/backfill.py`, `src/memory/context_retriever.py`, `src/strategy/ai_logic.py`.
+*  **v3.2.1 업데이트 (Backfill 초기화·재인덱싱 운영 도구 — 적용 완료, 구현율 95%):**
+    *   **배경:** v3.1 에서 이미 32건의 백필이 적재된 상태로 v3.2 의미 색인이 도입되었기 때문에, 기존 엔트리를 v3.2 포맷으로 안전하게 마이그레이션하거나 통째로 재구축할 운영 절차가 필요.
+    *   **`reset_backfill(delete_reports=False)`:** `master_index.json` 에서 `source="backfill"` 엔트리만 골라 제거하고 `backfill_state.json` 을 빈 상태로 덮어쓴다. `delete_reports=True` 이면 해당 엔트리들의 `.md` 리포트 파일까지 Drive 에서 삭제.
+    *   **`reindex_keyphrases(delay_sec=3)`:** 기존 `.md` 리포트를 읽어 `keyphrase_extractor.extract_keyphrases` 로 새 구문을 추출하고, 엔트리에 `keyphrases` + 파생 `keywords` + `reindexed_at` 을 채워넣는다. `.md` 보존 + AI 1회 호출만으로 v3.2 의미 색인 풀 적용.
+    *   **안전장치:** T-Day 자동 작성 엔트리(`source != "backfill"`)는 두 함수 모두 절대 건드리지 않는다.
+    *   **인터페이스:**
+        - CLI: `python scripts/backfill_chronicles.py --reset [--purge-reports] [--run]` / `--reindex --delay N`
+        - 슬랙: `!백필초기화 [purge]` / `!백필재인덱싱 [건당대기초]`
+        - Orchestrator: `MarketOrchestrator.backfill_reset(delete_reports=False)` / `backfill_reindex(delay_sec=3)`
+    *   **변경 파일:** `src/memory/backfill.py`, `scripts/backfill_chronicles.py`, `src/utils/slack_interface.py`, `src/execution/orchestrator.py`.
 
 ---
 
@@ -423,10 +435,15 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 | Slack | `!백필스캔` 또는 `!백필스캔 60` | 최근 N일 스캔 후 후보 리스트 보고, `backfill_state.json`에 queue 저장, 대기 안내 |
 | Slack | `확인` | 직전 스캔에 대해 `run_backfill` 실행 (단, `완료`는 Drive Pause 해제 전용으로 분리 유지) |
 | Slack | `!백필실행` | 저장된 queue에 대해 즉시 `run_backfill` 실행 |
+| Slack | `!백필초기화 [purge]` | 기존 백필 엔트리·state 초기화 (`purge` 입력 시 `.md` 까지 삭제) |
+| Slack | `!백필재인덱싱 [건당대기초]` | `.md` 보존, `keyphrases` 만 v3.2 포맷으로 재추출 |
 | CLI | `python scripts/backfill_chronicles.py --scan-only --lookback 60` | 스캔만 수행하고 콘솔/Drive에 저장 |
 | CLI | `python scripts/backfill_chronicles.py --run --delay 3` | 저장된 queue를 1건씩 실행 |
 | CLI | `python scripts/backfill_chronicles.py --lookback 60 --run` | 스캔 후 즉시 실행 |
-| Orchestrator | `MarketOrchestrator.backfill_scan()` / `backfill_run()` | 슬랙·스케줄 통합 진입점 |
+| CLI | `python scripts/backfill_chronicles.py --reset [--purge-reports]` | 기존 백필 결과 초기화 |
+| CLI | `python scripts/backfill_chronicles.py --reset --purge-reports --run` | 완전 재구축 |
+| CLI | `python scripts/backfill_chronicles.py --reindex --delay 3` | `.md` 보존, keyphrases만 v3.2 재추출 |
+| Orchestrator | `MarketOrchestrator.backfill_scan()` / `backfill_run()` / `backfill_reset()` / `backfill_reindex()` | 슬랙·스케줄 통합 진입점 |
 
 ### 5.5 v3.1 구현 체크리스트
 
@@ -440,7 +457,34 @@ Gemini API는 매 호출마다 과거를 망각하므로, Google Drive에 저장
 | 6. Drive `backfill_state.json` 상태 저장·이어쓰기 | **완료** | 중단 후 재개 안전 |
 | 7. T-Day 본 크로니클과 동일 색인 규격(`master_index.json`) | **완료** | `source="backfill"` 표식만 추가 |
 | 8. **실전 운영 검증** | **완료 (2026-05-20)** | lookback 60일, **완료 32 / 스킵 0 / 실패 0** (terminal 수동 실행) |
-| 9. 임베딩 기반 유사도 검색·실시간 매크로 스냅샷 통합 | 미완 | v3.x 향후 고도화 (§7 향후 추진 과제 4번 참고) |
+| 9. **백필 초기화·재인덱싱 운영 도구** | **v3.2.1 완료** | `--reset` / `--reindex` / 슬랙 명령 (§5.6) |
+| 10. 임베딩 기반 유사도 검색·실시간 매크로 스냅샷 통합 | 미완 | v3.x 향후 고도화 (§7 향후 추진 과제 4번 참고) |
+
+### 5.6 v3.2.1 초기화·재인덱싱 운영 도구
+
+v3.1 에서 이미 적재된 32건의 백필 엔트리를 v3.2 의미 색인으로 마이그레이션하거나 통째로 재구축할 수 있도록 두 가지 모드를 제공한다.
+
+| 모드 | 시나리오 | AI 호출 | `.md` 리포트 | `master_index` | 추천 |
+|---|---|---|---|---|---|
+| **`reset_backfill(delete_reports=False)`** | 엔트리만 비우고 다시 채움 | 재실행 시 N회(전체) | 보존 | `source="backfill"` 엔트리 제거 | 빠른 재구축 |
+| **`reset_backfill(delete_reports=True)`** | 처음부터 완전 재구축 | 재실행 시 N회(전체) | **삭제** | 엔트리 + 파일 모두 제거 | 깨끗한 재시작 |
+| **`reindex_keyphrases()`** | `.md` 살리고 `keyphrases` 만 새로 추출 | **N회(구문 추출만)** | 보존 | 엔트리에 `keyphrases`/`reindexed_at` 추가 | **권장 (비용 최소)** |
+
+권장 마이그레이션 절차 (v3.1 → v3.2 전환):
+
+```bash
+# .md 와 인덱스를 모두 살리면서 v3.2 keyphrases 만 채워 넣는다 (32회 AI 호출, 약 100초)
+python scripts/backfill_chronicles.py --reindex --delay 3
+```
+
+전체 재구축이 필요한 경우:
+
+```bash
+# 완전 초기화 후 새로 스캔/실행 (백필 1회당 AI 2~3회 호출 + 3초 대기)
+python scripts/backfill_chronicles.py --reset --purge-reports --lookback 60 --run --delay 3
+```
+
+안전장치: T-Day 자동 작성 엔트리(`source != "backfill"`)는 두 함수에서 모두 보호된다.
 
 ---
 

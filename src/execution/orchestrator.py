@@ -73,6 +73,21 @@ class MarketOrchestrator:
             notify_fn=self.send_slack, delay_sec=delay_sec
         )
 
+    def backfill_reset(self, delete_reports=False):
+        """v3.2.1 백필 초기화: master_index 의 source=backfill 엔트리 + state 비움.
+        delete_reports=True 이면 .md 리포트 파일도 삭제."""
+        from src.memory import backfill
+        return backfill.reset_backfill(
+            delete_reports=delete_reports, notify_fn=self.send_slack
+        )
+
+    def backfill_reindex(self, delay_sec=3):
+        """v3.2.1 백필 재인덱싱: .md 리포트는 보존, keyphrases 만 v3.2 포맷으로 재추출."""
+        from src.memory import backfill
+        return backfill.reindex_keyphrases(
+            notify_fn=self.send_slack, delay_sec=delay_sec
+        )
+
     def deep_market_routine(self):
         if not market_hours.is_market_open(): return
         self.send_slack("[System] 10:00 장 초반 자금 흐름 기반 심층 시황 보고를 시작합니다.")

@@ -463,6 +463,183 @@ def run_backfill(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS):
     return {"started": len(pending), "ok": ok_cnt, "skipped": skip_cnt, "failed": fail_cnt}
 
 
+def _delete_file_at_rel_path(rel_path):
+    """rel_path 위치의 파일을 Drive 에서 찾아 삭제. 없으면 False."""
+    try:
+        svc, _root_id, parent_id, filename = drive_client._folder_id_for_relative(rel_path)
+        file_id = drive_client._find_file_in_parent(svc, parent_id, filename)
+        if not file_id:
+            return False
+        drive_client.delete_file_by_id(file_id)
+        return True
+    except Exception as exc:
+        print(f"Log: [Backfill reset] {rel_path} 삭제 실패: {exc}", flush=True)
+        return False
+
+
+def reset_backfill(delete_reports=False, notify_fn=None):
+    """
+    백필 결과를 초기화한다.
+        - master_index.json 에서 source == "backfill" 엔트리를 모두 제거.
+        - backfill_state.json 을 빈 상태로 덮어쓴다.
+        - delete_reports=True 이면 위 엔트리들의 .md 리포트 파일까지 Drive 에서 삭제.
+
+    T-Day 자동 작성된 (source != "backfill") 엔트리는 절대 건드리지 않는다.
+    """
+    def _emit(msg):
+        if notify_fn:
+            notify_fn(msg)
+        else:
+            print(msg, flush=True)
+
+    if not drive_client.is_drive_enabled():
+        _emit("[Backfill Reset] Drive 가 비활성 상태입니다.")
+        return {"removed_entries": 0, "deleted_reports": 0}
+
+    if not drive_client.is_ready():
+        ok, msg = drive_client.init_drive_or_pause(notify_fn)
+        if not ok:
+            _emit(f"[Backfill Reset] Drive 초기화 실패: {msg}")
+            return {"removed_entries": 0, "deleted_reports": 0}
+
+    index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"version": 1, "entries": []}
+    entries = index.get("entries", []) or []
+    backfill_entries = [e for e in entries if (e.get("source") == "backfill")]
+    kept_entries = [e for e in entries if (e.get("source") != "backfill")]
+
+    deleted_reports = 0
+    if delete_reports:
+        for e in backfill_entries:
+            rel = e.get("report_rel_path")
+            if rel and _delete_file_at_rel_path(rel):
+                deleted_reports += 1
+
+    index["entries"] = kept_entries
+    drive_client.write_json_relative(MASTER_INDEX_REL, index)
+
+    drive_client.write_json_relative(
+        BACKFILL_STATE_REL,
+        {
+            "lookback_days": 0,
+            "scanned_at": None,
+            "queue": [],
+            "event_details": {},
+            "processed": [],
+            "skipped": [],
+            "reset_at": datetime.now(KST).isoformat(),
+        },
+    )
+
+    _emit(
+        f"[Backfill Reset] 완료. master_index에서 {len(backfill_entries)}건 제거, "
+        f"리포트 .md 삭제 {deleted_reports}건, state 초기화."
+    )
+    return {"removed_entries": len(backfill_entries), "deleted_reports": deleted_reports}
+
+
+def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_backfill=True):
+    """
+    기존 백필 리포트(.md)는 그대로 두고 keyphrases 만 v3.2 포맷으로 새로 추출하여
+    master_index 엔트리를 갱신한다. AI 호출 비용을 최소화하면서 의미 매칭 색인을
+    전면 적용한다.
+
+    Args:
+        delay_sec: 엔트리 1건 처리 후 대기 초.
+        only_backfill: True 이면 source == "backfill" 엔트리만 대상. False 면 전체 엔트리.
+    """
+    from src.memory.keyphrase_extractor import extract_keyphrases, derive_tokens
+
+    def _emit(msg):
+        if notify_fn:
+            notify_fn(msg)
+        else:
+            print(msg, flush=True)
+
+    if not drive_client.is_drive_enabled():
+        _emit("[Backfill Reindex] Drive 가 비활성 상태입니다.")
+        return {"updated": 0, "skipped": 0, "failed": 0}
+    if not drive_client.is_ready():
+        ok, msg = drive_client.init_drive_or_pause(notify_fn)
+        if not ok:
+            _emit(f"[Backfill Reindex] Drive 초기화 실패: {msg}")
+            return {"updated": 0, "skipped": 0, "failed": 0}
+
+    index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"version": 1, "entries": []}
+    entries = index.get("entries", []) or []
+
+    targets = []
+    for idx, entry in enumerate(entries):
+        if only_backfill and entry.get("source") != "backfill":
+            continue
+        targets.append((idx, entry))
+
+    if not targets:
+        _emit("[Backfill Reindex] 대상 엔트리가 없습니다.")
+        return {"updated": 0, "skipped": 0, "failed": 0}
+
+    _emit(
+        f"[Backfill Reindex] 총 {len(targets)}건의 엔트리를 v3.2 keyphrases 포맷으로 갱신합니다 "
+        f"(건당 약 {delay_sec}초 대기, AI 1회 호출)."
+    )
+
+    updated = 0
+    skipped = 0
+    failed = 0
+
+    for n, (idx, entry) in enumerate(targets, 1):
+        date_str = entry.get("date", "?")
+        rel = entry.get("report_rel_path")
+        _emit(f"[Backfill Reindex] ({n}/{len(targets)}) {date_str} 처리 중...")
+
+        if not rel:
+            skipped += 1
+            _emit(f"[Backfill Reindex] {date_str} 스킵: report_rel_path 없음")
+            continue
+
+        try:
+            body = drive_client.read_text_relative(rel) or ""
+        except Exception as exc:
+            failed += 1
+            _emit(f"[Backfill Reindex] {date_str} 본문 읽기 실패: {exc}")
+            time.sleep(max(0, delay_sec))
+            continue
+
+        if not body.strip():
+            skipped += 1
+            _emit(f"[Backfill Reindex] {date_str} 스킵: 본문이 비어 있음")
+            continue
+
+        try:
+            phrases = extract_keyphrases(body, max_phrases=12, ai_enabled=True)
+        except Exception as exc:
+            failed += 1
+            _emit(f"[Backfill Reindex] {date_str} 구문 추출 실패: {exc}")
+            time.sleep(max(0, delay_sec))
+            continue
+
+        if not phrases:
+            skipped += 1
+            _emit(f"[Backfill Reindex] {date_str} 스킵: 추출된 구문 없음")
+            time.sleep(max(0, delay_sec))
+            continue
+
+        entry["keyphrases"] = phrases
+        entry["keywords"] = derive_tokens(phrases)[:20]
+        entry["reindexed_at"] = datetime.now(KST).isoformat()
+        entries[idx] = entry
+        index["entries"] = entries
+        drive_client.write_json_relative(MASTER_INDEX_REL, index)
+
+        updated += 1
+        _emit(f"[Backfill Reindex] {date_str} 갱신 완료 (구문 {len(phrases)}개)")
+        time.sleep(max(0, delay_sec))
+
+    _emit(
+        f"[Backfill Reindex] 종료. 갱신 {updated} / 스킵 {skipped} / 실패 {failed} / 총 {len(targets)}건"
+    )
+    return {"updated": updated, "skipped": skipped, "failed": failed}
+
+
 def scan_and_save(lookback_days=DEFAULT_LOOKBACK_DAYS, notify_fn=None):
     """스캔 + 슬랙 보고 + Drive 큐 저장까지 한 번에 수행."""
     def _emit(msg):
