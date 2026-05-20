@@ -31,12 +31,23 @@ GDRIVE_TRANSFER_OWNERSHIP_EMAIL=you@gmail.com
 | **Google Workspace** | `GDRIVE_DELEGATED_USER_EMAIL=user@company.com` + Admin Domain-Wide Delegation |
 | **팀 드라이브** | `GDRIVE_USE_SHARED_DRIVE=1` |
 
-OAuth 설정:
+OAuth 설정 (개인 Gmail, 서버 SSH):
 
 ```bash
 GOOGLE_DRIVE_OAUTH_CLIENT_FILE=/path/to/client_secret.json
-# 실행 후 생성: drive_oauth_token.json
 ```
+
+```bash
+# 최초 발급 (브라우저 없는 서버)
+python scripts/drive_oauth_setup.py --no-browser
+
+# 토큰 상태 확인 / access token 갱신
+python scripts/drive_oauth_refresh.py
+python scripts/drive_oauth_refresh.py --refresh
+```
+
+Testing 모드: OAuth 동의 화면에 **테스트 사용자**로 Gmail 등록 필수.  
+refresh 실패(`invalid_grant`) 시 `drive_oauth_setup.py --no-browser` 로 재발급.
 
 **신규 별칭 (동일 의미, 둘 중 하나만 있어도 됨)**
 

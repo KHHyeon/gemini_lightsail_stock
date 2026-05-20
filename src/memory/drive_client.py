@@ -95,24 +95,16 @@ def get_auth_mode():
 
 
 def _oauth_token_path():
-    return os.path.join(_project_root(), "drive_oauth_token.json")
+    from src.memory.oauth_token import get_token_path
+
+    return get_token_path()
 
 
 def _load_oauth_credentials():
-    """OAuth 사용자 토큰 (개인 Gmail Drive 쓰기용)."""
-    token_path = _oauth_token_path()
-    if not os.path.isfile(token_path):
-        return None
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
+    """OAuth 사용자 토큰 (만료 시 refresh 후 파일 저장)."""
+    from src.memory.oauth_token import ensure_oauth_token_valid
 
-    creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    if not creds.valid:
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return None
-    return creds
+    return ensure_oauth_token_valid(verbose=False)
 
 
 def _build_drive_service(creds):

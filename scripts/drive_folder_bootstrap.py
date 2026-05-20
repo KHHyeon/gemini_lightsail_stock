@@ -167,6 +167,19 @@ def main():
 
     if not _check_env():
         sys.exit(1)
+
+    from src.memory.oauth_token import check_oauth_token_status, ensure_oauth_token_valid
+
+    ost = check_oauth_token_status()
+    if ost["exists"]:
+        print("=== OAuth 토큰 ===")
+        print(f"  {ost['message']}")
+        if ost["needs_reauth"] and not ost["valid"]:
+            print("  [FAIL] 재인증: python scripts/drive_oauth_setup.py --no-browser")
+            sys.exit(1)
+        ensure_oauth_token_valid(verbose=True)
+        print()
+
     result = _test_connection()
     if not result[0]:
         sys.exit(1)

@@ -36,7 +36,16 @@ orchestrator = MarketOrchestrator(kis, app, CONFIG)
 def _bootstrap_market_chronicles():
     try:
         from src.memory import drive_client
+        from src.memory.oauth_token import check_oauth_token_status, ensure_oauth_token_valid
 
+        st = check_oauth_token_status()
+        if st["exists"]:
+            creds = ensure_oauth_token_valid(verbose=True)
+            if creds is None and st["needs_reauth"]:
+                orchestrator.send_slack(
+                    "[OAuth] Drive 토큰 만료. 서버에서 "
+                    "python scripts/drive_oauth_setup.py --no-browser 실행 필요"
+                )
         drive_client.init_drive_or_pause(notify_fn=orchestrator.send_slack)
     except Exception as e:
         print(f"Log: [Chronicles Bootstrap] {e}", flush=True)
