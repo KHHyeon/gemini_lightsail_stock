@@ -22,15 +22,16 @@ def generate_text(prompt, model_name=None):
 def generate_text_with_chronicle(prompt, macro=None, news_snippets=None, model_name=None):
     """Market Chronicles Context Injection 후 Gemini 호출.
 
-    v3.2: extract_market_context 가 단어 토큰 대신 [주체+동사] 구문 리스트를 반환한다.
-    하위 호환을 위해 변수명은 query_phrases 로 명확히 한다.
+    v3.4: extract_market_context 가 dict (context_tags_list / regime /
+    main_actor_keyword / sentiment / phrases_list) 를 반환한다.
+    build_context_injection_block 에 dict 그대로 전달하여 3블록 압축 출력을 받는다.
     """
     try:
         from src.memory.context_retriever import build_context_injection_block, extract_market_context
 
         if macro is not None:
-            query_phrases, regime = extract_market_context(macro, news_snippets)
-            block = build_context_injection_block(query_phrases, regime)
+            query_dict = extract_market_context(macro, news_snippets)
+            block = build_context_injection_block(query_dict)
             if block:
                 prompt = f"{block}\n\n{prompt}"
     except Exception as e:

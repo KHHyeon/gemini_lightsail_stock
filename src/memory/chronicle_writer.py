@@ -3,9 +3,8 @@
 import uuid
 
 from src.memory import chronicle_common, drive_client
-from src.memory.keyphrase_extractor import derive_tokens
 from src.strategy import ai_logic as ai_strategy
-from src.utils.macro_triggers import VIX_WARN, _safe_float, evaluate_chronicle_trigger
+from src.utils.macro_triggers import evaluate_chronicle_trigger
 from src.utils.timekit import now_kst
 
 
@@ -95,37 +94,45 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
             notify_fn(f"[Chronicles Pause] {e.reason}\n조치: {e.action_required}")
         return False, str(e)
 
-    summary = chronicle_common.parse_guideline_summary(report_body)
-    keyphrase_list = chronicle_common.build_keyphrases(
+    action_preview = chronicle_common.parse_action_preview(report_body)
+    phrases_list = chronicle_common.build_keyphrases(
         report_body,
         vix=macro.get("VIX", 0),
         kospi_chg=macro.get("KOSPI_CHG", 0),
         kosdaq_chg=macro.get("KOSDAQ_CHG", 0),
     )
-    keyword_list = derive_tokens(keyphrase_list)[:20]
 
-    regime = ""
-    vix_value = _safe_float(macro.get("VIX", 0))
-    if vix_value >= VIX_WARN:
-        regime = f"VIX {vix_value:.0f} 공포 구간"
+    market_state_dict = chronicle_common.derive_market_state(
+        phrases_list,
+        vix=macro.get("VIX", 0),
+        kospi_chg=macro.get("KOSPI_CHG", 0),
+        kosdaq_chg=macro.get("KOSDAQ_CHG", 0),
+        open_chg=macro.get("OPEN_CHG"),
+        prev_regime=macro.get("PREV_REGIME"),
+    )
+    context_tags_list = chronicle_common.derive_context_tags(
+        phrases_list, market_state_dict
+    )
 
     drive_client.append_index_entry(
         {
             "id": str(uuid.uuid4())[:8],
             "date": today,
-            "keyphrases": keyphrase_list,
-            "keywords": keyword_list,
-            "regime": regime,
-            "guideline_summary": summary,
-            "report_rel_path": rel_path,
             "trigger": reason,
+            "market_state": market_state_dict,
+            "context_tags_list": context_tags_list,
+            "action_preview": action_preview,
+            "phrases_list": phrases_list,
+            "embedding_vector": None,
+            "report_rel_path": rel_path,
+            "source": "chronicle",
         }
     )
 
     if notify_fn:
         notify_fn(
             f"[Market Chronicles] T-Day 리포트 저장 완료 ({today})\n"
-            f"트리거: {reason}\n"
-            f"요약: {summary}"
+            f"트리거: {reason} | 시장 상태: {market_state_dict.get('regime_label', '')}\n"
+            f"지침: {action_preview}"
         )
-    return True, summary
+    return True, action_preview

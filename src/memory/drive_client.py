@@ -36,6 +36,32 @@ class DriveNotConfiguredError(Exception):
     pass
 
 
+class DriveSchemaMismatchError(Exception):
+    """master_index.json 의 ``version`` 키가 코드의 기대값과 불일치 (v3.4 신규, B-Type).
+
+    v3.4 코드는 ``version=2`` (Master Index v2) 만 처리하므로, ``version!=2``
+    감지 시 본 예외를 raise 한 뒤 ``pause(...)`` 로 사용자 개입을 요청한다.
+    자세한 정책은 SYS §8.1 v3.4 신규 B-Type 시나리오 및 §7.5 참조.
+
+    Attributes:
+        detected_version: 실제 파일에 기록된 ``version`` 값.
+        expected_version: 코드의 기대값 (2).
+        action_required: 사용자에게 안내할 조치 문구.
+    """
+
+    def __init__(self, detected_version, expected_version=2, action_required=None):
+        self.detected_version = detected_version
+        self.expected_version = expected_version
+        self.action_required = action_required or (
+            "master_index.json v1 감지. 'python scripts/migrate_master_index_v2.py "
+            "--dry-run' 으로 변환 결과 검토 후 '--apply' 실행, 완료 후 '완료' 응답."
+        )
+        super().__init__(
+            f"master_index.json schema version mismatch: detected={detected_version}, "
+            f"expected={expected_version}"
+        )
+
+
 def get_service_account_path():
     """서비스 계정 JSON 경로 (신규·레거시 env 모두 지원)."""
     return (
@@ -490,7 +516,7 @@ def _ensure_chronicle_structure(svc, root_id, force_refresh=False):
             svc,
             parent_id,
             index_parts[-1],
-            json.dumps({"version": 1, "entries": []}, ensure_ascii=False, indent=2).encode("utf-8"),
+            json.dumps({"version": 2, "entries": []}, ensure_ascii=False, indent=2).encode("utf-8"),
             "application/json",
         )
     _persist_manifest(svc, root_id, manifest)
@@ -653,17 +679,90 @@ def delete_file_relative(rel_path):
         return False
 
 
-def read_master_index():
-    """master_index.json 을 안전하게 읽어 dict 로 반환.
+# v3.4 Master Index 스키마 기대 버전.
+MASTER_INDEX_EXPECTED_VERSION = 2
 
-    파일이 없거나 비어 있으면 기본 스키마 `{"version": 1, "entries": []}` 반환.
+
+def _is_auto_migrate_enabled():
+    """``.env`` 의 ``AUTO_MIGRATE_V2`` 플래그 평가.
+
+    값이 ``1``/``true``/``yes`` (대소문자 무관) 이면 True. 기본 False.
+    """
+    flag = os.getenv("AUTO_MIGRATE_V2", "").strip().lower()
+    return flag in ("1", "true", "yes")
+
+
+def read_master_index(*, allow_auto_migrate=True):
+    """master_index.json 을 안전하게 읽어 dict 로 반환 (v3.4 가드 포함).
+
+    동작 순서:
+
+    1. Drive 에서 파일을 읽는다. 부재·빈 dict 인 경우 v2 빈 인덱스
+       (``{"version": 2, "entries": []}``) 를 반환 (신규 가동·복구 시 정상 경로).
+    2. 파일이 존재하면 ``version`` 키를 검사한다.
+       - ``version == 2`` 면 그대로 반환.
+       - ``version != 2`` 이고 ``allow_auto_migrate`` + ``AUTO_MIGRATE_V2=1``
+         이면 마이그레이션 스크립트의 ``migrate_in_process(...)`` 진입점을
+         호출한 뒤 변환된 v2 인덱스를 재로드하여 반환 (SYS §8.1 선택적 자동화 옵션).
+       - 그 외에는 ``DriveSchemaMismatchError`` 를 raise 한다 (호출부가
+         ``pause(...)`` 로 B-Type Pause 전환).
+
+    Args:
+        allow_auto_migrate: ``False`` 면 자동 마이그레이션 분기를 건너뛰고
+            바로 ``DriveSchemaMismatchError`` 를 raise 한다. 마이그레이션
+            스크립트 본인이 본 헬퍼를 호출할 때 무한 재진입을 막기 위한 가드.
+
+    Returns:
+        dict: ``{"version": 2, "entries": [...]}``.
+
+    Raises:
+        DriveSchemaMismatchError: ``version != 2`` 이고 자동 마이그레이션이
+            비활성된 경우.
     """
     data = read_json_relative(MASTER_INDEX_REL)
     if not data:
-        return {"version": 1, "entries": []}
-    data.setdefault("version", 1)
-    data.setdefault("entries", [])
-    return data
+        return {"version": MASTER_INDEX_EXPECTED_VERSION, "entries": []}
+
+    detected_version = data.get("version", 1)
+    if detected_version == MASTER_INDEX_EXPECTED_VERSION:
+        data.setdefault("entries", [])
+        return data
+
+    if allow_auto_migrate and _is_auto_migrate_enabled():
+        try:
+            from scripts.migrate_master_index_v2 import migrate_in_process
+
+            summary_dict = migrate_in_process(ai_enabled=True, delay_sec=3)
+            print(
+                f"Log: [Master Index v2] AUTO_MIGRATE_V2=1 자동 변환 완료. "
+                f"처리={summary_dict.get('total', 0)}, "
+                f"AI 호출={summary_dict.get('ai_calls', 0)}",
+                flush=True,
+            )
+        except Exception as exc:
+            raise DriveSchemaMismatchError(
+                detected_version,
+                expected_version=MASTER_INDEX_EXPECTED_VERSION,
+                action_required=(
+                    f"AUTO_MIGRATE_V2=1 자동 변환 실패: {exc}. "
+                    "'python scripts/migrate_master_index_v2.py --dry-run' 으로 수동 진행하세요."
+                ),
+            )
+        data_after = read_json_relative(MASTER_INDEX_REL) or {
+            "version": MASTER_INDEX_EXPECTED_VERSION,
+            "entries": [],
+        }
+        data_after.setdefault("entries", [])
+        return data_after
+
+    schema_err = DriveSchemaMismatchError(
+        detected_version, expected_version=MASTER_INDEX_EXPECTED_VERSION
+    )
+    try:
+        pause(str(schema_err), schema_err.action_required)
+    except Exception:
+        pass
+    raise schema_err
 
 
 def append_index_entry(entry_dict):

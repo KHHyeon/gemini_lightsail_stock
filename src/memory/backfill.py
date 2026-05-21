@@ -17,12 +17,8 @@ import uuid
 from datetime import timedelta
 
 from src.memory import chronicle_common, drive_client
-from src.memory.keyphrase_extractor import derive_tokens
 from src.strategy import ai_logic as ai_strategy
 from src.utils.macro_triggers import (
-    INDEX_SHOCK_PCT,
-    VIX_CRITICAL,
-    VIX_WARN,
     _safe_float,
     evaluate_chronicle_trigger,
 )
@@ -238,22 +234,6 @@ def _collect_news_for(event):
     return us_news, kr_news
 
 
-def _build_regime(event):
-    """이벤트 메타데이터로부터 시장 국면 라벨을 산출."""
-    vix_value = _safe_float(event.get("vix_close"))
-    if vix_value >= VIX_CRITICAL:
-        return f"극단적 공포 (VIX {vix_value:.0f})"
-    if vix_value >= VIX_WARN:
-        return f"공포 확대 (VIX {vix_value:.0f})"
-    kospi_chg = _safe_float(event.get("kospi_chg"))
-    if abs(kospi_chg) >= INDEX_SHOCK_PCT:
-        return f"코스피 {'급락' if kospi_chg < 0 else '급등'} ({kospi_chg:+.2f}%)"
-    kosdaq_chg = _safe_float(event.get("kosdaq_chg"))
-    if abs(kosdaq_chg) >= INDEX_SHOCK_PCT:
-        return f"코스닥 {'급락' if kosdaq_chg < 0 else '급등'} ({kosdaq_chg:+.2f}%)"
-    return "보통 국면"
-
-
 def _write_chronicle_for_event(event):
     """1개 이벤트 데이를 처리하여 Drive 저장 + master_index 색인. 성공 시 summary 반환."""
     date_str = event["date"]
@@ -275,30 +255,38 @@ def _write_chronicle_for_event(event):
     full_md = header + report_body
     drive_client.write_text_relative(rel_path, full_md, mime_type="text/markdown")
 
-    summary = chronicle_common.parse_guideline_summary(report_body)
-    keyphrase_list = chronicle_common.build_keyphrases(
+    action_preview = chronicle_common.parse_action_preview(report_body)
+    phrases_list = chronicle_common.build_keyphrases(
         report_body,
         vix=event.get("vix_close", 0),
         kospi_chg=event.get("kospi_chg", 0),
         kosdaq_chg=event.get("kosdaq_chg", 0),
     )
-    keyword_list = derive_tokens(keyphrase_list)[:20]
-    regime = _build_regime(event)
+    market_state_dict = chronicle_common.derive_market_state(
+        phrases_list,
+        vix=event.get("vix_close", 0),
+        kospi_chg=event.get("kospi_chg", 0),
+        kosdaq_chg=event.get("kosdaq_chg", 0),
+    )
+    context_tags_list = chronicle_common.derive_context_tags(
+        phrases_list, market_state_dict
+    )
 
     drive_client.append_index_entry(
         {
             "id": str(uuid.uuid4())[:8],
             "date": date_str,
-            "keyphrases": keyphrase_list,
-            "keywords": keyword_list,
-            "regime": regime,
-            "guideline_summary": summary,
-            "report_rel_path": rel_path,
             "trigger": event["trigger"],
+            "market_state": market_state_dict,
+            "context_tags_list": context_tags_list,
+            "action_preview": action_preview,
+            "phrases_list": phrases_list,
+            "embedding_vector": None,
+            "report_rel_path": rel_path,
             "source": "backfill",
         }
     )
-    return True, summary
+    return True, action_preview
 
 
 def run_backfill(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS):
@@ -498,7 +486,7 @@ def diagnose_reports(notify_fn=None):
     try:
         index = drive_client.read_master_index()
     except Exception:
-        index = {"version": 1, "entries": []}
+        index = {"version": drive_client.MASTER_INDEX_EXPECTED_VERSION, "entries": []}
     entries = [e for e in index.get("entries", []) if isinstance(e, dict)]
     registered_paths = {e.get("report_rel_path") for e in entries if e.get("report_rel_path")}
     index_backfill = sum(1 for e in entries if e.get("source") == "backfill")
@@ -577,7 +565,7 @@ def purge_leftover_backfill_reports(notify_fn=None, dry_run=False):
     try:
         index = drive_client.read_master_index()
     except Exception:
-        index = {"version": 1, "entries": []}
+        index = {"version": drive_client.MASTER_INDEX_EXPECTED_VERSION, "entries": []}
     registered_paths = {
         (e or {}).get("report_rel_path")
         for e in index.get("entries", [])
@@ -690,10 +678,15 @@ def reset_backfill(delete_reports=False, notify_fn=None):
 
 
 def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_backfill=True):
-    """
-    기존 백필 리포트(.md)는 그대로 두고 keyphrases 만 v3.2 포맷으로 새로 추출하여
-    master_index 엔트리를 갱신한다. AI 호출 비용을 최소화하면서 의미 매칭 색인을
-    전면 적용한다.
+    """기존 백필 리포트(.md)는 그대로 두고 v2 엔트리 키 색인 4종을 새로 추출하여
+    master_index 엔트리를 갱신한다.
+
+    v3.4 부터 본 함수는 다음 4개 필드를 모두 다시 산출하여 덮어쓴다.
+
+    - ``phrases_list``: keyphrase_extractor 의 AI 1회 호출 결과
+    - ``market_state``: ``chronicle_common.derive_market_state`` (event 메타로 매크로 입력)
+    - ``context_tags_list``: ``chronicle_common.derive_context_tags``
+    - ``action_preview``: 기존 ``guideline_summary`` 또는 본문에서 재추출
 
     Args:
         delay_sec: 엔트리 1건 처리 후 대기 초.
@@ -726,7 +719,7 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
         return {"updated": 0, "skipped": 0, "failed": 0}
 
     _emit(
-        f"[Backfill Reindex] 총 {len(targets)}건의 엔트리를 v3.2 keyphrases 포맷으로 갱신합니다 "
+        f"[Backfill Reindex] 총 {len(targets)}건의 엔트리를 v3.4 평탄화 포맷으로 갱신합니다 "
         f"(건당 약 {delay_sec}초 대기, AI 1회 호출)."
     )
 
@@ -758,28 +751,58 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
             continue
 
         try:
-            phrases = extract_keyphrases(body, max_phrases=12, ai_enabled=True)
+            phrases_list = extract_keyphrases(body, max_phrases=12, ai_enabled=True)
         except Exception as exc:
             failed += 1
             _emit(f"[Backfill Reindex] {date_str} 구문 추출 실패: {exc}")
             time.sleep(max(0, delay_sec))
             continue
 
-        if not phrases:
+        if not phrases_list:
             skipped += 1
             _emit(f"[Backfill Reindex] {date_str} 스킵: 추출된 구문 없음")
             time.sleep(max(0, delay_sec))
             continue
 
-        entry["keyphrases"] = phrases
-        entry["keywords"] = derive_tokens(phrases)[:20]
-        entry["reindexed_at"] = kst_iso_now()
-        entries[idx] = entry
+        legacy_regime_label = entry.get("regime") or (entry.get("market_state") or {}).get("regime_label")
+        market_state_dict = chronicle_common.derive_market_state(
+            phrases_list,
+            vix=0.0,
+            kospi_chg=0.0,
+            kosdaq_chg=0.0,
+            regime_label_override=legacy_regime_label or None,
+        )
+        context_tags_list = chronicle_common.derive_context_tags(
+            phrases_list, market_state_dict
+        )
+        legacy_action = entry.get("action_preview") or entry.get("guideline_summary")
+        if legacy_action:
+            action_preview = legacy_action[:200]
+        else:
+            action_preview = chronicle_common.parse_action_preview(body)
+
+        new_entry = {
+            "id": entry.get("id"),
+            "date": date_str,
+            "trigger": entry.get("trigger", ""),
+            "market_state": market_state_dict,
+            "context_tags_list": context_tags_list,
+            "action_preview": action_preview,
+            "phrases_list": phrases_list,
+            "embedding_vector": None,
+            "report_rel_path": rel,
+            "source": entry.get("source", "backfill"),
+            "reindexed_at": kst_iso_now(),
+        }
+        if entry.get("migrated_at"):
+            new_entry["migrated_at"] = entry["migrated_at"]
+
+        entries[idx] = new_entry
         index["entries"] = entries
         drive_client.write_master_index(index)
 
         updated += 1
-        _emit(f"[Backfill Reindex] {date_str} 갱신 완료 (구문 {len(phrases)}개)")
+        _emit(f"[Backfill Reindex] {date_str} 갱신 완료 (구문 {len(phrases_list)}개)")
         time.sleep(max(0, delay_sec))
 
     _emit(
