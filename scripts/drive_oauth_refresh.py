@@ -11,12 +11,11 @@ Google Cloud OAuth 'Testing' 모드:
   python scripts/drive_oauth_refresh.py --refresh # 만료 시 갱신 시도
 """
 import argparse
-import os
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+from _common import load_env_file, setup_script_path
+
+setup_script_path()
 
 
 def main():
@@ -29,12 +28,7 @@ def main():
     parser.add_argument("--env-file", default=None)
     args = parser.parse_args()
 
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv(args.env_file or os.path.join(ROOT, ".env"))
-    except ImportError:
-        pass
+    load_env_file(args.env_file)
 
     from src.memory.oauth_token import check_oauth_token_status, refresh_oauth_token
 

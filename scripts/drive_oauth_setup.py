@@ -18,20 +18,15 @@ import sys
 import webbrowser
 from urllib.parse import parse_qs, urlparse
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+from _common import load_env_file, setup_script_path
+
+ROOT = setup_script_path()
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 def _load_env():
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv(os.path.join(ROOT, ".env"))
-    except ImportError:
-        pass
+    load_env_file()
 
 
 def validate_client_secrets(client_path):

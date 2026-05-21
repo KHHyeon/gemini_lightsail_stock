@@ -1,34 +1,21 @@
 # -*- coding: utf-8 -*-
-import json
 import os
-from datetime import datetime, timezone, timedelta
 
-KST = timezone(timedelta(hours=9))
-
-
-def _root_path():
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.utils.jsonio import read_local_json, write_local_json
+from src.utils.paths import project_root
+from src.utils.timekit import KST, now_kst
 
 
 def _local_filepath(filename):
-    return os.path.join(_root_path(), filename)
+    return os.path.join(project_root(), filename)
 
 
 def _load_local(filename):
-    filepath = _local_filepath(filename)
-    if not os.path.exists(filepath):
-        return None
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    return read_local_json(_local_filepath(filename), default=None)
 
 
 def _save_local(data, filename):
-    filepath = _local_filepath(filename)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    write_local_json(_local_filepath(filename), data, indent=4)
 
 
 def _use_drive_storage():
@@ -75,12 +62,12 @@ def record_trade(ticker, name, action, price, quantity, reason, strategy_tag="UN
     elif "NORMAL" in reason:
         mode_type = "NORMAL"
 
-    now_kst = datetime.now(KST)
+    current_kst = now_kst()
     if not purchase_date:
-        purchase_date = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+        purchase_date = current_kst.strftime("%Y-%m-%d %H:%M:%S")
 
     trade_record = {
-        "timestamp": now_kst.strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": current_kst.strftime("%Y-%m-%d %H:%M:%S"),
         "ticker": ticker,
         "name": name,
         "action": action,

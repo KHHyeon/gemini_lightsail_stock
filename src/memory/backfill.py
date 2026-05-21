@@ -14,12 +14,19 @@ Market Chronicles v3.1 - 과거 데이터 소급 구축 (Back-filling).
 import time
 import traceback
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 
-from src.memory import drive_client
+from src.memory import chronicle_common, drive_client
+from src.memory.keyphrase_extractor import derive_tokens
 from src.strategy import ai_logic as ai_strategy
-
-KST = timezone(timedelta(hours=9))
+from src.utils.macro_triggers import (
+    INDEX_SHOCK_PCT,
+    VIX_CRITICAL,
+    VIX_WARN,
+    _safe_float,
+    evaluate_chronicle_trigger,
+)
+from src.utils.timekit import KST, kst_iso_now, today_kst
 
 MASTER_INDEX_REL = drive_client.MASTER_INDEX_REL
 BACKFILL_STATE_REL = f"{drive_client.CHRONICLES_ROOT}/_system/backfill_state.json"
@@ -32,19 +39,7 @@ VIX_TICKER = "^VIX"
 
 
 def _today_kst_date():
-    return datetime.now(KST).date()
-
-
-def _report_rel_path(date_str):
-    y, m, _ = date_str.split("-")
-    return f"{drive_client.CHRONICLES_ROOT}/reports/{y}/{m}/{date_str}_chronicle.md"
-
-
-def _safe_float(value, default=0.0):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+    return today_kst()
 
 
 def _fetch_index_history(lookback_days):
@@ -84,17 +79,6 @@ def _fetch_index_history(lookback_days):
     return series
 
 
-def _trigger_reason(kospi_chg, kosdaq_chg, vix_close):
-    """T-Day 트리거(±1.5% 또는 VIX>=25)와 동일 규칙."""
-    if vix_close >= 25.0:
-        return True, f"VIX {vix_close:.1f}"
-    if abs(kospi_chg) >= 1.5:
-        return True, f"KOSPI {kospi_chg:+.2f}%"
-    if abs(kosdaq_chg) >= 1.5:
-        return True, f"KOSDAQ {kosdaq_chg:+.2f}%"
-    return False, ""
-
-
 def scan_event_days(lookback_days=DEFAULT_LOOKBACK_DAYS):
     """
     최근 lookback_days 거래일을 훑어 트리거 충족 일자를 추출한다.
@@ -126,7 +110,9 @@ def scan_event_days(lookback_days=DEFAULT_LOOKBACK_DAYS):
         kospi_chg = _safe_float(entry.get("kospi_chg"))
         kosdaq_chg = _safe_float(entry.get("kosdaq_chg"))
         vix_close = _safe_float(entry.get("vix_close"))
-        ok, reason = _trigger_reason(kospi_chg, kosdaq_chg, vix_close)
+        ok, reason = evaluate_chronicle_trigger(
+            vix=vix_close, kospi_chg=kospi_chg, kosdaq_chg=kosdaq_chg
+        )
         if not ok:
             continue
         events.append(
@@ -177,7 +163,7 @@ def _load_state():
 
 
 def _save_state(state):
-    state["updated_at"] = datetime.now(KST).isoformat()
+    state["updated_at"] = kst_iso_now()
     drive_client.write_json_relative(BACKFILL_STATE_REL, state)
 
 
@@ -185,7 +171,7 @@ def save_scan_state(events, lookback_days):
     """스캔 결과를 Drive backfill_state.json 에 큐로 보존."""
     state = {
         "lookback_days": lookback_days,
-        "scanned_at": datetime.now(KST).isoformat(),
+        "scanned_at": kst_iso_now(),
         "queue": [ev["date"] for ev in events],
         "event_details": {ev["date"]: ev for ev in events},
         "processed": [],
@@ -252,73 +238,26 @@ def _collect_news_for(event):
     return us_news, kr_news
 
 
-def _parse_guideline_summary(ai_text):
-    for line in ai_text.splitlines():
-        if "행동 지침" in line or "최종 행동" in line:
-            return line.strip()[:300]
-    lines = [ln.strip() for ln in ai_text.splitlines() if ln.strip()]
-    return lines[-1][:300] if lines else "행동 지침 요약 없음"
-
-
-def _build_keyphrases(ai_text, event):
-    """
-    v3.2: 단순 단어 집합 대신 [주체+동사] 결합 핵심 구문을 추출한다.
-    이벤트 메타데이터(KOSPI/KOSDAQ 등락률, VIX)도 동일 포맷으로 합산하여 검색 정확도 향상.
-    """
-    from src.memory.keyphrase_extractor import extract_keyphrases
-
-    phrases = extract_keyphrases(ai_text, max_phrases=12, ai_enabled=True)
-    seen = {p.get("phrase") for p in phrases}
-
-    def _append(phrase, subject, action, tone):
-        if phrase in seen:
-            return
-        phrases.append(
-            {"phrase": phrase, "subject": subject, "action": action, "tone": tone}
-        )
-        seen.add(phrase)
-
-    if event.get("vix_close", 0) >= 25:
-        _append(f"VIX {event['vix_close']:.0f} 경계", "VIX", "경계", "negative")
-    kospi_chg = event.get("kospi_chg", 0)
-    if kospi_chg <= -1.5:
-        _append(f"코스피 급락 ({kospi_chg:+.2f}%)", "코스피", "하락", "negative")
-    elif kospi_chg >= 1.5:
-        _append(f"코스피 급등 ({kospi_chg:+.2f}%)", "코스피", "상승", "positive")
-    kosdaq_chg = event.get("kosdaq_chg", 0)
-    if kosdaq_chg <= -1.5:
-        _append(f"코스닥 급락 ({kosdaq_chg:+.2f}%)", "코스닥", "하락", "negative")
-    elif kosdaq_chg >= 1.5:
-        _append(f"코스닥 급등 ({kosdaq_chg:+.2f}%)", "코스닥", "상승", "positive")
-
-    return phrases[:15]
-
-
-def _legacy_keyword_view(phrases):
-    """검색 폴백/하위 호환용 단어 토큰 (keyphrases 기준 자동 파생)."""
-    from src.memory.keyphrase_extractor import derive_tokens
-
-    return derive_tokens(phrases)[:20]
-
-
 def _build_regime(event):
-    if event.get("vix_close", 0) >= 30:
-        return f"극단적 공포 (VIX {event['vix_close']:.0f})"
-    if event.get("vix_close", 0) >= 25:
-        return f"공포 확대 (VIX {event['vix_close']:.0f})"
-    chg = event.get("kospi_chg", 0)
-    if abs(chg) >= 1.5:
-        return f"코스피 {'급락' if chg < 0 else '급등'} ({chg:+.2f}%)"
-    chg = event.get("kosdaq_chg", 0)
-    if abs(chg) >= 1.5:
-        return f"코스닥 {'급락' if chg < 0 else '급등'} ({chg:+.2f}%)"
+    """이벤트 메타데이터로부터 시장 국면 라벨을 산출."""
+    vix_value = _safe_float(event.get("vix_close"))
+    if vix_value >= VIX_CRITICAL:
+        return f"극단적 공포 (VIX {vix_value:.0f})"
+    if vix_value >= VIX_WARN:
+        return f"공포 확대 (VIX {vix_value:.0f})"
+    kospi_chg = _safe_float(event.get("kospi_chg"))
+    if abs(kospi_chg) >= INDEX_SHOCK_PCT:
+        return f"코스피 {'급락' if kospi_chg < 0 else '급등'} ({kospi_chg:+.2f}%)"
+    kosdaq_chg = _safe_float(event.get("kosdaq_chg"))
+    if abs(kosdaq_chg) >= INDEX_SHOCK_PCT:
+        return f"코스닥 {'급락' if kosdaq_chg < 0 else '급등'} ({kosdaq_chg:+.2f}%)"
     return "보통 국면"
 
 
 def _write_chronicle_for_event(event):
     """1개 이벤트 데이를 처리하여 Drive 저장 + master_index 색인. 성공 시 summary 반환."""
     date_str = event["date"]
-    rel_path = _report_rel_path(date_str)
+    rel_path = chronicle_common.report_rel_path(date_str)
     if drive_client.file_exists_relative(rel_path):
         return False, "이미 동일 일자의 크로니클이 존재합니다 (스킵)"
 
@@ -331,23 +270,27 @@ def _write_chronicle_for_event(event):
     header = (
         f"# Market Chronicle (Backfill) {date_str}\n\n"
         f"트리거: {event['trigger']}\n"
-        f"작성일: {datetime.now(KST).isoformat()} (사후 소급)\n\n"
+        f"작성일: {kst_iso_now()} (사후 소급)\n\n"
     )
     full_md = header + report_body
     drive_client.write_text_relative(rel_path, full_md, mime_type="text/markdown")
 
-    summary = _parse_guideline_summary(report_body)
-    keyphrases = _build_keyphrases(report_body, event)
-    keywords = _legacy_keyword_view(keyphrases)
+    summary = chronicle_common.parse_guideline_summary(report_body)
+    keyphrase_list = chronicle_common.build_keyphrases(
+        report_body,
+        vix=event.get("vix_close", 0),
+        kospi_chg=event.get("kospi_chg", 0),
+        kosdaq_chg=event.get("kosdaq_chg", 0),
+    )
+    keyword_list = derive_tokens(keyphrase_list)[:20]
     regime = _build_regime(event)
 
-    index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"version": 1, "entries": []}
-    index.setdefault("entries", []).append(
+    drive_client.append_index_entry(
         {
             "id": str(uuid.uuid4())[:8],
             "date": date_str,
-            "keyphrases": keyphrases,
-            "keywords": keywords,
+            "keyphrases": keyphrase_list,
+            "keywords": keyword_list,
             "regime": regime,
             "guideline_summary": summary,
             "report_rel_path": rel_path,
@@ -355,7 +298,6 @@ def _write_chronicle_for_event(event):
             "source": "backfill",
         }
     )
-    drive_client.write_json_relative(MASTER_INDEX_REL, index)
     return True, summary
 
 
@@ -366,11 +308,7 @@ def run_backfill(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS):
     notify_fn: 슬랙 등 알림 콜백(str). None 이면 print.
     delay_sec: 리포트 1건 완료 후 다음 호출까지 sleep 초.
     """
-    def _emit(msg):
-        if notify_fn:
-            notify_fn(msg)
-        else:
-            print(msg, flush=True)
+    _emit = chronicle_common.make_emitter(notify_fn)
 
     if not drive_client.is_drive_enabled():
         _emit("[Backfill] Drive 가 비활성 상태입니다. 작업을 진행할 수 없습니다.")
@@ -464,38 +402,13 @@ def run_backfill(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS):
 
 
 def _delete_file_at_rel_path(rel_path):
-    """rel_path 위치의 파일을 Drive 에서 찾아 삭제한다.
+    """[Deprecated] drive_client.delete_file_relative 의 호환 wrapper.
 
-    Returns:
-        True  - 실제 삭제 수행
-        False - 파일이 처음부터 없거나 이미 삭제됨 (idempotent)
-
-    주의: ``drive_client._find_file_in_parent`` 는 file ID 문자열이 아니라
-    ``{"id", "name", "mimeType"}`` 형태의 dict 를 반환한다. file_id 만 추출해서
-    ``delete_file_by_id`` 로 넘겨야 한다.
+    v3.3 리팩토링으로 Drive 캡슐화가 강화되어, 본 함수는 단순 위임만 한다.
+    신규 호출부는 ``drive_client.delete_file_relative(rel_path)`` 를 직접
+    사용해야 한다.
     """
-    try:
-        svc, _root_id, parent_id, filename = drive_client._folder_id_for_relative(rel_path)
-        found = drive_client._find_file_in_parent(svc, parent_id, filename)
-    except Exception as exc:
-        print(f"Log: [Backfill] {rel_path} 조회 실패: {exc}", flush=True)
-        return False
-
-    if not found:
-        return False
-    file_id = found.get("id") if isinstance(found, dict) else str(found)
-    if not file_id:
-        return False
-
-    try:
-        drive_client.delete_file_by_id(file_id)
-        return True
-    except Exception as exc:
-        msg = str(exc)
-        if "404" in msg or "notFound" in msg or "File not found" in msg:
-            return False
-        print(f"Log: [Backfill] {rel_path} 삭제 실패: {exc}", flush=True)
-        return False
+    return drive_client.delete_file_relative(rel_path)
 
 
 BACKFILL_HEADER_MARKER = "Market Chronicle (Backfill)"
@@ -571,11 +484,7 @@ def diagnose_reports(notify_fn=None):
             "index_tday": int,
         }
     """
-    def _emit(msg):
-        if notify_fn:
-            notify_fn(msg)
-        else:
-            print(msg, flush=True)
+    _emit = chronicle_common.make_emitter(notify_fn)
 
     if not drive_client.is_drive_enabled():
         _emit("[Backfill Diagnose] Drive 가 비활성 상태입니다.")
@@ -587,9 +496,9 @@ def diagnose_reports(notify_fn=None):
             return {}
 
     try:
-        index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"entries": []}
+        index = drive_client.read_master_index()
     except Exception:
-        index = {"entries": []}
+        index = {"version": 1, "entries": []}
     entries = [e for e in index.get("entries", []) if isinstance(e, dict)]
     registered_paths = {e.get("report_rel_path") for e in entries if e.get("report_rel_path")}
     index_backfill = sum(1 for e in entries if e.get("source") == "backfill")
@@ -654,11 +563,7 @@ def purge_leftover_backfill_reports(notify_fn=None, dry_run=False):
     Returns:
         {"scanned": int, "leftover_targets": int, "deleted": int}
     """
-    def _emit(msg):
-        if notify_fn:
-            notify_fn(msg)
-        else:
-            print(msg, flush=True)
+    _emit = chronicle_common.make_emitter(notify_fn)
 
     if not drive_client.is_drive_enabled():
         _emit("[Backfill Leftover] Drive 가 비활성 상태입니다.")
@@ -670,9 +575,9 @@ def purge_leftover_backfill_reports(notify_fn=None, dry_run=False):
             return {"scanned": 0, "leftover_targets": 0, "deleted": 0}
 
     try:
-        index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"entries": []}
+        index = drive_client.read_master_index()
     except Exception:
-        index = {"entries": []}
+        index = {"version": 1, "entries": []}
     registered_paths = {
         (e or {}).get("report_rel_path")
         for e in index.get("entries", [])
@@ -737,11 +642,7 @@ def reset_backfill(delete_reports=False, notify_fn=None):
 
     T-Day 자동 작성된 (source != "backfill") 엔트리는 절대 건드리지 않는다.
     """
-    def _emit(msg):
-        if notify_fn:
-            notify_fn(msg)
-        else:
-            print(msg, flush=True)
+    _emit = chronicle_common.make_emitter(notify_fn)
 
     if not drive_client.is_drive_enabled():
         _emit("[Backfill Reset] Drive 가 비활성 상태입니다.")
@@ -753,7 +654,7 @@ def reset_backfill(delete_reports=False, notify_fn=None):
             _emit(f"[Backfill Reset] Drive 초기화 실패: {msg}")
             return {"removed_entries": 0, "deleted_reports": 0}
 
-    index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"version": 1, "entries": []}
+    index = drive_client.read_master_index()
     entries = index.get("entries", []) or []
     backfill_entries = [e for e in entries if (e.get("source") == "backfill")]
     kept_entries = [e for e in entries if (e.get("source") != "backfill")]
@@ -762,11 +663,11 @@ def reset_backfill(delete_reports=False, notify_fn=None):
     if delete_reports:
         for e in backfill_entries:
             rel = e.get("report_rel_path")
-            if rel and _delete_file_at_rel_path(rel):
+            if rel and drive_client.delete_file_relative(rel):
                 deleted_reports += 1
 
     index["entries"] = kept_entries
-    drive_client.write_json_relative(MASTER_INDEX_REL, index)
+    drive_client.write_master_index(index)
 
     drive_client.write_json_relative(
         BACKFILL_STATE_REL,
@@ -777,7 +678,7 @@ def reset_backfill(delete_reports=False, notify_fn=None):
             "event_details": {},
             "processed": [],
             "skipped": [],
-            "reset_at": datetime.now(KST).isoformat(),
+            "reset_at": kst_iso_now(),
         },
     )
 
@@ -798,13 +699,9 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
         delay_sec: 엔트리 1건 처리 후 대기 초.
         only_backfill: True 이면 source == "backfill" 엔트리만 대상. False 면 전체 엔트리.
     """
-    from src.memory.keyphrase_extractor import extract_keyphrases, derive_tokens
+    from src.memory.keyphrase_extractor import extract_keyphrases
 
-    def _emit(msg):
-        if notify_fn:
-            notify_fn(msg)
-        else:
-            print(msg, flush=True)
+    _emit = chronicle_common.make_emitter(notify_fn)
 
     if not drive_client.is_drive_enabled():
         _emit("[Backfill Reindex] Drive 가 비활성 상태입니다.")
@@ -815,7 +712,7 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
             _emit(f"[Backfill Reindex] Drive 초기화 실패: {msg}")
             return {"updated": 0, "skipped": 0, "failed": 0}
 
-    index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"version": 1, "entries": []}
+    index = drive_client.read_master_index()
     entries = index.get("entries", []) or []
 
     targets = []
@@ -876,10 +773,10 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
 
         entry["keyphrases"] = phrases
         entry["keywords"] = derive_tokens(phrases)[:20]
-        entry["reindexed_at"] = datetime.now(KST).isoformat()
+        entry["reindexed_at"] = kst_iso_now()
         entries[idx] = entry
         index["entries"] = entries
-        drive_client.write_json_relative(MASTER_INDEX_REL, index)
+        drive_client.write_master_index(index)
 
         updated += 1
         _emit(f"[Backfill Reindex] {date_str} 갱신 완료 (구문 {len(phrases)}개)")
@@ -893,11 +790,7 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
 
 def scan_and_save(lookback_days=DEFAULT_LOOKBACK_DAYS, notify_fn=None):
     """스캔 + 슬랙 보고 + Drive 큐 저장까지 한 번에 수행."""
-    def _emit(msg):
-        if notify_fn:
-            notify_fn(msg)
-        else:
-            print(msg, flush=True)
+    _emit = chronicle_common.make_emitter(notify_fn)
 
     if not drive_client.is_drive_enabled():
         _emit("[Backfill] Drive 가 비활성 상태입니다. 스캔만 진행하고 큐 저장은 생략합니다.")

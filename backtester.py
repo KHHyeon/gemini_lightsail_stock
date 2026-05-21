@@ -8,7 +8,7 @@ load_dotenv()
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
-from trade_logger import load_json_from_gdrive
+from src.utils.logger import load_json_from_gdrive
 
 class ThemeBacktester:
     def __init__(self, tickers, start_date, end_date, initial_capital=10000000):

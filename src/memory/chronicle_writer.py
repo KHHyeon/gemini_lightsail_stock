@@ -1,89 +1,24 @@
 # -*- coding: utf-8 -*-
 """T-Day 크로니클 리포트 작성 및 마스터 인덱스 갱신."""
 import uuid
-from datetime import datetime, timezone, timedelta
 
-from src.memory import drive_client
+from src.memory import chronicle_common, drive_client
+from src.memory.keyphrase_extractor import derive_tokens
 from src.strategy import ai_logic as ai_strategy
-
-KST = timezone(timedelta(hours=9))
-MASTER_INDEX_REL = drive_client.MASTER_INDEX_REL
+from src.utils.macro_triggers import VIX_WARN, _safe_float, evaluate_chronicle_trigger
+from src.utils.timekit import now_kst
 
 
 def should_write_chronicle(macro):
-    """코스피/코스닥 +-1.5% 또는 VIX>=25."""
-    try:
-        vix = float(macro.get("VIX", 0) or 0)
-    except (TypeError, ValueError):
-        vix = 0.0
-    if vix >= 25:
-        return True, f"VIX {vix:.1f}"
+    """코스피/코스닥 +-1.5% 또는 VIX>=25.
 
-    for key, label in (("KOSPI_CHG", "KOSPI"), ("KOSDAQ_CHG", "KOSDAQ")):
-        try:
-            chg = float(macro.get(key, 0) or 0)
-        except (TypeError, ValueError):
-            chg = 0.0
-        if abs(chg) >= 1.5:
-            return True, f"{label} {chg:+.2f}%"
-    return False, ""
-
-
-def _report_rel_path(date_str):
-    y, m, _ = date_str.split("-")
-    return f"{drive_client.CHRONICLES_ROOT}/reports/{y}/{m}/{date_str}_chronicle.md"
-
-
-def _parse_guideline_summary(ai_text):
-    for line in ai_text.splitlines():
-        if "행동 지침" in line or "최종 행동" in line:
-            return line.strip()[:300]
-    lines = [ln.strip() for ln in ai_text.splitlines() if ln.strip()]
-    return lines[-1][:300] if lines else "행동 지침 요약 없음"
-
-
-def _build_keyphrases(ai_text, macro):
+    macro 는 dict 이며, 키워드(`VIX`/`KOSPI_CHG`/`KOSDAQ_CHG`) 누락 시 0 으로 간주.
     """
-    v3.2: 단순 단어 집합 대신 [주체+동사] 결합 핵심 구문을 추출한다.
-    문맥 왜곡(예: "외국인 매수" vs "외국인 매도"를 같다고 인식)을 방지한다.
-    """
-    from src.memory.keyphrase_extractor import extract_keyphrases
-
-    phrases = extract_keyphrases(ai_text, max_phrases=12, ai_enabled=True)
-
-    seen_phrases = {p.get("phrase") for p in phrases}
-
-    def _append(phrase, subject, action, tone):
-        if phrase in seen_phrases:
-            return
-        phrases.append(
-            {"phrase": phrase, "subject": subject, "action": action, "tone": tone}
-        )
-        seen_phrases.add(phrase)
-
-    try:
-        if float(macro.get("VIX", 0) or 0) >= 25:
-            _append("VIX 25 이상 경계", "VIX", "경계", "negative")
-    except (TypeError, ValueError):
-        pass
-    for key, label in (("KOSPI_CHG", "코스피"), ("KOSDAQ_CHG", "코스닥")):
-        try:
-            chg = float(macro.get(key, 0) or 0)
-            if chg <= -1.5:
-                _append(f"{label} 급락 ({chg:+.2f}%)", label, "하락", "negative")
-            elif chg >= 1.5:
-                _append(f"{label} 급등 ({chg:+.2f}%)", label, "상승", "positive")
-        except (TypeError, ValueError):
-            pass
-
-    return phrases[:15]
-
-
-def _legacy_keyword_view(phrases):
-    """검색 폴백/하위 호환용 단어 토큰 (keyphrases 기준 자동 파생)."""
-    from src.memory.keyphrase_extractor import derive_tokens
-
-    return derive_tokens(phrases)[:20]
+    return evaluate_chronicle_trigger(
+        vix=macro.get("VIX", 0),
+        kospi_chg=macro.get("KOSPI_CHG", 0),
+        kosdaq_chg=macro.get("KOSDAQ_CHG", 0),
+    )
 
 
 def _build_chronicle_prompt(macro, us_news, kr_news, trigger_reason):
@@ -118,9 +53,12 @@ def _build_chronicle_prompt(macro, us_news, kr_news, trigger_reason):
 
 
 def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
-    """
-    크로니클 작성. Drive 미준비 시 Pause 후 False 반환.
-    notify_fn: 슬랙 등 알림 콜백 (문자열 1개 인자)
+    """크로니클 작성. Drive 미준비 시 Pause 후 False 반환.
+
+    Args:
+        macro: 매크로 지표 dict (`VIX`/`KOSPI_CHG`/`KOSDAQ_CHG` 키 사용).
+        us_news / kr_news: 뉴스 스니펫.
+        notify_fn: 슬랙 등 알림 콜백 (문자열 1개 인자).
     """
     ok, reason = should_write_chronicle(macro)
     if not ok:
@@ -137,8 +75,8 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
         if not success:
             return False, msg
 
-    today = datetime.now(KST).strftime("%Y-%m-%d")
-    rel_path = _report_rel_path(today)
+    today = now_kst().strftime("%Y-%m-%d")
+    rel_path = chronicle_common.report_rel_path(today)
     if drive_client.file_exists_relative(rel_path):
         return False, f"오늘({today}) 크로니클이 이미 존재합니다."
 
@@ -157,31 +95,32 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
             notify_fn(f"[Chronicles Pause] {e.reason}\n조치: {e.action_required}")
         return False, str(e)
 
-    summary = _parse_guideline_summary(report_body)
-    keyphrases = _build_keyphrases(report_body, macro)
-    keywords = _legacy_keyword_view(keyphrases)
-    regime = ""
-    try:
-        vix = float(macro.get("VIX", 0) or 0)
-        if vix >= 25:
-            regime = f"VIX {vix:.0f} 공포 구간"
-    except (TypeError, ValueError):
-        pass
+    summary = chronicle_common.parse_guideline_summary(report_body)
+    keyphrase_list = chronicle_common.build_keyphrases(
+        report_body,
+        vix=macro.get("VIX", 0),
+        kospi_chg=macro.get("KOSPI_CHG", 0),
+        kosdaq_chg=macro.get("KOSDAQ_CHG", 0),
+    )
+    keyword_list = derive_tokens(keyphrase_list)[:20]
 
-    index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"version": 1, "entries": []}
-    index.setdefault("entries", []).append(
+    regime = ""
+    vix_value = _safe_float(macro.get("VIX", 0))
+    if vix_value >= VIX_WARN:
+        regime = f"VIX {vix_value:.0f} 공포 구간"
+
+    drive_client.append_index_entry(
         {
             "id": str(uuid.uuid4())[:8],
             "date": today,
-            "keyphrases": keyphrases,
-            "keywords": keywords,
+            "keyphrases": keyphrase_list,
+            "keywords": keyword_list,
             "regime": regime,
             "guideline_summary": summary,
             "report_rel_path": rel_path,
             "trigger": reason,
         }
     )
-    drive_client.write_json_relative(MASTER_INDEX_REL, index)
 
     if notify_fn:
         notify_fn(

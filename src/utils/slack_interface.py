@@ -10,7 +10,18 @@ from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
 
 pending_orders = {}
 
-def register_slack_handlers(app, kis, config):
+def register_slack_handlers(app, kis, config, orchestrator):
+    """슬랙 명령 핸들러 등록.
+
+    Args:
+        app: slack_bolt App.
+        kis: KISClient.
+        config: 전역 설정 dict (APP_KEY/SECRET_KEY/URL/CHANNEL_ID 등).
+        orchestrator: MarketOrchestrator. 백필/크로니클/슬랙 송출의 단일
+            게이트웨이로 사용된다. v3.3 리팩토링으로 모든 슬랙 핸들러가
+            ``src.memory.backfill`` 을 직접 import 하지 않고 본 orchestrator
+            의 backfill_* 메서드를 경유한다(라우팅 정합).
+    """
 
     @app.message(re.compile(r"^!명령어", re.IGNORECASE))
     def cmd_help(message, say):
@@ -49,12 +60,10 @@ def register_slack_handlers(app, kis, config):
         m = re.match(r"^!백필스캔(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
         lookback = int(m.group(1)) if (m and m.group(1)) else 60
         say(f"[System] 최근 {lookback}일 변동성 장세 스캔을 시작합니다...")
-
-        def bg_task():
-            from src.memory import backfill
-            backfill.scan_and_save(lookback_days=lookback, notify_fn=say)
-
-        threading.Thread(target=bg_task, daemon=True).start()
+        threading.Thread(
+            target=lambda: orchestrator.backfill_scan(lookback_days=lookback),
+            daemon=True,
+        ).start()
 
     @app.message(re.compile(r"^!백필실행(?:\s+(\d+))?\s*$", re.IGNORECASE))
     def cmd_backfill_run(message, say):
@@ -62,12 +71,10 @@ def register_slack_handlers(app, kis, config):
         m = re.match(r"^!백필실행(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
         delay_sec = int(m.group(1)) if (m and m.group(1)) else 3
         say(f"[System] 저장된 백필 큐를 실행합니다 (건당 {delay_sec}초 대기).")
-
-        def bg_task():
-            from src.memory import backfill
-            backfill.run_backfill(notify_fn=say, delay_sec=delay_sec)
-
-        threading.Thread(target=bg_task, daemon=True).start()
+        threading.Thread(
+            target=lambda: orchestrator.backfill_run(delay_sec=delay_sec),
+            daemon=True,
+        ).start()
 
     @app.message(re.compile(r"^!백필초기화(?:\s+(purge))?\s*$", re.IGNORECASE))
     def cmd_backfill_reset(message, say):
@@ -76,22 +83,15 @@ def register_slack_handlers(app, kis, config):
         purge = bool(m and m.group(1))
         warn = " (리포트 .md 까지 삭제)" if purge else " (master_index 엔트리·state만 제거, .md 보존)"
         say(f"[System] 백필 초기화를 시작합니다.{warn}")
-
-        def bg_task():
-            from src.memory import backfill
-            backfill.reset_backfill(delete_reports=purge, notify_fn=say)
-
-        threading.Thread(target=bg_task, daemon=True).start()
+        threading.Thread(
+            target=lambda: orchestrator.backfill_reset(delete_reports=purge),
+            daemon=True,
+        ).start()
 
     @app.message(re.compile(r"^!백필상태\s*$", re.IGNORECASE))
     def cmd_backfill_diagnose(message, say):
         say("[System] reports 트리와 master_index 정합 상태를 진단합니다 (읽기 전용).")
-
-        def bg_task():
-            from src.memory import backfill
-            backfill.diagnose_reports(notify_fn=say)
-
-        threading.Thread(target=bg_task, daemon=True).start()
+        threading.Thread(target=orchestrator.backfill_diagnose, daemon=True).start()
 
     @app.message(re.compile(r"^!백필(?:잔여정리|고아청소)(?:\s+(dry))?\s*$", re.IGNORECASE))
     def cmd_backfill_purge_leftover(message, say):
@@ -102,12 +102,10 @@ def register_slack_handlers(app, kis, config):
             "[System] master_index 외부의 백필 표식 .md (인덱스 미등록 잔여 파일) 만 정리합니다. "
             + ("(드라이런: 미삭제 보고)" if dry else "(실삭제)")
         )
-
-        def bg_task():
-            from src.memory import backfill
-            backfill.purge_leftover_backfill_reports(notify_fn=say, dry_run=dry)
-
-        threading.Thread(target=bg_task, daemon=True).start()
+        threading.Thread(
+            target=lambda: orchestrator.backfill_purge_leftover(dry_run=dry),
+            daemon=True,
+        ).start()
 
     @app.message(re.compile(r"^!백필재인덱싱(?:\s+(\d+))?\s*$", re.IGNORECASE))
     def cmd_backfill_reindex(message, say):
@@ -118,21 +116,19 @@ def register_slack_handlers(app, kis, config):
             f"[System] 백필 엔트리 재인덱싱을 시작합니다 (.md 보존, keyphrases 재추출, "
             f"건당 {delay_sec}초 대기)."
         )
-
-        def bg_task():
-            from src.memory import backfill
-            backfill.reindex_keyphrases(notify_fn=say, delay_sec=delay_sec)
-
-        threading.Thread(target=bg_task, daemon=True).start()
+        threading.Thread(
+            target=lambda: orchestrator.backfill_reindex(delay_sec=delay_sec),
+            daemon=True,
+        ).start()
 
     @app.message(re.compile(r"^(확인)\s*$"))
     def cmd_backfill_confirm(message, say):
-        from src.memory import backfill, drive_client
+        from src.memory import drive_client
 
         if not drive_client.is_drive_enabled() or not drive_client.is_ready():
             return say("[Info] Drive 가 준비되지 않았습니다. '!백필스캔' 또는 '완료' 명령을 먼저 사용하세요.")
 
-        state = backfill.get_state()
+        state = orchestrator.backfill_get_state()
         queue = state.get("queue") or []
         processed = set(state.get("processed") or [])
         skipped_dates = {it.get("date") for it in state.get("skipped", []) if isinstance(it, dict)}
@@ -143,11 +139,10 @@ def register_slack_handlers(app, kis, config):
             )
 
         say(f"[System] '확인' 응답 수신. 대기 중인 {len(pending)}건의 백필을 실행합니다 (건당 3초 대기).")
-
-        def bg_task():
-            backfill.run_backfill(notify_fn=say, delay_sec=3)
-
-        threading.Thread(target=bg_task, daemon=True).start()
+        threading.Thread(
+            target=lambda: orchestrator.backfill_run(delay_sec=3),
+            daemon=True,
+        ).start()
 
     @app.message(re.compile(r"^!크로니클", re.IGNORECASE))
     def cmd_chronicle_manual(message, say):

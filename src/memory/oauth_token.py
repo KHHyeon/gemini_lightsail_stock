@@ -5,26 +5,24 @@ Drive OAuth 토큰(drive_oauth_token.json) 상태 확인 및 갱신.
 Google Cloud 'Testing' 모드에서는 refresh token 이 만료되거나
 revoke 될 수 있으므로 주기적 확인 및 refresh 가 필요하다.
 """
-import json
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-KST = timezone(timedelta(hours=9))
+from src.utils.jsonio import read_local_json
+from src.utils.paths import project_root
+from src.utils.timekit import KST
+
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 # Testing 모드: refresh token 유효기간이 짧을 수 있음 (약 7일)
 TESTING_MODE_WARN_DAYS = 7
 
 
-def _project_root():
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
 def get_token_path():
     custom = os.getenv("GOOGLE_DRIVE_OAUTH_TOKEN_FILE", "").strip()
     if custom:
         return custom
-    return os.path.join(_project_root(), "drive_oauth_token.json")
+    return os.path.join(project_root(), "drive_oauth_token.json")
 
 
 def token_file_exists():
@@ -32,14 +30,7 @@ def token_file_exists():
 
 
 def _read_token_raw():
-    path = get_token_path()
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
+    return read_local_json(get_token_path(), default=None)
 
 
 def _save_credentials(creds):

@@ -7,9 +7,9 @@ Google Drive API 클라이언트.
 import io
 import json
 import os
-from datetime import datetime, timezone, timedelta
 
-KST = timezone(timedelta(hours=9))
+from src.utils.paths import project_root
+from src.utils.timekit import KST  # noqa: F401  (외부 모듈이 drive_client.KST 로 참조)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 CHRONICLES_ROOT = "MarketChronicles"
@@ -34,10 +34,6 @@ class DrivePausedError(Exception):
 
 class DriveNotConfiguredError(Exception):
     pass
-
-
-def _project_root():
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def get_service_account_path():
@@ -229,11 +225,13 @@ def _get_service():
 
 
 def _now_iso():
-    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+    from src.utils.timekit import kst_strftime
+
+    return kst_strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _local_pause_path():
-    return os.path.join(_project_root(), ".drive_pause_local.json")
+    return os.path.join(project_root(), ".drive_pause_local.json")
 
 
 def _read_local_pause_state():
@@ -473,7 +471,10 @@ def _ensure_chronicle_structure(svc, root_id, force_refresh=False):
         f"{CHRONICLES_ROOT}/temp",
         f"{CHRONICLES_ROOT}/temp/tech",
     ]
-    y, m = datetime.now(KST).strftime("%Y"), datetime.now(KST).strftime("%m")
+    from src.utils.timekit import now_kst
+
+    today_kst_dt = now_kst()
+    y, m = today_kst_dt.strftime("%Y"), today_kst_dt.strftime("%m")
     parts.append(f"{CHRONICLES_ROOT}/reports")
     parts.append(f"{CHRONICLES_ROOT}/reports/{y}")
     parts.append(f"{CHRONICLES_ROOT}/reports/{y}/{m}")
@@ -614,6 +615,76 @@ def delete_file_by_id(file_id):
     _check_pause_guard()
     svc = _get_service()
     svc.files().delete(fileId=file_id, **_shared_drive_kwargs()).execute()
+
+
+def delete_file_relative(rel_path):
+    """상대 경로에 위치한 파일을 Drive 에서 안전하게 삭제.
+
+    Returns:
+        True  - 실제 삭제 수행.
+        False - 파일이 처음부터 없거나 이미 삭제됨 (idempotent).
+
+    내부적으로 _folder_id_for_relative -> _find_file_in_parent ->
+    delete_file_by_id 를 묶어 호출하며, 404 / notFound 응답은 '이미 삭제됨'
+    으로 간주한다. backfill 등 호출자가 _ prefix private 함수를 직접
+    참조하지 않도록 캡슐화한 진입점이다.
+    """
+    try:
+        svc, _root_id, parent_id, filename = _folder_id_for_relative(rel_path)
+        found = _find_file_in_parent(svc, parent_id, filename)
+    except Exception as exc:
+        print(f"Log: [Drive Delete] {rel_path} 조회 실패: {exc}", flush=True)
+        return False
+
+    if not found:
+        return False
+    file_id = found.get("id") if isinstance(found, dict) else str(found)
+    if not file_id:
+        return False
+
+    try:
+        delete_file_by_id(file_id)
+        return True
+    except Exception as exc:
+        msg = str(exc)
+        if "404" in msg or "notFound" in msg or "File not found" in msg:
+            return False
+        print(f"Log: [Drive Delete] {rel_path} 삭제 실패: {exc}", flush=True)
+        return False
+
+
+def read_master_index():
+    """master_index.json 을 안전하게 읽어 dict 로 반환.
+
+    파일이 없거나 비어 있으면 기본 스키마 `{"version": 1, "entries": []}` 반환.
+    """
+    data = read_json_relative(MASTER_INDEX_REL)
+    if not data:
+        return {"version": 1, "entries": []}
+    data.setdefault("version", 1)
+    data.setdefault("entries", [])
+    return data
+
+
+def append_index_entry(entry_dict):
+    """master_index.json 의 entries 리스트에 항목을 append 한 뒤 저장.
+
+    Returns:
+        dict: 갱신된 인덱스 전체.
+    """
+    index_dict = read_master_index()
+    index_dict["entries"].append(entry_dict)
+    write_master_index(index_dict)
+    return index_dict
+
+
+def write_master_index(index_dict):
+    """master_index.json 전체를 덮어쓴다.
+
+    backfill.reset / backfill.reindex 와 같이 entries 를 일괄 필터링·수정한
+    뒤 통째로 저장하는 경우 본 헬퍼를 사용한다.
+    """
+    write_json_relative(MASTER_INDEX_REL, index_dict)
 
 
 def init_drive_or_pause(notify_fn=None):

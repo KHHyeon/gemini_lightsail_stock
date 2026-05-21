@@ -38,30 +38,14 @@ Market Chronicles v3.1 - 과거 데이터 소급 구축 (Back-filling) CLI.
     - .env 의 GOOGLE_API_KEY (Gemini), GOOGLE_DRIVE_OAUTH_CLIENT_FILE 등 설정
 """
 import argparse
-import os
-import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+from _common import load_env_file, print_flush as _print, setup_script_path
+
+ROOT = setup_script_path()
 
 
 def _load_env(env_file=None):
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        print("[WARN] python-dotenv 미설치. 시스템 환경 변수만 사용합니다.")
-        return
-    path = env_file or os.path.join(ROOT, ".env")
-    if os.path.isfile(path):
-        load_dotenv(path, override=True)
-        print(f"  .env 로드: {path}")
-    else:
-        print(f"  [WARN] .env 파일 없음: {path}")
-
-
-def _print(msg):
-    print(msg, flush=True)
+    load_env_file(env_file, verbose=True)
 
 
 def main():

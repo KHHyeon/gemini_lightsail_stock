@@ -123,58 +123,59 @@ def extract_market_context(macro, news_snippets=None):
     v3.2: 단어 토큰 대신 [주체+동사] 구문 후보를 우선 반환한다.
     keyphrase_extractor 의 정규식 폴백을 사용하여 지연 없이 동작한다.
     """
+    from src.memory import chronicle_common
     from src.memory.keyphrase_extractor import extract_query_phrases
+    from src.utils.macro_triggers import (
+        INDEX_SHOCK_PCT,
+        VIX_CRITICAL,
+        VIX_WARN,
+        _safe_float,
+    )
 
     news_snippets = news_snippets or []
     macro_dict = macro if isinstance(macro, dict) else {}
 
-    phrases = extract_query_phrases(news_snippets=news_snippets, macro=macro_dict)
-    seen = {p.get("phrase") for p in phrases}
+    phrase_list = extract_query_phrases(news_snippets=news_snippets, macro=macro_dict)
 
-    def _append(phrase, subject, action, tone):
-        if phrase in seen:
-            return
-        phrases.append(
-            {"phrase": phrase, "subject": subject, "action": action, "tone": tone}
+    vix_value = _safe_float(macro_dict.get("VIX", 20.0), default=20.0)
+    if vix_value >= VIX_CRITICAL:
+        regime = f"극단적 공포 (VIX {vix_value:.0f}+)"
+        chronicle_common.append_phrase_unique(
+            phrase_list, "VIX 극단적 공포", "VIX", "하락", "negative"
         )
-        seen.add(phrase)
-
-    try:
-        vix = float(macro_dict.get("VIX", 20.0) or 20.0)
-    except (TypeError, ValueError):
-        vix = 20.0
-    if vix >= 30:
-        regime = f"극단적 공포 (VIX {vix:.0f}+)"
-        _append("VIX 극단적 공포", "VIX", "하락", "negative")
-    elif vix >= 25:
-        regime = f"공포 확대 (VIX {vix:.0f}+)"
-        _append("VIX 25 이상 경계", "VIX", "경계", "negative")
+    elif vix_value >= VIX_WARN:
+        regime = f"공포 확대 (VIX {vix_value:.0f}+)"
+        chronicle_common.append_phrase_unique(
+            phrase_list, "VIX 25 이상 경계", "VIX", "경계", "negative"
+        )
     else:
         regime = "보통 국면"
 
-    try:
-        kospi_chg = float(macro_dict.get("KOSPI_CHG", 0) or 0)
-    except (TypeError, ValueError):
-        kospi_chg = 0.0
-    if abs(kospi_chg) >= 1.5:
+    kospi_chg = _safe_float(macro_dict.get("KOSPI_CHG", 0))
+    if abs(kospi_chg) >= INDEX_SHOCK_PCT:
         if kospi_chg < 0:
             regime = f"코스피 급락 ({kospi_chg:+.2f}%)"
-            _append("코스피 급락", "코스피", "하락", "negative")
+            chronicle_common.append_phrase_unique(
+                phrase_list, "코스피 급락", "코스피", "하락", "negative"
+            )
         else:
             regime = f"코스피 급등 ({kospi_chg:+.2f}%)"
-            _append("코스피 급등", "코스피", "상승", "positive")
+            chronicle_common.append_phrase_unique(
+                phrase_list, "코스피 급등", "코스피", "상승", "positive"
+            )
 
-    try:
-        kosdaq_chg = float(macro_dict.get("KOSDAQ_CHG", 0) or 0)
-    except (TypeError, ValueError):
-        kosdaq_chg = 0.0
-    if abs(kosdaq_chg) >= 1.5:
+    kosdaq_chg = _safe_float(macro_dict.get("KOSDAQ_CHG", 0))
+    if abs(kosdaq_chg) >= INDEX_SHOCK_PCT:
         if kosdaq_chg < 0:
-            _append("코스닥 급락", "코스닥", "하락", "negative")
+            chronicle_common.append_phrase_unique(
+                phrase_list, "코스닥 급락", "코스닥", "하락", "negative"
+            )
         else:
-            _append("코스닥 급등", "코스닥", "상승", "positive")
+            chronicle_common.append_phrase_unique(
+                phrase_list, "코스닥 급등", "코스닥", "상승", "positive"
+            )
 
-    return phrases, regime
+    return phrase_list, regime
 
 
 def _query_dominant_tone(query_phrases):
@@ -270,7 +271,7 @@ def search_similar_guidelines(query_phrases, regime, top_n=3, min_score=2.0):
     if not drive_client.is_ready():
         return []
     try:
-        index = drive_client.read_json_relative(MASTER_INDEX_REL) or {"entries": []}
+        index = drive_client.read_master_index()
     except Exception:
         return []
 

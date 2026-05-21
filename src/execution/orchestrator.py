@@ -100,6 +100,11 @@ class MarketOrchestrator:
             notify_fn=self.send_slack, dry_run=dry_run
         )
 
+    def backfill_get_state(self):
+        """현재 백필 큐 상태(읽기 전용) 반환. slack '확인' 핸들러용 게이트웨이."""
+        from src.memory import backfill
+        return backfill.get_state()
+
     backfill_purge_orphans = backfill_purge_leftover
 
     def deep_market_routine(self):
@@ -173,28 +178,61 @@ class MarketOrchestrator:
 
 
 
-    def weekly_routine(self):
-        if not market_hours.is_market_open(): return
-        self.send_slack("[System] 주간 투자 이유(상승조건) 유효성 진단을 시작합니다.")
+    def _run_portfolio_report(self, period, news_limit, header_label, *, require_market_open=False, intro=None):
+        """주간/월간/분기 포트폴리오 리포트 공통 실행기.
+
+        Args:
+            period: 'weekly' / 'monthly' / 'quarterly'.
+            news_limit: 종목별 뉴스 수집 limit.
+            header_label: 슬랙 헤더에 노출할 리포트 명칭.
+            require_market_open: True 면 장 중에만 실행.
+            intro: 실행 직전에 보낼 안내 메시지(None 이면 생략).
+        """
+        if require_market_open and not market_hours.is_market_open():
+            return
+        if intro:
+            self.send_slack(intro)
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-        if not portfolio: return
-        news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=3, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
-        report = ai_strategy.get_weekly_portfolio_report(portfolio, news_dict)
-        self.send_slack(f"[주간 이유 확인 리포트]\n\n{report}")
+        if not portfolio:
+            return
+        news_dict = {
+            info["name"]: news_crawler.get_latest_news(
+                info["name"], limit=news_limit, search_type="stock"
+            )
+            for info in portfolio.values()
+            if info.get("quantity", 0) > 0
+        }
+        report_builder_map = {
+            "weekly": ai_strategy.get_weekly_portfolio_report,
+            "monthly": ai_strategy.get_monthly_portfolio_report,
+            "quarterly": ai_strategy.get_quarterly_portfolio_report,
+        }
+        builder = report_builder_map[period]
+        report = builder(portfolio, news_dict)
+        self.send_slack(f"[{header_label}]\n\n{report}")
+
+    def weekly_routine(self):
+        return self._run_portfolio_report(
+            "weekly",
+            news_limit=3,
+            header_label="주간 이유 확인 리포트",
+            require_market_open=True,
+            intro="[System] 주간 투자 이유(상승조건) 유효성 진단을 시작합니다.",
+        )
 
     def monthly_routine(self):
-        portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-        if not portfolio: return
-        news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=4, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
-        report = ai_strategy.get_monthly_portfolio_report(portfolio, news_dict)
-        self.send_slack(f"[월간 시장 트렌드 및 리밸런싱 리포트]\n\n{report}")
+        return self._run_portfolio_report(
+            "monthly",
+            news_limit=4,
+            header_label="월간 시장 트렌드 및 리밸런싱 리포트",
+        )
 
     def quarterly_routine(self):
-        portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-        if not portfolio: return
-        news_dict = {info["name"]: news_crawler.get_latest_news(info["name"], limit=5, search_type="stock") for info in portfolio.values() if info.get("quantity", 0) > 0}
-        report = ai_strategy.get_quarterly_portfolio_report(portfolio, news_dict)
-        self.send_slack(f"[분기 핵심 실적 및 펀더멘털 점검 리포트]\n\n{report}")
+        return self._run_portfolio_report(
+            "quarterly",
+            news_limit=5,
+            header_label="분기 핵심 실적 및 펀더멘털 점검 리포트",
+        )
 
     def alert_manual_stocks(self):
         if not market_hours.is_market_open(): return

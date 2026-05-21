@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-# File: ~/my_bot/order_manager.py
-import requests
-import json
+"""LIVE/PAPER 주문 집행. KIS POST 호출은 kis_api._call_kis 로 일원화."""
 import os
-from datetime import datetime
-from src.data import chart
+
+from src.core.kis_api import _call_kis
 from src.utils.logger import record_trade
+from src.utils.timekit import kst_strftime
 
 
 
@@ -29,34 +28,62 @@ class OrderManager:
             mode = os.getenv(env_var, "PAPER").upper()
             
         action = "BUY" if side == "buy" else "SELL"
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+        now_str = kst_strftime("%Y-%m-%d %H:%M:%S")
+
         if mode == "LIVE":
-            path = "/uapi/domestic-stock/v1/trading/order-cash"
             tr_id = "TTTC0802U" if side == "buy" else "TTTC0801U"
-            headers = {
-                "Content-Type": "application/json", "authorization": f"Bearer {self.token}",
-                "appkey": self.app_key, "appsecret": self.secret_key, "tr_id": tr_id, "custtype": "P"
-            }
             payload = {
-                "CANO": self.acc_no[:8], "ACNT_PRDT_CD": self.acc_no[8:],
-                "PDNO": ticker, "ORD_DVSN": "01", 
-                "ORD_QTY": str(int(quantity)), "ORD_UNPR": "0"
+                "CANO": self.acc_no[:8],
+                "ACNT_PRDT_CD": self.acc_no[8:],
+                "PDNO": ticker,
+                "ORD_DVSN": "01",
+                "ORD_QTY": str(int(quantity)),
+                "ORD_UNPR": "0",
             }
-            try:
-                res = requests.post(f"{self.base_url}{path}", headers=headers, json=payload)
-                data = res.json()
-                if res.status_code == 200 and data.get('rt_cd') == '0':
-                    record_trade(ticker, name, action, current_price, quantity, f"[LIVE-{mode_type}] {reason}", strategy_tag=strategy_tag, purchase_date=now_str)
-                    return {"success": True, "msg": f"[실전 {action} 체결] {name}({ticker}) {quantity}주 시장가 주문 접수 완료\n- 사유: {reason}\n- 태그: {strategy_tag}"}
-                else:
-                    error_msg = data.get('msg1', '알 수 없는 API 거부')
-                    return {"success": False, "msg": f"[실전 주문 실패] {error_msg}"}
-            except Exception as e:
-                return {"success": False, "msg": f"[실전 통신 에러] {str(e)}"}
-        else:
-            record_trade(ticker, name, action, current_price, quantity, f"[PAPER-{mode_type}] {reason}", strategy_tag=strategy_tag, purchase_date=now_str)
-            return {"success": True, "msg": f"[모의 {action}] {name}({ticker}) {quantity}주 @ {current_price}원\n- 사유: {reason}\n- 태그: {strategy_tag}"}
+            data = _call_kis(
+                self.base_url,
+                self.app_key,
+                self.secret_key,
+                self.token,
+                tr_id=tr_id,
+                endpoint="/uapi/domestic-stock/v1/trading/order-cash",
+                method="POST",
+                custtype="P",
+                json_body=payload,
+                timeout=10,
+            )
+            if data is None:
+                return {"success": False, "msg": "[실전 통신 에러] KIS API 호출 실패"}
+            if data.get("rt_cd") == "0":
+                record_trade(
+                    ticker, name, action, current_price, quantity,
+                    f"[LIVE-{mode_type}] {reason}",
+                    strategy_tag=strategy_tag, purchase_date=now_str,
+                )
+                return {
+                    "success": True,
+                    "msg": (
+                        f"[실전 {action} 체결] {name}({ticker}) {quantity}주 시장가 주문 접수 완료\n"
+                        f"- 사유: {reason}\n- 태그: {strategy_tag}"
+                    ),
+                }
+            return {
+                "success": False,
+                "msg": f"[실전 주문 실패] {data.get('msg1', '알 수 없는 API 거부')}",
+            }
+
+        record_trade(
+            ticker, name, action, current_price, quantity,
+            f"[PAPER-{mode_type}] {reason}",
+            strategy_tag=strategy_tag, purchase_date=now_str,
+        )
+        return {
+            "success": True,
+            "msg": (
+                f"[모의 {action}] {name}({ticker}) {quantity}주 @ {current_price}원\n"
+                f"- 사유: {reason}\n- 태그: {strategy_tag}"
+            ),
+        }
 
 
     def simulate_split_buy(self, ticker, name, total_budget, current_price, reason):

@@ -15,25 +15,15 @@
 """
 import argparse
 import os
-import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+from _common import load_env_file, setup_script_path
+
+ROOT = setup_script_path()
 
 
 def _load_env(env_file):
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        print("[WARN] python-dotenv 미설치. 시스템 환경 변수만 사용합니다.")
-        return
-    path = env_file or os.path.join(ROOT, ".env")
-    if os.path.isfile(path):
-        load_dotenv(path, override=True)
-        print(f"  .env 로드: {path}")
-    else:
-        print(f"  [WARN] .env 파일 없음: {path}")
+    loaded = load_env_file(env_file, verbose=True)
+    if not loaded and not env_file:
         print("  시스템 환경 변수 또는 --credentials / --folder-id 인자를 사용하세요.")
 
 

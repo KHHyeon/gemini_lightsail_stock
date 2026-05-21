@@ -2,9 +2,10 @@
 import time
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
 import io
 from contextlib import redirect_stdout
+
+from src.core.kis_api import _call_kis
 from src.data import chart as chart_data
 
 
@@ -132,19 +133,22 @@ def validate_value_track(val, ohlcv):
     return False, []
 
 def get_market_cap(base_url, app_key, secret_key, token, ticker):
-    """ 시가총액 조회 (FHKST01010100 활용) """
-    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
-    headers = {
-        "Content-Type": "application/json", "authorization": f"Bearer {token}",
-        "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST01010100"
-    }
-    params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    """ 시가총액 조회 (FHKST01010100 활용, 단위: 원). """
+    data = _call_kis(
+        base_url,
+        app_key,
+        secret_key,
+        token,
+        tr_id="FHKST01010100",
+        endpoint="/uapi/domestic-stock/v1/quotations/inquire-price",
+        params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker},
+    )
+    if not data:
+        return 0
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200:
-            return int(res.json().get("output", {}).get("hts_avls", "0")) * 1000000 # 백만원 단위 -> 원
-    except: pass
-    return 0
+        return int((data.get("output") or {}).get("hts_avls", "0") or 0) * 1000000
+    except (TypeError, ValueError):
+        return 0
 
 def run_3track_screener(track_name, raw_candidates, base_url, app_key, secret_key, token):
     """ HTS 트랙별 특화 스크리너 """
@@ -199,78 +203,89 @@ def run_3track_screener(track_name, raw_candidates, base_url, app_key, secret_ke
 
 
 def get_basic_valuation(base_url, app_key, secret_key, token, ticker):
-    # FHKST01010100: 주식 현재가 시세
-    url_price = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
-    headers = {
-        "Content-Type": "application/json", "authorization": f"Bearer {token}",
-        "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST01010100"
-    }
+    """주가/PER/PBR/거래대금 + ROE/배당수익률 (FHKST01010100 + FHKST03010300)."""
     params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
-    time.sleep(0.1)
-    
-    res_val = {"current_price": 0, "pbr": 0.0, "per": 0.0, "roe": 0.0, "tr_amount": 0, "dvd_yld": 0.0}
-    
-    try:
-        res = requests.get(url_price, headers=headers, params=params, timeout=5)
-        if res.status_code == 200:
-            data = res.json().get("output", {})
-            res_val["current_price"] = int(data.get("stck_prpr", "0") or 0)
-            res_val["pbr"] = float(data.get("pbr", "0") or 0.0)
-            res_val["per"] = float(data.get("per", "0") or 0.0)
-            res_val["tr_amount"] = int(data.get("acml_tr_pbmn", "0") or 0)
-    except: pass
+    endpoint = "/uapi/domestic-stock/v1/quotations/inquire-price"
 
-    # FHKST03010300: 주식 가치지표 (실제 ROE, 배당수익률 등)
-    headers["tr_id"] = "FHKST03010300"
+    res_val = {
+        "current_price": 0,
+        "pbr": 0.0,
+        "per": 0.0,
+        "roe": 0.0,
+        "tr_amount": 0,
+        "dvd_yld": 0.0,
+    }
+
     time.sleep(0.1)
-    try:
-        res = requests.get(url_price, headers=headers, params=params, timeout=5)
-        if res.status_code == 200:
-            data = res.json().get("output", {})
-            res_val["roe"] = float(data.get("roe", "0") or 0.0)
-            res_val["dvd_yld"] = float(data.get("dvd_yld", "0") or 0.0)
-    except: pass
-    
+    data1 = _call_kis(
+        base_url, app_key, secret_key, token,
+        tr_id="FHKST01010100", endpoint=endpoint, params=params,
+    )
+    if data1:
+        output = data1.get("output") or {}
+        try:
+            res_val["current_price"] = int(output.get("stck_prpr", "0") or 0)
+            res_val["pbr"] = float(output.get("pbr", "0") or 0.0)
+            res_val["per"] = float(output.get("per", "0") or 0.0)
+            res_val["tr_amount"] = int(output.get("acml_tr_pbmn", "0") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    time.sleep(0.1)
+    data2 = _call_kis(
+        base_url, app_key, secret_key, token,
+        tr_id="FHKST03010300", endpoint=endpoint, params=params,
+    )
+    if data2:
+        output = data2.get("output") or {}
+        try:
+            res_val["roe"] = float(output.get("roe", "0") or 0.0)
+            res_val["dvd_yld"] = float(output.get("dvd_yld", "0") or 0.0)
+        except (TypeError, ValueError):
+            pass
+
     return res_val
 
 def get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker):
-    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-investor"
-    headers = {
-        "Content-Type": "application/json", "authorization": f"Bearer {token}",
-        "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST01010900"
-    }
-    params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    """외국인/기관 일별 순매수 누적 합 (FHKST01010900)."""
     time.sleep(0.2)
-    frgn_net, orgn_net = 0, 0
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200:
-            daily_data = res.json().get("output2", [])
-            for day in daily_data:
-                frgn_net += int(day.get("frgn_ntby_qty", "0"))
-                orgn_net += int(day.get("orgn_ntby_qty", "0"))
-    except: pass
+    data = _call_kis(
+        base_url, app_key, secret_key, token,
+        tr_id="FHKST01010900",
+        endpoint="/uapi/domestic-stock/v1/quotations/inquire-investor",
+        params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker},
+    )
+    if not data:
+        return 0, 0
+    frgn_net = 0
+    orgn_net = 0
+    for day in data.get("output2", []) or []:
+        try:
+            frgn_net += int(day.get("frgn_ntby_qty", "0") or 0)
+            orgn_net += int(day.get("orgn_ntby_qty", "0") or 0)
+        except (TypeError, ValueError):
+            continue
     return frgn_net, orgn_net
 
+
 def get_kis_growth_metrics(base_url, app_key, secret_key, token, ticker):
-    # FHKST03010400: 국내주식 성장성지표 조회
-    url = f"{base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
-    headers = {
-        "Content-Type": "application/json", "authorization": f"Bearer {token}",
-        "appkey": app_key, "appsecret": secret_key, "tr_id": "FHKST03010400"
-    }
-    params = {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker}
+    """성장성 지표 (FHKST03010400). Returns: (sales_growth, op_growth, turnaround)."""
     time.sleep(0.1)
+    data = _call_kis(
+        base_url, app_key, secret_key, token,
+        tr_id="FHKST03010400",
+        endpoint="/uapi/domestic-stock/v1/quotations/inquire-price",
+        params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": ticker},
+    )
+    if not data:
+        return 0.0, 0.0, False
+    output = data.get("output") or {}
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=5)
-        if res.status_code == 200:
-            data = res.json().get("output", {})
-            sales_growth = float(data.get("gr_sales", "0") or 0.0)
-            op_growth = float(data.get("gr_op_profit", "0") or 0.0)
-            # 증가율이 매우 높으면(100% 이상) 턴어라운드 가능성이 높은 것으로 간주
-            return sales_growth, op_growth, (op_growth > 100)
-    except: pass
-    return 0.0, 0.0, False
+        sales_growth = float(output.get("gr_sales", "0") or 0.0)
+        op_growth = float(output.get("gr_op_profit", "0") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0, 0.0, False
+    return sales_growth, op_growth, (op_growth > 100)
 
 def run_condition_screener(kis_client, target_condition_name):
     print(f"Log: [Screener] '{target_condition_name}' 탐색 시작...")
