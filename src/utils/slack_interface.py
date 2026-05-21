@@ -500,7 +500,8 @@ def register_slack_handlers(app, kis, config, orchestrator):
             sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
             reason = f"수동등록 | {sum_match.group(1).strip() if sum_match else 'AI 팩트체크 완료'}"
             from src.utils import logger
-            logger.record_trade(ticker, name, "BUY", avg_price, qty, reason, strategy_tag=strategy_tag)
+            logger.record_trade(ticker, name, "BUY", avg_price, qty, reason,
+                                mode_type="PAPER_ONLY", strategy_tag=strategy_tag)
             say(f"[Success] {name}({ticker}) {strategy_tag} 등록 완료.\n\n{report}")
         threading.Thread(target=bg_task, daemon=True).start()
 

@@ -52,15 +52,26 @@ def save_json_to_gdrive(data, filename):
     _save_local(data, filename)
 
 
-def record_trade(ticker, name, action, price, quantity, reason, strategy_tag="UNKNOWN", purchase_date=None):
+def record_trade(ticker, name, action, price, quantity, reason, *,
+                 mode_type=None, strategy_tag="UNKNOWN", purchase_date=None):
+    """거래 기록 + 포트폴리오 갱신.
+
+    v3.3.1 패치로 ``mode_type`` 키워드 인자가 추가되었다. ``None`` 이면
+    하위 호환을 위해 종전과 동일하게 ``reason`` 문자열을 인퍼런스한다
+    (`"SMALL" in reason` / `"NORMAL" in reason` → 그 외 ``PAPER_ONLY``).
+    호출부는 가능한 한 ``mode_type=...`` 를 명시 전달한다.
+    """
     trades = load_json_from_gdrive("paper_trades.json") or []
     portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
 
-    mode_type = "PAPER_ONLY"
-    if "SMALL" in reason:
-        mode_type = "SMALL"
-    elif "NORMAL" in reason:
-        mode_type = "NORMAL"
+    if mode_type is None:
+        # 하위 호환 폴백: reason 문자열 인퍼런스 (점진 마이그레이션 후 제거 예정)
+        if "SMALL" in reason:
+            mode_type = "SMALL"
+        elif "NORMAL" in reason:
+            mode_type = "NORMAL"
+        else:
+            mode_type = "PAPER_ONLY"
 
     current_kst = now_kst()
     if not purchase_date:

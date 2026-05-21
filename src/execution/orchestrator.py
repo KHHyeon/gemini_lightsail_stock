@@ -5,7 +5,7 @@ from src.core import token_manager
 from src.data import collector as macro_collector, chart as chart_data
 from src.data.crawler import news_crawler, research_crawler, stock_info_crawler
 from src.strategy import ai_logic as ai_strategy, screener as quant_screener
-from src.execution.order import OrderManager
+from src.execution.order import OrderManager, OrderRequest
 from src.utils import helpers as market_hours
 from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
 
@@ -303,7 +303,11 @@ class MarketOrchestrator:
                     report_comment = f"\n- 코멘트: {report}"
             
             if trigger_reason:
-                res = order_mgr.execute_order(ticker, name, qty, current_price, "sell", trigger_reason, mode_type)
+                res = order_mgr.submit(OrderRequest(
+                    ticker=ticker, name=name, quantity=qty,
+                    current_price=current_price, side="sell",
+                    reason=trigger_reason, mode_type=mode_type,
+                ))
                 messages.append(res["msg"] + report_comment)
                 keys_to_delete.append(ticker)
                 
@@ -373,7 +377,13 @@ class MarketOrchestrator:
             if current_price <= ma5 * threshold:
                 qty = int(daily_budget // current_price)
                 if qty > 0:
-                    res = order_mgr.execute_order(ticker, name, qty, current_price, "buy", f"{info['reason']} ({11-info['remaining_days']}/10회차)", info.get("mode_type", "PAPER_ONLY"), strategy_tag=info.get("strategy_tag", "UNKNOWN"))
+                    res = order_mgr.submit(OrderRequest(
+                        ticker=ticker, name=name, quantity=qty,
+                        current_price=current_price, side="buy",
+                        reason=f"{info['reason']} ({11-info['remaining_days']}/10회차)",
+                        mode_type=info.get("mode_type", "PAPER_ONLY"),
+                        strategy_tag=info.get("strategy_tag", "UNKNOWN"),
+                    ))
 
                     messages.append(res["msg"])
                     info["remaining_days"] -= 1

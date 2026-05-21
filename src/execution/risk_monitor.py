@@ -10,7 +10,7 @@ v3.3 리팩토링:
 import time
 
 from src.core import token_manager
-from src.execution.order import OrderManager
+from src.execution.order import OrderManager, OrderRequest
 from src.utils import helpers as market_hours
 from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
 from src.utils.timekit import now_kst
@@ -111,10 +111,11 @@ def run_risk_monitor(kis_client, config, send_slack):
             sell_reason = "최고점 대비 하락선 이탈 (추적 매도 -10%)"
 
         if sell_reason:
-            res = order_mgr.execute_order(
-                ticker, info.get("name", ticker), qty, current_price, "sell",
-                sell_reason, mode_type,
-            )
+            res = order_mgr.submit(OrderRequest(
+                ticker=ticker, name=info.get("name", ticker),
+                quantity=qty, current_price=current_price, side="sell",
+                reason=sell_reason, mode_type=mode_type,
+            ))
             message_list.append(res["msg"])
             keys_to_delete_list.append(ticker)
 

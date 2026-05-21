@@ -5,6 +5,18 @@ KIS Open API 호출 클라이언트.
 v3.3 리팩토링으로 ``_call_kis`` 단일 호출 헬퍼를 도입하여 헤더 구성·요청
 실행·예외/타임아웃 처리·응답 파싱 패턴의 중복을 제거한다.
 
+v3.3.1 패치로 ``_call_kis`` 에 재시도·백오프 정책을 도입한다.
+
+재시도 정책 (요약):
+
+- ``method='GET'``: 기본 ``max_retries=2`` (총 시도 3회). 백오프는
+  ``backoff_base * (2 ** attempt)`` 초로 0.5s → 1.0s 지수 증가.
+  재시도 트리거는 ``Timeout`` / ``ConnectionError`` / HTTP 5xx / HTTP 429.
+  그 외 4xx (400/401/403/404 등) 는 즉시 ``None`` 반환 (인증·권한·필드
+  오류는 재시도해도 결과가 동일하다).
+- ``method='POST'``: **항상 0회 재시도** (중복 주문 방지). 호출부에서
+  ``max_retries`` 를 명시하더라도 강제로 0 으로 덮어쓴다.
+
 본 모듈은 두 가지 진입점을 제공한다.
 
 1. 모듈 함수 ``_call_kis(base_url, app_key, secret_key, token, tr_id,
@@ -17,6 +29,7 @@ v3.3 리팩토링으로 ``_call_kis`` 단일 호출 헬퍼를 도입하여 헤�
    주입하여 KISClient 내부 메서드들이 단일 호출 패턴을 공유하도록 한다.
 """
 import os
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -25,6 +38,9 @@ load_dotenv()
 
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 DEFAULT_TIMEOUT_SEC = 5
+DEFAULT_GET_RETRIES = 2  # GET 기본 재시도 횟수 (총 시도 3회)
+DEFAULT_BACKOFF_BASE = 0.5  # 지수 백오프 base 초 (0.5 → 1.0)
+_RETRY_STATUS_SET = {429, 500, 502, 503, 504}
 
 
 def _build_kis_headers(app_key, secret_key, token, tr_id, custtype=None):
@@ -54,8 +70,10 @@ def _call_kis(
     custtype=None,
     timeout=DEFAULT_TIMEOUT_SEC,
     json_body=None,
+    max_retries=None,
+    backoff_base=DEFAULT_BACKOFF_BASE,
 ):
-    """KIS API 단일 호출 헬퍼 (모듈 함수형).
+    """KIS API 단일 호출 헬퍼 (모듈 함수형, 재시도·백오프 포함).
 
     Args:
         base_url: KIS API 베이스 URL (예: 'https://openapi.koreainvestment.com:9443').
@@ -67,25 +85,49 @@ def _call_kis(
         custtype: 'P' 등 추가 헤더 (조건검색에 사용).
         timeout: 요청 타임아웃 초.
         json_body: POST 시 body. method='POST' 일 때만 사용.
+        max_retries: 재시도 횟수. GET 기본 ``DEFAULT_GET_RETRIES``(=2),
+            POST 는 어떤 값이 들어와도 0 으로 강제. ``None`` 이면 기본값 적용.
+        backoff_base: 지수 백오프 base 초 (기본 0.5).
 
     Returns:
         dict|None: 응답 JSON. 네트워크/HTTP 오류 시 None.
     """
+    method_upper = method.upper()
+    if method_upper == "POST":
+        retries = 0  # 주문·체결 등 비멱등 호출은 재시도 금지
+    else:
+        retries = DEFAULT_GET_RETRIES if max_retries is None else max(0, int(max_retries))
+
     headers = _build_kis_headers(app_key, secret_key, token, tr_id, custtype=custtype)
     url = f"{base_url}{endpoint}"
-    try:
-        if method.upper() == "POST":
-            res = requests.post(url, headers=headers, json=json_body, timeout=timeout)
-        else:
-            res = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
-        if res.status_code != 200:
-            return None
+
+    for attempt in range(retries + 1):
         try:
-            return res.json()
-        except ValueError:
+            if method_upper == "POST":
+                res = requests.post(url, headers=headers, json=json_body, timeout=timeout)
+            else:
+                res = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError):
+            # 네트워크 일시 장애는 재시도 대상
+            if attempt < retries:
+                time.sleep(backoff_base * (2 ** attempt))
+                continue
             return None
-    except requests.RequestException:
+        except requests.RequestException:
+            return None
+
+        status = res.status_code
+        if status == 200:
+            try:
+                return res.json()
+            except ValueError:
+                return None
+        # 5xx / 429 만 재시도 대상. 그 외 4xx 는 즉시 None.
+        if status in _RETRY_STATUS_SET and attempt < retries:
+            time.sleep(backoff_base * (2 ** attempt))
+            continue
         return None
+    return None
 
 
 class KISClient:
@@ -104,8 +146,12 @@ class KISClient:
         self.token = token
 
     def _call_kis(self, tr_id, endpoint, params=None, *, method="GET",
-                  custtype=None, timeout=DEFAULT_TIMEOUT_SEC, json_body=None):
-        """인스턴스 컨텍스트(base_url/keys/token)를 자동 주입하는 헬퍼."""
+                  custtype=None, timeout=DEFAULT_TIMEOUT_SEC, json_body=None,
+                  max_retries=None, backoff_base=DEFAULT_BACKOFF_BASE):
+        """인스턴스 컨텍스트(base_url/keys/token)를 자동 주입하는 헬퍼.
+
+        재시도·백오프 정책은 모듈 함수 ``_call_kis`` 와 동일하다.
+        """
         return _call_kis(
             self.base_url,
             self.app_key,
@@ -118,6 +164,8 @@ class KISClient:
             custtype=custtype,
             timeout=timeout,
             json_body=json_body,
+            max_retries=max_retries,
+            backoff_base=backoff_base,
         )
 
     def get_psbl_cash(self):
