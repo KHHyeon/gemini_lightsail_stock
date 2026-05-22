@@ -305,77 +305,137 @@ def run_condition_screener(kis_client, target_condition_name):
     print(f"Log: [Screener] 조건식 확인 완료. 종목 추출 중...")
     return results
 
+_FINANCIAL_NAME_KEYWORD_LIST = ['지주', '은행', '증권', '보험', '금융']
+
+
+def _is_financial_name(stock_name):
+    return any(kw in (stock_name or "") for kw in _FINANCIAL_NAME_KEYWORD_LIST)
+
+
+def score_single_ticker(ticker, name, base_url, app_key, secret_key, token,
+                        target_theme=None):
+    """단일 종목 펀더멘털 스코어링 헬퍼 (임계값 필터 미적용).
+
+    `run_unified_screener` 의 종목별 산출 로직을 단일 함수로 분리한 것이며,
+    `!ai매수` / `!수동등록` / `!발굴` 세 진입점 모두 본 함수를 사용한다.
+    데이터 부재(주가/거래대금 미달) 시 ``None`` 반환.
+
+    Args:
+        ticker: 종목코드(6자리).
+        name: 종목명(금융업 분류 키워드 판별용).
+        base_url/app_key/secret_key/token: KIS 인증.
+        target_theme: 외부에서 지정한 테마명. ``None`` 이면 산출 결과(금융/성장) 사용.
+
+    Returns:
+        dict | None: ``score``, ``score_details``, ``target_theme``,
+        ``current_price``, ``pbr``, ``per``, ``roe``, ``is_financial``.
+    """
+    if not ticker:
+        return None
+
+    is_financial = _is_financial_name(name)
+
+    val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
+    if val["current_price"] <= 0:
+        return None
+
+    if val["tr_amount"] < 1000000000:
+        print(f"Log: [Liquidity Filter] {name} 탈락 (거래대금 부족)")
+        return None
+
+    score = 0
+    details = []
+
+    chart_60d = chart_data.get_daily_ohlcv(
+        base_url, app_key, secret_key, token, ticker, count=60
+    )
+    if chart_60d and len(chart_60d) >= 60:
+        current_close = chart_60d[0]['close']
+        ma60 = sum(day['close'] for day in chart_60d) / 60
+        if current_close >= ma60:
+            score += 20
+            details.append("차트 정배열(+20)")
+
+    frgn, orgn = get_smart_money_accumulation(
+        base_url, app_key, secret_key, token, ticker
+    )
+    if frgn > 0 or orgn > 0:
+        score += 30
+        details.append("수급 유입(+30)")
+
+    if is_financial:
+        if val["pbr"] > 0 and val["pbr"] <= 1.0:
+            score += 20
+            details.append("저PBR(+20)")
+
+        roe = val.get("roe", 0.0)
+        if roe <= 0:
+            roe = round((val["pbr"] / val["per"]) * 100, 2) if val["per"] > 0 else 0
+        if roe >= 8.0:
+            score += 30
+            details.append("ROE 8% 이상(+30)")
+
+        resolved_theme = target_theme or "우량 금융주"
+    else:
+        sales_growth, op_growth, turnaround = get_kis_growth_metrics(
+            base_url, app_key, secret_key, token, ticker
+        )
+        if sales_growth >= 10.0:
+            score += 25
+            details.append("매출성장(+25)")
+        if op_growth >= 15.0 or turnaround:
+            score += 25
+            details.append("이익성장/턴어라운드(+25)")
+
+        roe = val.get("roe", 0.0)
+        resolved_theme = target_theme or "가치성장 대장주"
+
+    return {
+        "score": score,
+        "score_details": details,
+        "target_theme": resolved_theme,
+        "current_price": val["current_price"],
+        "pbr": val["pbr"],
+        "per": val["per"],
+        "roe": roe,
+        "is_financial": is_financial,
+    }
+
+
 def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token):
-    if not raw_candidates: return []
+    """다종목 스코어링. 비금융 60점 / 금융 80점 이상만 통과."""
+    if not raw_candidates:
+        return []
     final_list = []
-    
-    financial_keywords = ['지주', '은행', '증권', '보험', '금융']
-    
+
     for c in raw_candidates:
         ticker = c.get("ticker")
         stock_name = c.get("name", ticker)
-        if not ticker: continue
-        
-        is_financial = any(kw in stock_name for kw in financial_keywords)
-        
-        val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
-        if val["current_price"] <= 0: continue
-        
-        if val["tr_amount"] < 1000000000:
-            print(f"Log: [Liquidity Filter] {stock_name} 탈락 (거래대금 부족)")
+        if not ticker:
             continue
-            
-        score = 0
-        details = []
-        
-        chart_60d = chart_data.get_daily_ohlcv(base_url, app_key, secret_key, token, ticker, count=60)
-        if chart_60d and len(chart_60d) >= 60:
-            current_close = chart_60d[0]['close']
-            ma60 = sum(day['close'] for day in chart_60d) / 60
-            if current_close >= ma60:
-                score += 20
-                details.append("차트 정배열(+20)")
-                
-        frgn, orgn = get_smart_money_accumulation(base_url, app_key, secret_key, token, ticker)
-        if frgn > 0 or orgn > 0:
-            score += 30
-            details.append("수급 유입(+30)")
-            
-        if is_financial:
-            if val["pbr"] > 0 and val["pbr"] <= 1.0:
-                score += 20
-                details.append("저PBR(+20)")
-            
-            roe = val.get("roe", 0.0)
-            if roe <= 0: # API 데이터 부재 시 추정치 활용
-                roe = round((val["pbr"] / val["per"]) * 100, 2) if val["per"] > 0 else 0
-                
-            if roe >= 8.0:
-                score += 30
-                details.append("ROE 8% 이상(+30)")
-                
-            if score >= 80:
-                c.update({
-                    "current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"], "roe": roe,
-                    "score": score, "score_details": details, "target_theme": c.get("target_theme", "우량 금융주")
-                })
-                final_list.append(c)
-        else:
-            sales_growth, op_growth, turnaround = get_kis_growth_metrics(base_url, app_key, secret_key, token, ticker)
-            if sales_growth >= 10.0:
-                score += 25
-                details.append("매출성장(+25)")
-            if op_growth >= 15.0 or turnaround:
-                score += 25
-                details.append("이익성장/턴어라운드(+25)")
-                
-            if score >= 60:
-                c.update({
-                    "current_price": val["current_price"], "pbr": val["pbr"], "per": val["per"],
-                    "score": score, "score_details": details, "target_theme": c.get("target_theme", "가치성장 대장주")
-                })
-                final_list.append(c)
-        
+
+        scored = score_single_ticker(
+            ticker, stock_name, base_url, app_key, secret_key, token,
+            target_theme=c.get("target_theme"),
+        )
+        if scored is None:
+            continue
+
+        threshold = 80 if scored["is_financial"] else 60
+        if scored["score"] < threshold:
+            continue
+
+        c.update({
+            "current_price": scored["current_price"],
+            "pbr": scored["pbr"],
+            "per": scored["per"],
+            "roe": scored["roe"],
+            "score": scored["score"],
+            "score_details": scored["score_details"],
+            "target_theme": scored["target_theme"],
+        })
+        final_list.append(c)
+
     final_list.sort(key=lambda x: x.get("score", 0), reverse=True)
     return final_list
 

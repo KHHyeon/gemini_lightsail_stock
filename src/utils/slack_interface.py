@@ -375,15 +375,22 @@ def register_slack_handlers(app, kis, config, orchestrator):
         token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
         passed_stocks = quant_screener.run_unified_screener(unique_candidates, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
         if not passed_stocks: return say(f"[결과] {keyword_msg} 관련 종목 중 펀더멘털 스코어 60점 이상 대장주가 없습니다.")
-        theme_memory = load_json_from_gdrive("theme_context.json") or {}
         report_msg = [f"[ 100점 만점 펀더멘털 검증 완료 ({len(passed_stocks)}종목 합격) ]"]
         for p in passed_stocks:
             ticker, name, target_theme = p['ticker'], p['name'], p['target_theme']
-            fundamentals = {"score": p.get('score', 0), "details": ', '.join(p.get('score_details', [])), "pbr": p.get("pbr"), "per": p.get("per")}
-            narrative = ai_strategy.get_theme_stock_narrative(target_theme, name, ticker, fundamentals)
-            theme_memory[ticker] = f"[테마: {target_theme} | 총점: {p.get('score', 0)}]\n{narrative}"
-            report_msg.append(f"\n[ {name} ({ticker}) - {target_theme} | 현재가: {p.get('current_price', 0):,}원 ]\n  - 펀더멘털 총점: {p.get('score', 0)}점\n  - 획득 내역: {fundamentals['details']}\n  - [AI 팩트체크]\n{narrative}")
-        save_json_to_gdrive(theme_memory, "theme_context.json")
+            score = p.get('score', 0)
+            score_details = p.get('score_details', [])
+            details_text = ", ".join(score_details)
+            entry = ai_strategy.register_theme_context(
+                ticker, name, target_theme, score, score_details, p,
+            )
+            narrative = entry.split("\n", 1)[1] if "\n" in entry else entry
+            report_msg.append(
+                f"\n[ {name} ({ticker}) - {target_theme} | 현재가: {p.get('current_price', 0):,}원 ]"
+                f"\n  - 펀더멘털 총점: {score}점"
+                f"\n  - 획득 내역: {details_text}"
+                f"\n  - [AI 팩트체크]\n{narrative}"
+            )
         say("\n".join(report_msg))
 
     @app.message(re.compile(r"^!발굴", re.IGNORECASE))
@@ -416,6 +423,81 @@ def register_slack_handlers(app, kis, config, orchestrator):
                 execute_unified_scan(say, all_candidates, keyword)
             threading.Thread(target=bg_task_theme, daemon=True).start()
 
+    def _build_single_stock_report(ticker, fallback_theme, strategy_label, say):
+        """`!ai매수`/`!수동등록` 공통 리포트 생성 헬퍼.
+
+        세 진입점이 동일 흐름을 따르도록 통합한다:
+        1) 종목 메타 조회(ETF 차단 포함)
+        2) ``score_single_ticker`` 로 펀더멘털 점수 산출
+        3) ``register_theme_context`` 로 ``theme_context.json`` 단일 규칙 저장
+        4) ``get_multi_agent_investment_report`` 호출(``fundamental_score`` 전달)
+
+        Returns:
+            dict: 실패 시 ``{"ok": False}``. 성공 시 ``ok=True`` 와 함께
+                ``report``, ``score``, ``ctx_text``, ``val``, ``target_theme``,
+                ``opinion_code``, ``opinion_final``, ``opinion_delta``,
+                ``ai_review_reason`` 키를 포함.
+        """
+        failure = {"ok": False}
+        try:
+            name, div, is_etf = stock_info_crawler.get_stock_info_naver(ticker)
+            if is_etf:
+                say(f"[거절] {name}({ticker})은(는) ETF 종목입니다.")
+                return failure
+
+            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+            kis.set_token(token)
+            val = kis.get_valuation_data(ticker) or {}
+            if int(val.get("current_price", 0) or 0) <= 0:
+                say(f"[에러] {name} 주가 데이터를 가져오지 못했습니다.")
+                return failure
+            val.update({"div_yield": div, "name": name})
+
+            scored = quant_screener.score_single_ticker(
+                ticker, name, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token,
+            )
+            if scored is None:
+                score, score_details = 0, []
+                target_theme = fallback_theme
+            else:
+                score = scored["score"]
+                score_details = scored["score_details"]
+                target_theme = scored["target_theme"] or fallback_theme
+                val.setdefault("pbr", scored["pbr"])
+                val.setdefault("per", scored["per"])
+                val.setdefault("roe", scored["roe"])
+
+            ctx_text = ai_strategy.register_theme_context(
+                ticker, name, target_theme, score, score_details, val,
+            )
+
+            chart_30d = chart_data.get_daily_ohlcv(
+                config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, ticker, count=30,
+            )
+            macro = macro_collector.get_macro_indicators()
+            portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+            news = news_crawler.get_latest_news(name, limit=5, search_type="stock")
+
+            report, meta = ai_strategy.get_multi_agent_investment_report(
+                ticker, name, chart_30d, macro, portfolio, val, ctx_text, news,
+                fundamental_score=score, fundamental_details=score_details,
+            )
+            return {
+                "ok": True,
+                "report": report,
+                "score": score,
+                "ctx_text": ctx_text,
+                "val": val,
+                "target_theme": target_theme,
+                "opinion_code": meta.get("opinion_code"),
+                "opinion_final": meta.get("opinion_final"),
+                "opinion_delta": meta.get("opinion_delta", 0),
+                "ai_review_reason": meta.get("ai_review_reason", ""),
+            }
+        except Exception as exc:
+            say(f"[Error] {strategy_label} 분석 중 오류: {exc}")
+            return failure
+
     @app.message(re.compile(r"^!ai매수", re.IGNORECASE))
     def ai_buy_stock(message, say):
         text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
@@ -425,29 +507,44 @@ def register_slack_handlers(app, kis, config, orchestrator):
         budget = int(re.sub(r'[^\d]', '', parts[2]))
         def bg_task():
             try:
-                name, div, is_etf = stock_info_crawler.get_stock_info_naver(ticker)
-                if is_etf: return say(f"[거절] {name}({ticker})은(는) ETF 종목입니다.")
+                result = _build_single_stock_report(
+                    ticker, fallback_theme="AI매수(단일종목)", strategy_label="AI매수",
+                    say=say,
+                )
+                if not result.get("ok"):
+                    return
+                report = result["report"]
+                val = result["val"]
+                score = result["score"]
+                name = val.get("name", ticker)
                 actual_mode = os.getenv("TRADING_MODE_NORMAL", "PAPER").upper()
                 say(f"[System] {name}({ticker}) AI 보고서 작성 중... ({actual_mode})")
-                token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
-                kis.set_token(token)
-                val = kis.get_valuation_data(ticker)
-                if not val or int(val.get("current_price", 0)) <= 0: return say(f"[에러] {name} 주가 데이터를 가져오지 못했습니다.")
-                val.update({"div_yield": div, "name": name})
-                chart_30d = chart_data.get_daily_ohlcv(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, ticker, count=30)
-                macro = macro_collector.get_macro_indicators()
-                pf = load_json_from_gdrive("paper_portfolio.json") or {}
-                theme_mem = load_json_from_gdrive("theme_context.json") or {}
-                news = news_crawler.get_latest_news(name, limit=5, search_type="stock")
-                passed = quant_screener.run_unified_screener([{"ticker": ticker, "name": name}], config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
-                score = passed[0].get("score", 0) if passed else 0
-                report = ai_strategy.get_multi_agent_investment_report(ticker, name, chart_30d, macro, pf, val, theme_mem.get(ticker, ""), news)
+
                 oid = str(uuid.uuid4())
                 sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
-                pending_orders[oid] = {"ticker": ticker, "total_budget": budget, "current_price": int(val.get("current_price", 0)), "stock_name": name, "mode_type": "NORMAL", "reason": sum_match.group(1).strip() if sum_match else "AI 분석 완료", "score": score}
+                pending_orders[oid] = {
+                    "ticker": ticker, "total_budget": budget,
+                    "current_price": int(val.get("current_price", 0)),
+                    "stock_name": name, "mode_type": "NORMAL",
+                    "reason": sum_match.group(1).strip() if sum_match else "AI 분석 완료",
+                    "score": score,
+                    "opinion": result.get("opinion_final"),
+                    "opinion_code": result.get("opinion_code"),
+                    "opinion_delta": result.get("opinion_delta", 0),
+                }
                 say(f"[System] {name}({ticker}) 최종 AI 리포트\n\n{report}")
-                say(blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"최종 10일 분할매수({actual_mode}) 승인을 내려주십시오."}}, {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": f"승인 ({actual_mode} 매수)"}, "style": "primary", "action_id": "approve_buy", "value": oid}, {"type": "button", "text": {"type": "plain_text", "text": "기각 (취소)"}, "style": "danger", "action_id": "reject_buy", "value": oid}]}], text="승인 대기 중")
-            except Exception as e: say(f"[Error] AI 매수 보고서 에러: {e}")
+                say(
+                    blocks=[
+                        {"type": "section", "text": {"type": "mrkdwn", "text": f"최종 10일 분할매수({actual_mode}) 승인을 내려주십시오."}},
+                        {"type": "actions", "elements": [
+                            {"type": "button", "text": {"type": "plain_text", "text": f"승인 ({actual_mode} 매수)"}, "style": "primary", "action_id": "approve_buy", "value": oid},
+                            {"type": "button", "text": {"type": "plain_text", "text": "기각 (취소)"}, "style": "danger", "action_id": "reject_buy", "value": oid},
+                        ]},
+                    ],
+                    text="승인 대기 중",
+                )
+            except Exception as e:
+                say(f"[Error] AI 매수 보고서 에러: {e}")
         threading.Thread(target=bg_task, daemon=True).start()
 
     @app.action("approve_buy")
@@ -461,7 +558,15 @@ def register_slack_handlers(app, kis, config, orchestrator):
         res = OrderManager(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, config["ACC_NO"]).simulate_split_buy(order["ticker"], order["stock_name"], order["total_budget"], order["current_price"], f"{reason} (1/10회차 대기)")
         if res["success"]:
             split_orders = load_json_from_gdrive("split_orders.json") or {}
-            split_orders[str(uuid.uuid4())] = {"ticker": order["ticker"], "name": order["stock_name"], "daily_budget": res["daily_budget"], "remaining_days": 10, "reason": reason, "mode_type": order["mode_type"], "score": order.get("score", 0)}
+            split_orders[str(uuid.uuid4())] = {
+                "ticker": order["ticker"], "name": order["stock_name"],
+                "daily_budget": res["daily_budget"], "remaining_days": 10,
+                "reason": reason, "mode_type": order["mode_type"],
+                "score": order.get("score", 0),
+                "opinion": order.get("opinion"),
+                "opinion_code": order.get("opinion_code"),
+                "opinion_delta": order.get("opinion_delta", 0),
+            }
             save_json_to_gdrive(split_orders, "split_orders.json")
             respond(text=f"[Success] <@{body['user']['id']}> 님이 승인했습니다.\n{res['msg']}", replace_original=True)
         else: respond(text=f"[Fail] {res['msg']}", replace_original=True)
@@ -481,27 +586,38 @@ def register_slack_handlers(app, kis, config, orchestrator):
         raw_track = parts[2].upper() if len(parts) > 2 else "M"
         strategy_tag = track_map.get(raw_track, "MANUAL")
         say(f"[System] {ticker} 수동 등록({strategy_tag}) 및 AI 팩트체크를 시작합니다...")
+
         def bg_task():
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
             kis.set_token(token)
             qty, avg_price = 0, 0.0
             for m in ["LIVE", "PAPER"]:
                 q, a = kis.get_real_holding_qty(ticker, m)
-                if q > 0: qty, avg_price = q, a; break
-            if qty <= 0: say(f"[알림] 잔고 미보유 종목. 관심 종목으로 등록."); val = kis.get_valuation_data(ticker); avg_price = float(val.get("current_price", "0")) if val else 0.0
-            name, div, is_etf = stock_info_crawler.get_stock_info_naver(ticker)
-            if is_etf: return say(f"[거절] {name}은(는) ETF입니다.")
-            val = kis.get_valuation_data(ticker); val.update({"div_yield": div, "name": name})
-            chart_30d = chart_data.get_daily_ohlcv(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, ticker, count=30)
-            macro = macro_collector.get_macro_indicators()
-            news = news_crawler.get_latest_news(name, limit=5, search_type="stock")
-            portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-            report = ai_strategy.get_multi_agent_investment_report(ticker, name, chart_30d, macro, portfolio, val, "수동 발굴", news)
+                if q > 0:
+                    qty, avg_price = q, a
+                    break
+            if qty <= 0:
+                say(f"[알림] 잔고 미보유 종목. 관심 종목으로 등록.")
+                val0 = kis.get_valuation_data(ticker)
+                avg_price = float(val0.get("current_price", "0")) if val0 else 0.0
+
+            result = _build_single_stock_report(
+                ticker, fallback_theme="수동등록(단일종목)", strategy_label="수동등록",
+                say=say,
+            )
+            if not result.get("ok"):
+                return
+            report = result["report"]
+            val = result["val"]
+            name = val.get("name", ticker)
+
             sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
             reason = f"수동등록 | {sum_match.group(1).strip() if sum_match else 'AI 팩트체크 완료'}"
             from src.utils import logger
-            logger.record_trade(ticker, name, "BUY", avg_price, qty, reason,
-                                mode_type="PAPER_ONLY", strategy_tag=strategy_tag)
+            logger.record_trade(
+                ticker, name, "BUY", avg_price, qty, reason,
+                mode_type="PAPER_ONLY", strategy_tag=strategy_tag,
+            )
             say(f"[Success] {name}({ticker}) {strategy_tag} 등록 완료.\n\n{report}")
         threading.Thread(target=bg_task, daemon=True).start()
 

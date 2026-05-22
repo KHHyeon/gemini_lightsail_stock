@@ -20,6 +20,12 @@
   - Gemini: `src/strategy/ai_logic.py`
   - Google Drive: `src/memory/drive_client.py`
 - 공통 유틸: `src/utils/{timekit,paths,jsonio,macro_triggers}.py`
+- 매수 결정 단일화: `!ai매수`/`!수동등록`/`!발굴` 은 동일한 점수 산출
+  (`screener.score_single_ticker`)과 동일한 `theme_context` 생성 규칙
+  (`ai_logic.build_theme_context_entry`)을 사용한다.
+  의견 라벨은 코드가 결정하고(`macro_triggers.derive_opinion_from_score`),
+  LLM 은 근거 설명만 담당한다. 상세는
+  `Doc/features/ai_investment_decision/`.
 
 ## 4) 전역 에러/중단 정책
 - A-Type: 자가복구(재시도/스킵).

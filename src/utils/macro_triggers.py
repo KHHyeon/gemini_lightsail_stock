@@ -178,6 +178,79 @@ def evaluate_chronicle_trigger(vix, kospi_chg, kosdaq_chg):
     return False, ""
 
 
+# =====================================================================
+# 펀더멘털 점수 → 의견 라벨 (코드 결정, LLM 비참여)
+# =====================================================================
+#
+# Doc/features/ai_investment_decision/03_state_logic.md §1 참조.
+# 임계값/라벨 변경은 본 파일에서만 수행한다. LLM 은 본 라벨을 재선택할 수 없으며,
+# review_opinion_with_ai 의 ±1 단계 보정 제안만 입력으로 사용된다.
+
+OPINION_LABEL_DISAGREE = "매수반대"
+OPINION_LABEL_NEUTRAL = "관망/주의"
+OPINION_LABEL_CAUTION = "매수주의"
+OPINION_LABEL_AGREE = "매수찬성"
+OPINION_LABEL_STRONG = "매수적극찬성"
+
+# (min_score, label) 의 내림차순 리스트.
+OPINION_THRESHOLDS_LIST = [
+    (85, OPINION_LABEL_STRONG),
+    (70, OPINION_LABEL_AGREE),
+    (60, OPINION_LABEL_CAUTION),
+    (50, OPINION_LABEL_NEUTRAL),
+    (0, OPINION_LABEL_DISAGREE),
+]
+
+# 낮은 강도 → 높은 강도 정렬 라벨 리스트 (인접 보정 계산용).
+OPINION_LABEL_ORDER = [
+    OPINION_LABEL_DISAGREE,
+    OPINION_LABEL_NEUTRAL,
+    OPINION_LABEL_CAUTION,
+    OPINION_LABEL_AGREE,
+    OPINION_LABEL_STRONG,
+]
+
+
+def derive_opinion_from_score(score):
+    """펀더멘털 점수 → 의견 라벨 1종.
+
+    Args:
+        score: 정수/실수/문자열 형태의 점수. 변환 실패 시 0 으로 간주.
+
+    Returns:
+        str: ``OPINION_LABEL_ORDER`` 중 1개.
+    """
+    s = _safe_float(score, default=0.0)
+    for min_s, label in OPINION_THRESHOLDS_LIST:
+        if s >= min_s:
+            return label
+    return OPINION_THRESHOLDS_LIST[-1][1]
+
+
+def adjust_opinion_label(label, delta):
+    """의견 라벨을 ±N 단계 보정한다.
+
+    AI sanity 검토(``review_opinion_with_ai``) 의 delta 를 코드가 적용할 때 사용한다.
+    범위를 벗어나면 양 끝 라벨로 클램프한다.
+
+    Args:
+        label: ``OPINION_LABEL_ORDER`` 중 1개.
+        delta: 정수. 양수면 강도 상향, 음수면 하향.
+
+    Returns:
+        str: 보정 후 라벨. 입력 라벨이 미등록이면 입력값 그대로 반환.
+    """
+    if label not in OPINION_LABEL_ORDER:
+        return label
+    try:
+        d = int(delta)
+    except (TypeError, ValueError):
+        d = 0
+    idx = OPINION_LABEL_ORDER.index(label)
+    new_idx = max(0, min(len(OPINION_LABEL_ORDER) - 1, idx + d))
+    return OPINION_LABEL_ORDER[new_idx]
+
+
 def evaluate_macro_shutdown_level(vix, wti, treasury_yield):
     """매크로 셧다운 단계 평가 (0=평상, 1=Half-Buy, 2=Shutdown).
 

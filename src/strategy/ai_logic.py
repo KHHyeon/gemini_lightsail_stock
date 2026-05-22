@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
+import re
+
 from google import genai
+
+from src.utils import macro_triggers as _mt
 
 def get_gemini_client():
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -99,6 +103,100 @@ def get_theme_stock_narrative(target_theme, name, ticker, fundamentals):
     prompt = f"'{name}'이 '{target_theme}'의 진짜 성장주인지 재무({fundamentals}) 바탕으로 2문장 이내 핵심만 요약."
     return generate_text(prompt)
 
+
+def build_theme_context_entry(ticker, name, target_theme, score, score_details, val):
+    """`theme_context.json[ticker]` 값을 단일 규칙으로 생성한다.
+
+    `!ai매수`, `!수동등록`, `!발굴` 세 진입점이 모두 본 함수를 사용해야 한다.
+
+    Args:
+        ticker: 종목코드.
+        name: 종목명.
+        target_theme: 테마명 또는 진입점별 폴백 라벨.
+        score: 펀더멘털 점수(int).
+        score_details: 점수 내역 리스트 (예: ["차트 정배열(+20)", ...]).
+        val: 재무 데이터 dict (``pbr``, ``per`` 등 키 사용).
+
+    Returns:
+        str: ``"[테마: {target_theme} | 총점: {score}]\\n{narrative}"`` 포맷.
+    """
+    details_text = ", ".join(score_details) if score_details else ""
+    fundamentals = {
+        "score": score,
+        "details": details_text,
+        "pbr": val.get("pbr") if isinstance(val, dict) else None,
+        "per": val.get("per") if isinstance(val, dict) else None,
+    }
+    narrative = get_theme_stock_narrative(target_theme, name, ticker, fundamentals)
+    return f"[테마: {target_theme} | 총점: {score}]\n{narrative}"
+
+
+def register_theme_context(ticker, name, target_theme, score, score_details, val):
+    """`build_theme_context_entry` 결과를 `theme_context.json` 에 저장하고 반환한다.
+
+    저장 실패(드라이브 연결 끊김 등)는 상위에서 처리한다.
+    """
+    from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
+
+    entry = build_theme_context_entry(
+        ticker, name, target_theme, score, score_details, val
+    )
+    theme_memory = load_json_from_gdrive("theme_context.json") or {}
+    theme_memory[ticker] = entry
+    save_json_to_gdrive(theme_memory, "theme_context.json")
+    return entry
+
+
+def review_opinion_with_ai(ticker, name, score, code_label, val, news, theme_context):
+    """코드가 산출한 의견 라벨에 대한 AI sanity 검토.
+
+    LLM 은 의견 라벨을 재선택할 수 없으며, ``±1`` 단계 보정 제안만 입력으로 사용된다.
+
+    Returns:
+        dict: ``{"delta": int (-1|0|+1), "reason": str}``. 파싱 실패 시 delta=0.
+    """
+    prompt = (
+        "[에이전트: 펀더멘털 검토관]\n"
+        f"종목: {name}({ticker}) | 코드 산출 점수: {score} | 코드 산출 의견: {code_label}\n"
+        f"재무: {val}\n"
+        f"테마 맥락: {theme_context}\n"
+        f"뉴스/공시: {news}\n\n"
+        "코드가 산출한 의견 라벨의 타당성을 검토하세요. 반드시 아래 두 줄만 출력:\n"
+        "1줄: [유지] / [+1] / [-1] 중 1개 (의견 라벨 변경 폭은 ±1단계 이내)\n"
+        "2줄: 사유 1문장"
+    )
+    res = generate_text(prompt) or ""
+    lines = [ln.strip() for ln in res.strip().splitlines() if ln.strip()]
+    head = lines[0] if lines else ""
+    reason = lines[1] if len(lines) > 1 else ""
+
+    if "+1" in head:
+        delta = 1
+    elif "-1" in head:
+        delta = -1
+    else:
+        delta = 0
+
+    return {"delta": delta, "reason": reason or head}
+
+
+def _extract_section(report_text, head_label):
+    """LLM 본문 리포트에서 단일 라벨 줄을 추출한다.
+
+    예) ``head_label="[근거]"`` 이면 ``"[근거] ... "`` 라인의 ``...`` 만 반환.
+    추출 실패 시 ``"(자동 추출 실패)"`` 반환.
+    """
+    if not report_text:
+        return "(자동 추출 실패)"
+    pat = re.compile(
+        rf"{re.escape(head_label)}\s*(.+?)(?=\n\[|\n\n|$)",
+        re.DOTALL,
+    )
+    m = pat.search(report_text)
+    if not m:
+        return "(자동 추출 실패)"
+    return m.group(1).strip().splitlines()[0].strip() or "(자동 추출 실패)"
+
 def get_emergency_news_check(name, news_text):
     prompt = f"""
     [긴급 팩트체크] 
@@ -108,64 +206,111 @@ def get_emergency_news_check(name, news_text):
     """
     return generate_text(prompt)
 
-def get_multi_agent_investment_report(ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news):
-    # 1. 기초 분석 에이전트: 재무 및 이슈 정리
+def get_multi_agent_investment_report(
+    ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news,
+    *, fundamental_score, fundamental_details=None
+):
+    """멀티 에이전트 투자 리포트. v3.5 부터 의견 라벨은 코드가 결정한다.
+
+    - 코드: ``derive_opinion_from_score(fundamental_score)`` → ``opinion_code``
+    - AI 검토: ``review_opinion_with_ai`` → ``delta`` (±1 단계 이내)
+    - 코드: ``adjust_opinion_label(opinion_code, delta)`` → ``opinion_final``
+    - LLM: 분석가/리스크 의견 + 근거/상승/손절 텍스트만 생성.
+    - 코드: ``[한줄요약]`` 라인 직접 조립.
+
+    Returns:
+        tuple[str, dict]: ``(report_text, meta)``.
+            ``meta`` 키: ``score``, ``opinion_code``, ``opinion_final``,
+            ``opinion_delta``, ``ai_review_reason``.
+    """
+    opinion_code = _mt.derive_opinion_from_score(fundamental_score)
+    review = review_opinion_with_ai(
+        ticker, stock_name, fundamental_score, opinion_code,
+        valuation, recent_news, theme_context,
+    )
+    delta = int(review.get("delta", 0) or 0)
+    opinion_final = _mt.adjust_opinion_label(opinion_code, delta)
+
     base_prompt = f"""
     [에이전트: 데이터 분석가]
     종목: {stock_name}({ticker}) | 재무데이터: {valuation} | 뉴스/공시: {recent_news}
-    
+
     위 데이터를 바탕으로 다음 두 섹션을 아주 간결한 개조식으로 작성하세요:
     1. [ 재무현황 ]: PER, PBR, ROE 및 주요 재무 건전성 요약
     2. [ 최신이슈분석 ]: 최근 뉴스 및 공시 중 핵심 모멘텀 또는 리스크
     """
     base_analysis = generate_text(base_prompt)
 
-    # 2. 분석가(Analyst) 에이전트: 긍정적 투자 논리 개발
     analyst_prompt = f"""
     [에이전트: 성장주 전문 분석가]
     기초분석: {base_analysis}
     테마맥락: {theme_context} | 차트: {chart_30d}
-    
+
     위 데이터를 바탕으로 이 종목의 강력한 매수 논리(분석가 의견)를 2~3줄 내외로 작성하세요.
     """
     analyst_opinion = generate_text(analyst_prompt)
-    
-    # 3. 리스크 관리자(Risk Manager) 에이전트: 악마의 대변인
+
     risk_prompt = f"""
     [에이전트: 악마의 대변인 (리스크 관리자)]
     분석가 의견: {analyst_opinion}
     재무/이슈: {base_analysis}
-    
+
     분석가의 논리를 반박하고, 투자자가 반드시 경계해야 할 핵심 리스크를 2~3줄 내외로 작성하세요.
     """
     risk_opinion = generate_text(risk_prompt)
-    
-    # 4. 최종 통합 에이전트
+
+    details_text = ", ".join(fundamental_details) if fundamental_details else ""
     final_prompt = f"""
     [에이전트: 투자심의위원회]
     종목: {stock_name}({ticker})
+    펀더멘털 점수: {fundamental_score} ({details_text})
+    시스템 확정 의견: {opinion_final} (코드 산출 {opinion_code}, AI 보정 {delta:+d})
     데이터: {base_analysis}
     의견: 분석가({analyst_opinion}), 리스크관리자({risk_opinion})
-    
-    아래 양식에 맞춰 최종 리포트를 작성하세요. 
-    특히 [한줄요약]은 향후 시스템의 펀더멘털 매수 근거로 기록되므로, 밸류에이션/성장성/이슈가 통합된 매우 견고하고 확실한 문장으로 작성해야 합니다.
-    
+
+    아래 양식에 맞춰 최종 리포트를 작성하세요.
+    의견 라벨은 시스템이 [{opinion_final}] 로 확정했으니 라벨을 재선택하지 마세요.
+    LLM 은 '근거 설명 / 상승 조건 / 손절 조건' 세 항목 텍스트만 생성합니다.
+
     [출력 양식]
     {base_analysis}
-    
+
     [ 핵심요약 ]
     - (분석가와 리스크 관리자의 의견을 종합한 1줄 핵심 포인트)
-    
+
     [ 분석가 의견 ]
     - {analyst_opinion}
-    
+
     [ 리스크 관리자 반박 ]
     - {risk_opinion}
-    
-    [한줄요약] [의견: 매수적극찬성/매수찬성/매수주의/매수반대/매수적극반대 중 택1] (기업의 기초체력과 매수 근거를 포함한 견고한 펀더멘털 요약 문장) | [상승조건] (상승 시나리오) | [손절조건] (손절 트리거)
+
+    [근거] (밸류에이션/성장성/이슈를 통합한 1~2문장 설명)
+    [상승조건] (상승 시나리오 1줄)
+    [손절조건] (손절 트리거 1줄)
     """
     news_flat = recent_news if isinstance(recent_news, list) else [str(recent_news)]
-    return generate_text_with_chronicle(final_prompt, macro=macro, news_snippets=news_flat)
+    body = generate_text_with_chronicle(final_prompt, macro=macro, news_snippets=news_flat)
+
+    rationale = _extract_section(body, "[근거]")
+    upside = _extract_section(body, "[상승조건]")
+    downside = _extract_section(body, "[손절조건]")
+
+    summary_line = (
+        f"[한줄요약] [의견: {opinion_final}] | "
+        f"[점수: {fundamental_score} ({opinion_code} → 보정 {delta:+d})] | "
+        f"[근거] {rationale} | [상승조건] {upside} | [손절조건] {downside}"
+    )
+
+    cleaned_body = re.sub(r"\[한줄요약\].*$", "", body or "", flags=re.DOTALL).rstrip()
+    full_report = f"{cleaned_body}\n\n{summary_line}"
+    meta = {
+        "score": fundamental_score,
+        "opinion_code": opinion_code,
+        "opinion_final": opinion_final,
+        "opinion_delta": delta,
+        "ai_review_reason": review.get("reason", ""),
+    }
+    return full_report, meta
 
 def check_fundamental_damage(ticker, stock_name, chart_30d, macro, valuation, theme_context):
     prompt = f"""
