@@ -1,46 +1,52 @@
-# System Architecture (Atomic)
+System Architecture (Atomic)
 
-## 1) 문서 체계/워크플로우
-- 설계 우선: 사양(SYS/DETAIL) 업데이트 후 코드 변경.
-- Post-Update: 구현 완료 후 시그니처/변경 파일을 문서에 동기화.
-- 변경 이력: append-only, 이전 항목 생략 금지.
-- 섹션 순서: "향후 과제"는 문서 최하단 유지.
+1) 문서 체계/워크플로우
 
-## 2) 전역 코딩 규칙
-- 명명: 구조체 접미사 사용 (`_list`, `_dict`, `_map`, `_set`).
-- DRY: 동일 로직은 공통 헬퍼로 추출.
-- 언어/인코딩: 한국어 주석/설명, UTF-8, `.py` 이모지 금지.
-- 보안: `.json`, `.env` 내용 직접 분석 금지.
+  - 설계 우선: 사양(SYS/DETAIL) 업데이트 후 코드 변경.
+  - Post-Update: 구현 완료 후 시그니처/변경 파일을 문서에 동기화.
+  - 변경 이력: append-only, 이전 항목 생략 금지.
+  - 섹션 순서: "향후 과제"는 문서 최하단 유지.
 
-## 3) 전역 런타임 구조
-- 진입점: `main.py`
-- 오케스트레이션: `src/execution/orchestrator.py`
-- 외부 연동:
-  - KIS: `src/core/kis_api.py`
-  - Gemini: `src/strategy/ai_logic.py`
-  - Google Drive: `src/memory/drive_client.py`
-  - Telegram (Market Chronicle 수집): `src/core/telegram_client.py`
-- 공통 유틸: `src/utils/{timekit,paths,jsonio,macro_triggers}.py`
-- 매수 결정 단일화: `!ai매수`/`!수동등록`/`!발굴` 은 동일한 점수 산출
-  (`screener.score_single_ticker`)과 동일한 `theme_context` 생성 규칙
-  (`ai_logic.build_theme_context_entry`)을 사용한다.
-  의견 라벨은 코드가 결정하고(`macro_triggers.derive_opinion_from_score`),
-  LLM 은 근거 설명만 담당한다. 상세는 `Doc/features/ai_investment_decision/`.
-- Market Chronicle 파이프라인: 텔레그램 채널 메시지를 수집하여 `market_chronicle_dict` 구조로 정규화 후, AI 분석을 거쳐 시장 컨텍스트로 변환 및 저장한다.
+2) 전역 코딩 규칙
 
-## 4) 전역 에러/중단 정책
-- A-Type: 자가복구(재시도/스킵). 텔레그램 API Rate Limit 등 일시적 네트워크 오류는 A-Type 적용.
-- B-Type: 사용자 개입 필요 시 Pause + Slack 안내 + `완료`로 재개.
-- C-Type: 치명적 오류 즉시 중단.
-- 스키마 불일치: `DriveSchemaMismatchError`를 B-Type으로 처리.
+  - 명명: 구조체 접미사 사용 (_list, _dict, _map, _set).
+  - DRY: 동일 로직은 공통 헬퍼로 추출.
+  - 언어/인코딩: 한국어 주석/설명, UTF-8, .py 이모지 금지.
+  - 보안: .json, .env 내용 직접 분석 금지.
 
-## 5) 인프라/운영 기준
-- 환경: AWS LightSail, Ubuntu 22.04, Python 3.10+
-- 실행: 상시 실행(systemd/nohup)
-- 설정: `.env` 기반(인증키/모드/Drive/Telegram API 설정)
-- 슬랙 송신: 오케스트레이터 게이트웨이 단일화
+3) 전역 런타임 구조
 
-## 6) 커밋/변경 기록 정책
-- 커밋 메시지: 핵심 2~3줄.
-- 상세는 문서 참조 한 줄로 대체.
-- 기능 변화는 SYS/FEATURE 문서 동시 갱신.
+  - 진입점: main.py
+  - 오케스트레이션: src/execution/orchestrator.py
+  - 외부 연동:
+      - KIS: src/core/kis_api.py
+      - Gemini: src/strategy/ai_logic.py
+      - Google Drive: src/memory/drive_client.py
+      - Telegram (Market Chronicle 및 리서치 수집): src/core/telegram_client.py
+  - 공통 유틸: src/utils/{timekit,paths,jsonio,macro_triggers}.py
+  - 매수 결정 단일화: !ai매수/!수동등록/!발굴 은 동일한 점수 산출 (screener.score_single_ticker)과 동일한
+    theme_context 생성 규칙 (ai_logic.build_theme_context_entry)을 사용한다. 의견 라벨은 코드가
+    결정하고(macro_triggers.derive_opinion_from_score), LLM 은 근거 설명만 담당한다. 상세는
+    Doc/features/ai_investment_decision/.
+  - Market Chronicle 파이프라인: 텔레그램 채널 메시지를 수집하여 market_chronicle_dict 구조로 정규화 후,
+    AI 분석을 거쳐 시장 컨텍스트로 변환 및 저장한다.
+
+4) 전역 에러/중단 정책
+
+  - A-Type: 자가복구(재시도/스킵). 텔레그램 API Rate Limit 및 메시지 파싱 예외 등 일시적 네트워크/데이터 오류는 A-Type 적용.
+  - B-Type: 사용자 개입 필요 시 Pause + Slack 안내 + 완료로 재개.
+  - C-Type: 치명적 오류 즉시 중단.
+  - 스키마 불일치: DriveSchemaMismatchError를 B-Type으로 처리.
+
+5) 인프라/운영 기준
+
+  - 환경: AWS LightSail, Ubuntu 22.04, Python 3.10+
+  - 실행: 상시 실행(systemd/nohup)
+  - 설정: .env 기반(인증키/모드/Drive/Telegram API 설정)
+  - 슬랙 송신: 오케스트레이터 게이트웨이 단일화
+
+6) 커밋/변경 기록 정책
+
+  - 커밋 메시지: 핵심 2~3줄.
+  - 상세는 문서 참조 한 줄로 대체.
+  - 기능 변화는 SYS/FEATURE 문서 동시 갱신.
