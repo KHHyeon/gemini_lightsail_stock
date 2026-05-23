@@ -19,16 +19,17 @@
   - KIS: `src/core/kis_api.py`
   - Gemini: `src/strategy/ai_logic.py`
   - Google Drive: `src/memory/drive_client.py`
+  - Telegram (Market Chronicle 수집): `src/core/telegram_client.py`
 - 공통 유틸: `src/utils/{timekit,paths,jsonio,macro_triggers}.py`
 - 매수 결정 단일화: `!ai매수`/`!수동등록`/`!발굴` 은 동일한 점수 산출
   (`screener.score_single_ticker`)과 동일한 `theme_context` 생성 규칙
   (`ai_logic.build_theme_context_entry`)을 사용한다.
   의견 라벨은 코드가 결정하고(`macro_triggers.derive_opinion_from_score`),
-  LLM 은 근거 설명만 담당한다. 상세는
-  `Doc/features/ai_investment_decision/`.
+  LLM 은 근거 설명만 담당한다. 상세는 `Doc/features/ai_investment_decision/`.
+- Market Chronicle 파이프라인: 텔레그램 채널 메시지를 수집하여 `market_chronicle_dict` 구조로 정규화 후, AI 분석을 거쳐 시장 컨텍스트로 변환 및 저장한다.
 
 ## 4) 전역 에러/중단 정책
-- A-Type: 자가복구(재시도/스킵).
+- A-Type: 자가복구(재시도/스킵). 텔레그램 API Rate Limit 등 일시적 네트워크 오류는 A-Type 적용.
 - B-Type: 사용자 개입 필요 시 Pause + Slack 안내 + `완료`로 재개.
 - C-Type: 치명적 오류 즉시 중단.
 - 스키마 불일치: `DriveSchemaMismatchError`를 B-Type으로 처리.
@@ -36,7 +37,7 @@
 ## 5) 인프라/운영 기준
 - 환경: AWS LightSail, Ubuntu 22.04, Python 3.10+
 - 실행: 상시 실행(systemd/nohup)
-- 설정: `.env` 기반(인증키/모드/Drive 설정)
+- 설정: `.env` 기반(인증키/모드/Drive/Telegram API 설정)
 - 슬랙 송신: 오케스트레이터 게이트웨이 단일화
 
 ## 6) 커밋/변경 기록 정책
