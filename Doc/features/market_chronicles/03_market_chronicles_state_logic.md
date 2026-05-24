@@ -8,7 +8,9 @@ S0. Idle
 
 S1. Triggered
 
-  - 트리거 조건 충족(T-Day), 백필 큐 존재, 또는 [추가] 텔레그램 증권 리서치 이벤트 수신.
+  - 트리거 조건 충족(T-Day), 백필 큐 존재, 또는 오케스트레이터가 위임한 외부
+    인제스트 결과 수신(예: Telegram Pipeline). Market Chronicles 는 외부 수집기를
+    직접 호출하지 않는다.
 
 S2. Generated
 
@@ -40,7 +42,9 @@ Root
 entry_dict (핵심)
 
   - 식별/메타: id, date, trigger, report_rel_path, source
-    - [추가 제약] source 필드는 기존 소스 외에 "telegram_research" 값을 허용한다.
+    - source 필드는 인제스트 출처를 구분하기 위한 자유 문자열이며, 외부 인제스트
+      파이프라인이 추가될 때마다 본 문서에 허용값을 별도 추가한다(예: "telegram").
+      값 정의 자체는 Market Chronicles 책임으로 유지하고, 외부 모듈에 의존하지 않는다.
   - 노출(가독성): market_state, context_tags_list, action_preview
   - 보조(내부): phrases_list, embedding_vector
   - 운영 타임스탬프: reindexed_at?, migrated_at?

@@ -22,18 +22,25 @@ System Architecture (Atomic)
       - KIS: src/core/kis_api.py
       - Gemini: src/strategy/ai_logic.py
       - Google Drive: src/memory/drive_client.py
-      - Telegram (Market Chronicle 및 리서치 수집): src/core/telegram_client.py
+      - Telegram: src/core/telegram_client.py (외부 API 캡슐화 전용)
+  - 인제스트 파이프라인:
+      - Telegram Pipeline: src/pipeline/telegram_pipeline.py
+        (수집·정제 후 오케스트레이터에 결과만 반환하는 독립 파이프라인)
   - 공통 유틸: src/utils/{timekit,paths,jsonio,macro_triggers}.py
   - 매수 결정 단일화: !ai매수/!수동등록/!발굴 은 동일한 점수 산출 (screener.score_single_ticker)과 동일한
     theme_context 생성 규칙 (ai_logic.build_theme_context_entry)을 사용한다. 의견 라벨은 코드가
     결정하고(macro_triggers.derive_opinion_from_score), LLM 은 근거 설명만 담당한다. 상세는
     Doc/features/ai_investment_decision/.
-  - Market Chronicle 파이프라인: 텔레그램 채널 메시지를 수집하여 market_chronicle_dict 구조로 정규화 후,
-    AI 분석을 거쳐 시장 컨텍스트로 변환 및 저장한다.
+  - 관심사 분리 (인제스트 ↔ 도메인):
+      - Telegram Pipeline 은 수집·정제 + 반환만 담당한다.
+      - 오케스트레이터가 결과를 받아 후속 도메인(Market Chronicles 적재, 매수 결정 등)에 위임한다.
+      - 의존성 방향: telegram_pipeline -> orchestrator -> (market_chronicles | ai_investment_decision)
+        (역방향 import 금지). 상세는 Doc/features/telegram_pipeline/.
 
 4) 전역 에러/중단 정책
 
-  - A-Type: 자가복구(재시도/스킵). 텔레그램 API Rate Limit 및 메시지 파싱 예외 등 일시적 네트워크/데이터 오류는 A-Type 적용.
+  - A-Type: 자가복구(재시도/스킵). 텔레그램 API Rate Limit·일시 네트워크 장애·단일 메시지 파싱 실패 등
+    외부 인제스트 장애는 A-Type 으로 격리하며, 트레이딩 코어(KIS 주문/리스크 감시) 실행을 멈추지 않는다.
   - B-Type: 사용자 개입 필요 시 Pause + Slack 안내 + 완료로 재개.
   - C-Type: 치명적 오류 즉시 중단.
   - 스키마 불일치: DriveSchemaMismatchError를 B-Type으로 처리.

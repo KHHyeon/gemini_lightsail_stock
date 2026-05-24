@@ -30,8 +30,9 @@ chronicle_common.derive_context_tags(phrases_list, market_state_dict, max_tags=6
 
   - 목적: 상황 태그 생성([주체_동사] 중심).
 
-[추가] chronicle_common.convert_telegram_insight_to_entry(telegram_insight_dict) -> dict
-  - 목적: 텔레그램에서 수집된 리서치 데이터를 Market Chronicles의 entry_dict 스키마로 변환.
+비고: 외부 인제스트(예: Telegram Pipeline) 결과를 entry_dict 로 변환하는 헬퍼는
+오케스트레이터 위임 계층에서 다루며, Market Chronicles 모듈은 외부 수집기 모듈을
+직접 import 하지 않는다(역방향 의존 금지).
 
 3) Regime API
 
