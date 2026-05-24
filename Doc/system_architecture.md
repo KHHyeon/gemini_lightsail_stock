@@ -12,7 +12,7 @@ System Architecture (Atomic)
   - 명명: 구조체 접미사 사용 (_list, _dict, _map, _set).
   - DRY: 동일 로직은 공통 헬퍼로 추출.
   - 언어/인코딩: 한국어 주석/설명, UTF-8, .py 이모지 금지.
-  - 보안: .json, .env 내용 직접 분석 금지.
+  - 보안: .json, .env .session 내용 직접 분석 금지.
 
 3) 전역 런타임 구조
 
