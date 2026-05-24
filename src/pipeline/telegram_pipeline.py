@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -110,15 +111,28 @@ def run_ingestion(channel_id_list=None):
         }
 
 
+# 해외 글로벌 리더 기본 목록 (R3 사양: env 또는 별도 설정 분리 관리).
+# 운영 환경에서는 TG_GLOBAL_LEADER_LIST 환경 변수로 override 가능.
+_DEFAULT_GLOBAL_LEADER_SET = {
+    "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "GOOG",
+    "TSMC", "TSM", "AMD", "INTC", "MU", "ASML", "QCOM", "AVGO",
+    "BABA", "SE", "JPM", "BAC", "BRK.B",
+}
+
+# 국내 종목 코드 정규식 (6자리 숫자).
+_KR_TICKER_PATTERN = re.compile(r"\b(\d{6})\b")
+
+
 def normalize_message(raw_dict):
-    """단일 raw 메시지를 telegram_message_dict 로 변환(스켈레톤).
+    """단일 raw 메시지를 telegram_message_dict 로 변환 + analysis 중첩 dict 합성.
 
     Args:
         raw_dict: telegram_client.fetch_new_messages 가 반환한 단일 원본 dict.
 
     Returns:
         dict | None: 정규화 결과(telegram_message_dict). 정규화 불가 시 None.
-            반환 키: source_channel, message_id, posted_at, text, keyword_list.
+            반환 키: source_channel, message_id, posted_at, text, keyword_list, analysis.
+            analysis 키: category, related_kr_tickers, value_chain_type, transmission_path.
     """
     try:
         if not isinstance(raw_dict, dict):
@@ -135,6 +149,7 @@ def normalize_message(raw_dict):
 
         clean_text = raw_text.strip()[:MAX_TEXT_LENGTH]
         keyword_list = _extract_keyword_list(clean_text)
+        analysis_dict = _build_analysis_dict(clean_text)
 
         return {
             "source_channel": str(channel_id),
@@ -142,6 +157,7 @@ def normalize_message(raw_dict):
             "posted_at": posted_at,
             "text": clean_text,
             "keyword_list": keyword_list,
+            "analysis": analysis_dict,
         }
     except Exception as exc:
         print(f"Log: [TelegramPipeline] normalize_message 캡슐화: {exc}")
@@ -149,13 +165,125 @@ def normalize_message(raw_dict):
 
 
 def _extract_keyword_list(clean_text):
-    """텍스트에서 보조 키워드를 추출(스켈레톤).
+    """텍스트에서 보조 키워드를 추출(국내 종목코드 6자리 + 해외 글로벌 리더 심볼).
 
-    실제 키워드 추출 규칙(섹터/종목명/이슈 태그 등)은 후속 PR 에서 정의한다.
-    현재는 빈 리스트를 반환하여 정규화 파이프라인 형태만 유지한다.
+    AI 호출 없이 결정론적 추출만 수행한다(토큰 효율).
     """
-    _ = clean_text
-    return []
+    if not clean_text:
+        return []
+    kw_set = set(_KR_TICKER_PATTERN.findall(clean_text))
+    upper = clean_text.upper()
+    for sym in _global_leader_set():
+        if sym in upper:
+            kw_set.add(sym)
+    return sorted(kw_set)
+
+
+def _global_leader_set():
+    """env override 또는 기본 글로벌 리더 집합."""
+    raw = os.getenv("TG_GLOBAL_LEADER_LIST", "").strip()
+    if not raw:
+        return _DEFAULT_GLOBAL_LEADER_SET
+    return {item.strip().upper() for item in raw.split(",") if item.strip()}
+
+
+def _classify_category(clean_text):
+    """국내 종목 / 해외 종목 / 국내 시황 / 해외 시황 분류 (결정론적 휴리스틱).
+
+    AI 비용 없이 정규화 단계에서 1차 라우팅만 결정한다.
+    """
+    upper = clean_text.upper()
+    has_kr_ticker = bool(_KR_TICKER_PATTERN.search(clean_text))
+    has_overseas_symbol = any(sym in upper for sym in _global_leader_set())
+
+    overseas_market_keyword_list = [
+        "S&P", "NASDAQ", "다우", "FOMC", "FED", "연준", "10년물", "WTI", "DXY",
+        "환율", "달러인덱스", "필라델피아", "VIX",
+    ]
+    has_overseas_market = any(kw in clean_text or kw in upper for kw in overseas_market_keyword_list)
+
+    if has_kr_ticker and not has_overseas_symbol:
+        return "DOMESTIC_STOCK"
+    if has_overseas_symbol:
+        return "OVERSEAS_STOCK"
+    if has_overseas_market:
+        return "OVERSEAS_MARKET"
+    return "DOMESTIC_MARKET"
+
+
+def _find_first_overseas_symbol(clean_text):
+    """본문에서 첫 번째 해외 글로벌 리더 심볼을 찾아 반환(없으면 None)."""
+    upper = clean_text.upper()
+    for sym in _global_leader_set():
+        if sym in upper:
+            return sym
+    return None
+
+
+def _build_analysis_dict(clean_text):
+    """analysis 중첩 dict 생성.
+
+    - DOMESTIC_STOCK: 본문 6자리 코드 추출.
+    - OVERSEAS_STOCK: ai_logic.analyze_value_chain 호출로 국내 밸류체인 매핑.
+    - OVERSEAS_MARKET: ai_logic.extract_transmission_path 호출로 3문장 전이 추론.
+    - DOMESTIC_MARKET: 본문 6자리 코드만 추출.
+
+    AI 호출 실패는 빈 값으로 폴백한다(예외 전파 없음, A-Type 격리).
+    """
+    category = _classify_category(clean_text)
+    analysis_dict = {
+        "category": category,
+        "related_kr_tickers": [],
+        "value_chain_type": None,
+        "transmission_path": "",
+    }
+
+    try:
+        kr_ticker_list = sorted(set(_KR_TICKER_PATTERN.findall(clean_text)))
+        if kr_ticker_list:
+            analysis_dict["related_kr_tickers"] = kr_ticker_list[:5]
+
+        if category == "OVERSEAS_STOCK":
+            symbol = _find_first_overseas_symbol(clean_text)
+            if symbol:
+                chain_result = _call_value_chain_helper(symbol, clean_text)
+                # AI 매핑 결과를 본문 직접 추출분과 병합(중복 제거).
+                merged_list = list(analysis_dict["related_kr_tickers"])
+                for t in chain_result.get("related_kr_tickers", []):
+                    if t not in merged_list:
+                        merged_list.append(t)
+                analysis_dict["related_kr_tickers"] = merged_list[:5]
+                analysis_dict["value_chain_type"] = chain_result.get("value_chain_type")
+
+        if category == "OVERSEAS_MARKET":
+            analysis_dict["transmission_path"] = _call_transmission_path_helper(clean_text)
+    except Exception as exc:
+        print(f"Log: [TelegramPipeline] analysis 합성 캡슐화: {exc}")
+
+    return analysis_dict
+
+
+def _call_value_chain_helper(symbol, clean_text):
+    """ai_logic.analyze_value_chain 호출 래퍼 (지연 import + 안전 폴백).
+
+    관심사 분리 R3 예외: 정규화 보조용 stateless 헬퍼만 호출한다.
+    """
+    try:
+        from src.strategy import ai_logic
+        return ai_logic.analyze_value_chain(symbol, clean_text) or {}
+    except Exception as exc:
+        print(f"Log: [TelegramPipeline] value_chain 헬퍼 캡슐화: {exc}")
+        return {}
+
+
+def _call_transmission_path_helper(clean_text):
+    """ai_logic.extract_transmission_path 호출 래퍼 (지연 import + 안전 폴백)."""
+    try:
+        from src.strategy import ai_logic
+        return ai_logic.extract_transmission_path(clean_text) or ""
+    except Exception as exc:
+        print(f"Log: [TelegramPipeline] transmission_path 헬퍼 캡슐화: {exc}")
+        return ""
 
 
 def _load_default_channel_id_list():

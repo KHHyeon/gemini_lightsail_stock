@@ -147,37 +147,246 @@ def register_theme_context(ticker, name, target_theme, score, score_details, val
     return entry
 
 
-def review_opinion_with_ai(ticker, name, score, code_label, val, news, theme_context):
-    """코드가 산출한 의견 라벨에 대한 AI sanity 검토.
+# 정성적 가중치 판단 모호 시 폴백 사유 상수 (운영 로깅 일관성 확보)
+FALLBACK_REASON_AMBIGUOUS = "AI 가중치 판단 모호 - 국내 펀더멘털 점수 우선 반영"
 
-    LLM 은 의견 라벨을 재선택할 수 없으며, ``±1`` 단계 보정 제안만 입력으로 사용된다.
+
+def review_opinion_with_ai(
+    ticker, name, score, code_label, val, news, theme_context,
+    *, telegram_insight_list=None, domestic_news_list=None,
+):
+    """코드가 산출한 의견 라벨에 대한 AI sanity 검토 + 정성적 가중치 평가.
+
+    LLM 은 의견 라벨을 재선택하지 못하며, ±1 단계 보정만 제안한다.
+    텔레그램 해외 변수와 국내 뉴스 변수가 동시 주입될 때, 종목 비즈니스 모델
+    (수출주/내수주/기술주 등)에 맞춰 두 변수 사이의 정성적 가중치를 비교하여
+    delta 산출의 핵심 근거로 사용한다.
+
+    [폴백 정책]
+    - AI 응답이 파싱 실패/타임아웃이거나, 1문장 사유에서 명확한 결론을 도출하지
+      못하는 모호한 경우(예: '판단 보류', '추가 정보 필요' 등), 코드가 산출한
+      국내 펀더멘털 점수를 최우선 앵커로 신뢰하여 delta=0 으로 폴백한다.
+    - 폴백 사유는 FALLBACK_REASON_AMBIGUOUS 로 일관 로깅한다.
+
+    Args:
+        ticker/name/score/code_label/val/news/theme_context: 기존 sanity 인자.
+        telegram_insight_list: 텔레그램 파이프라인이 정규화한 dict 리스트.
+            (해외 글로벌 리더 동향, 매크로 전이 분석 등)
+        domestic_news_list: 국내 시황/뉴스 dict 리스트(수급/섹터/정책 이슈 등).
 
     Returns:
-        dict: ``{"delta": int (-1|0|+1), "reason": str}``. 파싱 실패 시 delta=0.
+        dict: {"delta": int (-1|0|+1), "reason": str}
     """
+    telegram_block = _format_external_context_block(
+        telegram_insight_list, head_label="[해외 변수 (텔레그램)]"
+    )
+    domestic_block = _format_external_context_block(
+        domestic_news_list, head_label="[국내 변수 (뉴스/수급)]"
+    )
+
     prompt = (
-        "[에이전트: 펀더멘털 검토관]\n"
+        "[에이전트: 정성적 가중치 검토관]\n"
         f"종목: {name}({ticker}) | 코드 산출 점수: {score} | 코드 산출 의견: {code_label}\n"
         f"재무: {val}\n"
         f"테마 맥락: {theme_context}\n"
-        f"뉴스/공시: {news}\n\n"
-        "코드가 산출한 의견 라벨의 타당성을 검토하세요. 반드시 아래 두 줄만 출력:\n"
-        "1줄: [유지] / [+1] / [-1] 중 1개 (의견 라벨 변경 폭은 ±1단계 이내)\n"
-        "2줄: 사유 1문장"
+        f"단신 뉴스/공시: {news}\n"
+        f"{telegram_block}\n"
+        f"{domestic_block}\n\n"
+        "[지시]\n"
+        "1) 위 데이터에는 텔레그램(해외 글로벌 리더/매크로 전이)과 국내 뉴스(수급/섹터)가 동시 주입될 수 있다.\n"
+        "2) 대상 종목의 비즈니스 모델 특성(수출주/내수주/기술주/금융주 등)에 맞춰 두 변수의 정성적 가중치를 비교하라.\n"
+        "3) 상충 시(예: 해외 호재 vs 국내 악재) 가중치가 높은 쪽을 따라 delta 를 결정하라.\n"
+        "4) 의견 라벨 변경 폭은 ±1단계 이내로 제한된다.\n"
+        "5) 명확한 가중치 비교 결론을 낼 수 없으면 반드시 [유지] 를 선택하라.\n\n"
+        "[출력 형식 - 반드시 아래 두 줄만 출력]\n"
+        "1줄: [유지] / [+1] / [-1] 중 1개\n"
+        "2줄: 정성적 가중치 비교 결론이 포함된 사유 1문장"
     )
-    res = generate_text(prompt) or ""
+
+    try:
+        res = generate_text(prompt) or ""
+    except Exception as exc:
+        print(f"Log: [ReviewOpinion] AI 호출 캡슐화: {exc}")
+        return {"delta": 0, "reason": FALLBACK_REASON_AMBIGUOUS}
+
     lines = [ln.strip() for ln in res.strip().splitlines() if ln.strip()]
     head = lines[0] if lines else ""
     reason = lines[1] if len(lines) > 1 else ""
+
+    if _is_ambiguous_response(res, head):
+        print(f"Log: [ReviewOpinion] 모호 응답 폴백 (raw={res[:80]!r})")
+        return {"delta": 0, "reason": FALLBACK_REASON_AMBIGUOUS}
 
     if "+1" in head:
         delta = 1
     elif "-1" in head:
         delta = -1
-    else:
+    elif "유지" in head:
         delta = 0
+    else:
+        # 정규식 미일치도 모호 응답으로 간주하여 폴백.
+        print(f"Log: [ReviewOpinion] 정규식 미일치 폴백 (head={head!r})")
+        return {"delta": 0, "reason": FALLBACK_REASON_AMBIGUOUS}
 
     return {"delta": delta, "reason": reason or head}
+
+
+def _format_external_context_block(insight_list, *, head_label):
+    """외부 파이프라인 인사이트 리스트를 프롬프트 블록 문자열로 압축한다.
+
+    토큰 효율을 위해 항목당 1줄(category, related_kr_tickers, transmission_path)만
+    노출한다. 비어 있으면 헤더만 반환한다.
+    """
+    if not insight_list:
+        return f"{head_label} (없음)"
+
+    line_list = [head_label]
+    for idx, item in enumerate(insight_list, start=1):
+        if not isinstance(item, dict):
+            continue
+        analysis = item.get("analysis") or {}
+        category = analysis.get("category") or item.get("category", "")
+        related_list = analysis.get("related_kr_tickers") or item.get("related_kr_tickers", [])
+        path = analysis.get("transmission_path") or item.get("transmission_path", "")
+        text = (item.get("text") or "")[:120]
+        line_list.append(
+            f"  - #{idx} ({category}) related={related_list} path={path} | text={text}"
+        )
+    return "\n".join(line_list) if len(line_list) > 1 else f"{head_label} (없음)"
+
+
+_AMBIGUOUS_KEYWORD_LIST = [
+    "판단 보류", "판단보류", "보류", "추가 정보 필요", "정보 부족",
+    "불확실", "결정 불가", "확정 불가", "ambiguous", "uncertain",
+    "ai 설정 오류", "ai 리포트 생성 실패",
+]
+
+
+def _is_ambiguous_response(raw_text, head):
+    """AI 응답이 명백히 모호하거나 시스템 에러 토큰을 포함하는지 판정."""
+    if not raw_text or not raw_text.strip():
+        return True
+    lowered = raw_text.lower()
+    for kw in _AMBIGUOUS_KEYWORD_LIST:
+        if kw in lowered:
+            return True
+    # head 라인에 결정 토큰(유지/+1/-1)이 전혀 없는 경우도 모호로 간주.
+    if not any(token in head for token in ["유지", "+1", "-1"]):
+        # 결정 토큰 없음 -> 호출자에서 정규식 미일치 폴백 경로로 처리하도록 False 반환.
+        return False
+    return False
+
+
+def analyze_value_chain(symbol, context_text, *, sector_hint=None):
+    """해외 글로벌 리더 종목 -> 국내 밸류체인(Supplier/Rival/Client) 맵핑.
+
+    상태 비저장(stateless) AI 헬퍼. 텔레그램 파이프라인 정규화 단계에서 호출된다.
+    AI 미설정 / 호출 실패 / 파싱 실패 시 빈 결과를 반환하며 예외를 던지지 않는다.
+
+    Args:
+        symbol: 해외 종목 식별자 (예: "NVDA", "TSLA", "TSMC").
+        context_text: 메시지 본문(원문 또는 핵심 요약).
+        sector_hint: 섹터 힌트(있으면 정확도 향상).
+
+    Returns:
+        dict:
+            - related_kr_tickers: list[str]  (국내 6자리 종목코드)
+            - value_chain_type: "SUPPLIER" | "RIVAL" | "CLIENT" | None
+            - rationale: str (간단 사유)
+    """
+    empty_result = {
+        "related_kr_tickers": [],
+        "value_chain_type": None,
+        "rationale": "",
+    }
+    if not symbol or not context_text:
+        return empty_result
+
+    prompt = (
+        "[에이전트: 글로벌 밸류체인 분석가]\n"
+        f"해외 종목: {symbol}\n"
+        f"섹터 힌트: {sector_hint or '(없음)'}\n"
+        f"맥락 텍스트: {context_text[:600]}\n\n"
+        "위 해외 종목과 직접 연관된 국내 상장 종목을 최대 3개까지 매핑하라.\n"
+        "관계 유형은 다음 중 하나로 분류한다: SUPPLIER(공급망), RIVAL(경쟁사), CLIENT(전방산업/고객).\n\n"
+        "[출력 형식 - 반드시 아래 세 줄만 출력, 다른 텍스트 금지]\n"
+        "1줄: TICKERS=종목코드1,종목코드2,종목코드3 (6자리 숫자만, 모르면 TICKERS=)\n"
+        "2줄: RELATION=SUPPLIER 또는 RIVAL 또는 CLIENT 또는 NONE\n"
+        "3줄: REASON=1문장 사유"
+    )
+
+    try:
+        raw = generate_text(prompt) or ""
+    except Exception as exc:
+        print(f"Log: [ValueChain] AI 호출 캡슐화: {exc}")
+        return empty_result
+
+    if not raw or "AI 설정 오류" in raw or "AI 리포트 생성 실패" in raw:
+        return empty_result
+
+    tickers_match = re.search(r"TICKERS\s*=\s*([0-9,\s]*)", raw)
+    relation_match = re.search(r"RELATION\s*=\s*([A-Z]+)", raw)
+    reason_match = re.search(r"REASON\s*=\s*(.+)", raw)
+
+    related_kr_tickers = []
+    if tickers_match:
+        for token in tickers_match.group(1).split(","):
+            cleaned = re.sub(r"[^0-9]", "", token)
+            if len(cleaned) == 6:
+                related_kr_tickers.append(cleaned)
+        # 중복 제거 + 순서 유지
+        seen_set = set()
+        dedup_list = []
+        for t in related_kr_tickers:
+            if t not in seen_set:
+                seen_set.add(t)
+                dedup_list.append(t)
+        related_kr_tickers = dedup_list[:3]
+
+    relation = (relation_match.group(1).strip().upper() if relation_match else "")
+    value_chain_type = relation if relation in {"SUPPLIER", "RIVAL", "CLIENT"} else None
+
+    rationale = reason_match.group(1).strip().splitlines()[0] if reason_match else ""
+
+    return {
+        "related_kr_tickers": related_kr_tickers,
+        "value_chain_type": value_chain_type,
+        "rationale": rationale,
+    }
+
+
+def extract_transmission_path(context_text, *, max_sentences=3):
+    """해외 시황 -> 전이 매개체 -> 국내 섹터 수급 3단계 추론.
+
+    상태 비저장(stateless) AI 헬퍼. 결과는 최대 max_sentences 문장의 단일 문자열.
+    AI 실패 시 빈 문자열을 반환한다.
+    """
+    if not context_text:
+        return ""
+
+    prompt = (
+        "[에이전트: 매크로 전이 분석가]\n"
+        f"해외 시황 맥락: {context_text[:600]}\n\n"
+        "위 해외 시황이 국내 증시에 미치는 영향을 다음 3단계 논리로 추론하라:\n"
+        "  1) 현상(해외에서 벌어진 일)\n"
+        "  2) 전이 매개체(환율/금리/원자재/심리 중 1~2가지)\n"
+        "  3) 내일 국내 섹터 수급 전망\n\n"
+        f"[출력 규약] 반드시 {max_sentences}문장 이내. 각 단계는 1문장씩. 다른 헤더/번호 없이 평문으로만 출력."
+    )
+
+    try:
+        raw = generate_text(prompt) or ""
+    except Exception as exc:
+        print(f"Log: [TransmissionPath] AI 호출 캡슐화: {exc}")
+        return ""
+
+    if not raw or "AI 설정 오류" in raw or "AI 리포트 생성 실패" in raw:
+        return ""
+
+    # 문장 단위로 잘라서 max_sentences 제한.
+    sentence_list = re.split(r"(?<=[\.!?\u3002])\s+", raw.strip())
+    sentence_list = [s.strip() for s in sentence_list if s.strip()]
+    return " ".join(sentence_list[:max_sentences])
 
 
 def _extract_section(report_text, head_label):
