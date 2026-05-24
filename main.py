@@ -50,7 +50,72 @@ def _bootstrap_market_chronicles():
         print(f"Log: [Chronicles Bootstrap] {e}", flush=True)
 
 
+def _bootstrap_scalp_backtest():
+    """기동 시 형태 백테스트 1회 실행 후 세션에 게이트 결과 반영."""
+    try:
+        from src.strategy import scalp_backtest
+        from src.utils import slack_interface as si
+
+        cached = scalp_backtest.load_persisted_result()
+        if cached and cached.get("run_at"):
+            result = cached
+        else:
+            result = scalp_backtest.run_and_persist(n_days=60)
+        si.set_backtest_gate_result(result)
+        print(
+            f"Log: [ScalpBacktest] passes_gate={result.get('passes_gate')} "
+            f"win_rate={result.get('win_rate')} total_return={result.get('total_return')}",
+            flush=True,
+        )
+        return result
+    except Exception as exc:
+        print(f"Log: [ScalpBacktest] bootstrap failed: {exc}", flush=True)
+        return None
+
+
+def _is_first_trading_day(now=None):
+    """주간 첫 거래일(월요일) 여부. 공휴일 보정은 후속."""
+    from src.utils.timekit import now_kst
+    current = now if now is not None else now_kst()
+    return current.weekday() == 0
+
+
+def _scalp_pre_job():
+    if not _is_first_trading_day():
+        return
+    orchestrator.scalp_pre_routine()
+
+
+def _scalp_open_fallback_job():
+    if not _is_first_trading_day():
+        return
+    orchestrator.scalp_force_default_at_open()
+
+
+def _scalp_intraday_job():
+    """장중 3분 주기: S_PRE 폴백 -> 포지션 없으면 S0 스캔, 있으면 S4 리스크 감시."""
+    from src.utils import helpers as market_hours
+    from src.utils import slack_interface as si
+    from src.strategy import scalp_logic
+
+    if not market_hours.is_market_open():
+        return
+    if scalp_logic.is_force_liquidation_time():
+        return
+    if not si.is_scalp_user_running():
+        return
+    if si.get_scalp_lifecycle() == si.SCALP_LIFECYCLE_PRE and si.get_weekly_budget() is None:
+        si.try_budget_fallback_during_intraday()
+        if si.get_weekly_budget() is None:
+            return
+    if si.has_scalp_position():
+        orchestrator.scalp_risk_monitor_cycle()
+    else:
+        orchestrator.scalp_scan_cycle()
+
+
 def run_scheduler():
+    bt_result = _bootstrap_scalp_backtest()
     schedule.every().day.at("08:00").do(orchestrator.issue_daily_token)
     schedule.every().day.at("08:45").do(orchestrator.daily_routine)
     schedule.every().day.at("08:50").do(lambda: orchestrator.auto_stock_discovery(KST))
@@ -60,6 +125,16 @@ def run_scheduler():
     schedule.every().day.at("14:30").do(orchestrator.afternoon_routine)
     schedule.every().day.at("15:35").do(orchestrator.chronicle_routine)
     schedule.every().monday.at("09:45").do(orchestrator.weekly_routine)
+
+    # 단타 스케줄: job 은 항상 등록, 실행 시 백테스트 PASS + 진행 ON 가드
+    schedule.every().monday.at("08:30").do(_scalp_pre_job)
+    schedule.every().monday.at("09:00").do(_scalp_open_fallback_job)
+    schedule.every().day.at("15:10").do(orchestrator.scalp_force_liquidation)
+    schedule.every(3).minutes.do(_scalp_intraday_job)
+    if bt_result and bt_result.get("passes_gate"):
+        print("Log: [ScalpSchedule] 백테스트 PASS - !단타시작 으로 진행 활성화 가능", flush=True)
+    else:
+        print("Log: [ScalpSchedule] 백테스트 FAIL - !단타백테스트 후 재시도 필요", flush=True)
     
     schedule.every(30).minutes.do(lambda: risk_manager.run_risk_monitor(
         kis, CONFIG, orchestrator.send_slack

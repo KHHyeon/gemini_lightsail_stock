@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import time
 from datetime import datetime
 from src.core import token_manager
@@ -476,3 +477,345 @@ class MarketOrchestrator:
         if not market_hours.is_market_open(): return
         self.send_slack("[System] 14:30 장 마감 전 안전 진단(3중 방어막)을 시작합니다.")
         self.daily_fundamental_stop_loss()
+
+    # =================================================================
+    # 단타 모드 (scalp_logic) 진입점
+    # 상세: Doc/features/scalp_logic/03_scalp_logic_api_state_logic.md
+    # =================================================================
+    def scalp_pre_routine(self):
+        """매주 첫 거래일 08:30 KST 트리거. S_PRE 상태 개시 + 슬랙 Block Kit 송신."""
+        from src.utils import slack_interface as si
+        if not si.is_scalp_schedule_enabled():
+            return {"state": "SKIP", "reason": "scalp_schedule_disabled"}
+        token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
+        self.kis.set_token(token)
+        hts = si.check_hts_condition_registered(self.kis)
+        if not hts.get("ok"):
+            self.send_slack(
+                f"[Warn] 주간 단타 예산 요청 생략: {hts.get('reason')}"
+            )
+            return {"state": "SKIP", "reason": hts.get("reason")}
+        si._scalp_session_dict["hts_condition_name"] = hts.get("condition_name")
+        si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_PRE)
+        result = si.request_weekly_budget_via_slack(
+            app=self.app, channel_id=self.config.get("CHANNEL_ID"), reset_budget=True,
+        )
+        if result.get("sent"):
+            return {"state": "S_PRE", "sent": True}
+        self.send_slack(
+            f"[Warn] 주간 단타 예산 입력 메시지 송신 실패: {result.get('reason')}. "
+            f"09:00 KST 또는 요청 후 {si._budget_timeout_minutes()}분 뒤 기본 5만원 자동 적용."
+        )
+        return {"state": "S_PRE", "sent": False}
+
+    def scalp_force_default_at_open(self):
+        """09:00 KST 정시 트리거. 무응답이면 기본 5만원 강제 적재 후 S0 전이."""
+        from src.utils import slack_interface as si
+        if not si.is_scalp_user_running():
+            return {"state": "SKIP", "reason": "scalp_not_running"}
+        applied = si.force_default_budget_if_idle(mode="open_0900")
+        if applied.get("applied"):
+            self.send_slack(
+                f"[A-Type] 주간 단타 예산 무응답 폴백 적용: {applied['amount']:,}원 "
+                "(자동 기본값). 즉시 S0. Scanning 으로 전이합니다."
+            )
+        next_state = "S0" if applied.get("applied") else si.get_scalp_lifecycle()
+        return {"state": next_state, **applied}
+
+    def scalp_force_liquidation(self, sell_fn=None):
+        """15:10 KST 강제 청산. ``sell_fn(ticker, qty) -> dict`` 주입(테스트용).
+
+        실패 시 B-Type 에러 슬랙 알림을 발행하고 상태를 ``HALT_B_TYPE`` 으로 반환.
+        """
+        from src.utils import slack_interface as si
+        if not si.is_scalp_user_running():
+            return {"state": "SKIP", "reason": "scalp_not_running"}
+        token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
+        self.kis.set_token(token)
+        portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+        scalp_positions = [
+            (t, info) for t, info in portfolio.items()
+            if info.get("mode_type") == "SCALP" and int(info.get("quantity", 0) or 0) > 0
+        ]
+        if not scalp_positions:
+            return {"state": "LIQUIDATED", "count": 0}
+
+        failures = []
+        for ticker, info in scalp_positions:
+            qty = int(info.get("quantity", 0))
+            try:
+                if sell_fn is not None:
+                    res = sell_fn(ticker, qty)
+                else:
+                    order_mgr = OrderManager(
+                        self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"],
+                        token, self.config["ACC_NO"],
+                    )
+                    res = order_mgr.submit(OrderRequest(
+                        ticker=ticker, name=info.get("name", ticker), quantity=qty,
+                        current_price=int(info.get("avg_price", 0) or 0),
+                        side="sell", reason="15:10 강제 청산 (오버나이트 차단)",
+                        mode_type="SCALP", strategy_tag="SCALP",
+                    ))
+                if not res or not res.get("success", False):
+                    failures.append((ticker, res.get("msg") if isinstance(res, dict) else "no msg"))
+            except Exception as exc:
+                failures.append((ticker, f"{type(exc).__name__}: {exc}"))
+
+        if failures:
+            self.send_slack(
+                "[B-Type] 15:10 강제 청산 실패. 사용자 개입 필요(Pause):\n"
+                + "\n".join(f"- {t}: {m}" for t, m in failures)
+            )
+            return {"state": "HALT_B_TYPE", "failures": failures}
+
+        from src.memory import scalp_trainer
+        from src.utils import slack_interface as si
+        for ticker, info in scalp_positions:
+            pos = si.get_scalp_position() or {}
+            shape_vector = pos.get("shape_vector") or []
+            avg = float(info.get("avg_price", 0) or 0)
+            curr = int(info.get("high_water_mark", avg) or avg)
+            pnl_ratio = (curr - avg) / avg if avg > 0 else 0.0
+            scalp_trainer.record_trade_result(
+                ticker, pnl_ratio > 0, shape_vector,
+                extra={"exit_reason": "force_1510", "similarity": pos.get("similarity")},
+            )
+        si.clear_scalp_position()
+        si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_LIQUIDATED)
+        return {"state": "LIQUIDATED", "count": len(scalp_positions)}
+
+    def _scalp_condition_name(self):
+        return os.getenv("SCALP_CONDITION_NAME", "당일_주도주_발굴")
+
+    def _scalp_detect_good_news(self, ticker, name):
+        """호재 키워드 간이 판정 (AI 호출 없음)."""
+        try:
+            news_list = news_crawler.get_latest_news(name, limit=3, search_type="stock")
+            text = " ".join(news_list or [])
+            positive_kw_list = ["호재", "급등", "신고가", "수주", "상승", "돌파"]
+            return any(kw in text for kw in positive_kw_list)
+        except Exception:
+            return False
+
+    def scalp_scan_cycle(self, *, candidate_provider=None, chart_provider=None):
+        """S0->S3: 후보 스캔 후 조건 충족 시 예산 100% 시장가 매수.
+
+        Args:
+            candidate_provider: 테스트용 후보 list[dict] 주입.
+            chart_provider: 테스트용 callable(ticker)->(ohlcv_3min, ma20, price).
+        """
+        from src.strategy import scalp_logic
+        from src.utils import slack_interface as si
+
+        if not si.is_scalp_schedule_enabled():
+            return {"state": "SKIP", "reason": "schedule_disabled"}
+        if si.has_scalp_position():
+            return {"state": "S4", "reason": "position_exists"}
+        budget = si.get_weekly_budget()
+        if not budget:
+            return {"state": "S_PRE", "reason": "budget_not_set"}
+        if scalp_logic.is_force_liquidation_time():
+            return {"state": "SKIP", "reason": "after_force_liquidation_time"}
+        if not market_hours.is_market_open():
+            return {"state": "SKIP", "reason": "market_closed"}
+
+        token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
+        self.kis.set_token(token)
+        macro = macro_collector.get_macro_indicators()
+        vix_score = macro.get("VIX") or macro.get("vix") or 0.0
+        preset_matrix = scalp_logic.build_default_preset_matrix()
+
+        if candidate_provider is not None:
+            candidate_list = candidate_provider
+        else:
+            candidate_list = quant_screener.run_condition_screener(
+                self.kis, self._scalp_condition_name(),
+            )
+        if not candidate_list:
+            si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_SCANNING)
+            return {"state": "S0", "reason": "no_candidates"}
+
+        max_scan = 10
+        for cand in candidate_list[:max_scan]:
+            ticker = cand.get("ticker")
+            if not ticker:
+                continue
+            name = cand.get("name") or ticker
+
+            if chart_provider is not None:
+                chart_bundle = chart_provider(ticker)
+                if not chart_bundle:
+                    continue
+                ohlcv_3min, ma20, market_price = chart_bundle
+            else:
+                ohlcv_3min = chart_data.get_3min_ohlcv_for_ticker(
+                    self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"],
+                    token, ticker,
+                )
+                if not ohlcv_3min:
+                    continue
+                daily = chart_data.get_daily_ohlcv(
+                    self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"],
+                    token, ticker, count=30,
+                )
+                ma20 = chart_data.compute_daily_ma20(daily)
+                val = self.kis.get_valuation_data(ticker) or {}
+                market_price = int(val.get("current_price", 0) or ohlcv_3min[-1].get("close", 0))
+
+            has_good_news = self._scalp_detect_good_news(ticker, name)
+            eval_result = scalp_logic.evaluate_entry_candidate(
+                ohlcv_3min, ma20,
+                preset_matrix=preset_matrix,
+                vix_score=vix_score,
+                has_good_news=has_good_news,
+            )
+            si.set_scalp_lifecycle(eval_result.get("state", si.SCALP_LIFECYCLE_SCANNING))
+
+            if not eval_result.get("enter"):
+                continue
+
+            qty = scalp_logic.calc_market_buy_qty(budget, market_price)
+            if qty <= 0:
+                return {"state": "S3", "reason": "qty_zero", "ticker": ticker}
+
+            order_mgr = OrderManager(
+                self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"],
+                token, self.config["ACC_NO"],
+            )
+            res = order_mgr.submit(OrderRequest(
+                ticker=ticker, name=name, quantity=qty,
+                current_price=market_price,
+                side="buy",
+                reason=(
+                    f"Scalp 진입 sim={eval_result.get('similarity', 0):.3f} "
+                    f"thr={eval_result.get('threshold', 0):.2f}"
+                ),
+                mode_type="SCALP", strategy_tag="SCALP",
+            ))
+            if not res.get("success"):
+                self.send_slack(f"[Scalp] 매수 실패 {name}({ticker}): {res.get('msg')}")
+                continue
+
+            si.set_scalp_position({
+                "ticker": ticker,
+                "name": name,
+                "qty": qty,
+                "remaining_qty": qty,
+                "avg_price": market_price,
+                "highest_price": market_price,
+                "half_sold": False,
+                "shape_vector": eval_result.get("shape_vector") or [],
+                "similarity": eval_result.get("similarity"),
+                "threshold": eval_result.get("threshold"),
+            })
+            si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_EXECUTED)
+            self.send_slack(
+                f"[Scalp 매수] {name}({ticker}) {qty}주 @ {market_price:,}원 "
+                f"(예산 {budget:,}원 100%)\n"
+                f"- 유사도 {eval_result.get('similarity', 0):.3f} / "
+                f"임계치 {eval_result.get('threshold', 0):.2f}"
+            )
+            return {
+                "state": "S3",
+                "ticker": ticker,
+                "qty": qty,
+                "price": market_price,
+                "similarity": eval_result.get("similarity"),
+            }
+
+        si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_SCANNING)
+        return {"state": "S0", "reason": "no_entry_signal"}
+
+    def scalp_risk_monitor_cycle(self, *, price_provider=None, sell_fn=None):
+        """S4: 보유 포지션 3중 방어막 틱 감시."""
+        from src.strategy import scalp_logic
+        from src.memory import scalp_trainer
+        from src.utils import slack_interface as si
+
+        if not si.is_scalp_user_running():
+            return {"state": "SKIP", "reason": "not_running"}
+        pos = si.get_scalp_position()
+        if not pos or int(pos.get("remaining_qty", 0) or 0) <= 0:
+            return {"state": "S0", "reason": "no_position"}
+
+        ticker = pos.get("ticker")
+        name = pos.get("name", ticker)
+        avg_price = float(pos.get("avg_price", 0) or 0)
+        remaining_qty = int(pos.get("remaining_qty", 0) or 0)
+        half_sold = bool(pos.get("half_sold"))
+        highest = float(pos.get("highest_price", avg_price) or avg_price)
+
+        if price_provider is not None:
+            current_price = float(price_provider(ticker))
+        else:
+            token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
+            self.kis.set_token(token)
+            val = self.kis.get_valuation_data(ticker) or {}
+            current_price = float(val.get("current_price", 0) or 0)
+
+        if current_price <= 0:
+            return {"state": "S4", "reason": "price_unavailable"}
+
+        if current_price > highest:
+            highest = current_price
+            si.update_scalp_position(highest_price=highest)
+
+        signal = scalp_logic.monitor_scalp_risk(
+            ticker, current_price, avg_price, highest, half_sold=half_sold,
+        )
+        si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_RISK)
+
+        if signal == "HOLD":
+            return {"state": "S4", "signal": signal, "price": current_price}
+
+        token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
+        sell_qty = remaining_qty
+        reason = "Scalp 리스크 방어막"
+
+        if signal == "TAKE_PROFIT_HALF":
+            sell_qty = max(1, remaining_qty // 2)
+            reason = "Scalp +3% 50% 익절"
+
+        if signal in ("STOP_LOSS_1_5", "TRAILING_STOP"):
+            reason = "Scalp 손절" if signal == "STOP_LOSS_1_5" else "Scalp 추적 익절"
+
+        if sell_fn is not None:
+            res = sell_fn(ticker, sell_qty)
+        else:
+            order_mgr = OrderManager(
+                self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"],
+                token, self.config["ACC_NO"],
+            )
+            res = order_mgr.submit(OrderRequest(
+                ticker=ticker, name=name, quantity=sell_qty,
+                current_price=int(current_price),
+                side="sell", reason=reason,
+                mode_type="SCALP", strategy_tag="SCALP",
+            ))
+
+        if not res or not res.get("success"):
+            self.send_slack(f"[B-Type] Scalp 매도 실패 {name}({ticker}): {res.get('msg') if res else 'no response'}")
+            return {"state": "HALT_B_TYPE", "signal": signal}
+
+        new_remaining = remaining_qty - sell_qty
+        if signal == "TAKE_PROFIT_HALF" and new_remaining > 0:
+            si.update_scalp_position(remaining_qty=new_remaining, half_sold=True, highest_price=highest)
+            self.send_slack(
+                f"[Scalp 익절 50%] {name}({ticker}) {sell_qty}주 @ {int(current_price):,}원 "
+                f"(잔여 {new_remaining}주 추적)"
+            )
+            return {"state": "S4", "signal": signal, "sold_qty": sell_qty}
+
+        pnl_ratio = (current_price - avg_price) / avg_price if avg_price > 0 else 0.0
+        scalp_trainer.record_trade_result(
+            ticker, pnl_ratio > 0, pos.get("shape_vector") or [],
+            extra={"exit_signal": signal, "similarity": pos.get("similarity")},
+        )
+        si.clear_scalp_position()
+        si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_LIQUIDATED)
+        self.send_slack(
+            f"[Scalp 청산] {name}({ticker}) {sell_qty}주 @ {int(current_price):,}원 "
+            f"({reason}, pnl {pnl_ratio*100:+.2f}%)"
+        )
+        return {"state": "S5", "signal": signal, "sold_qty": sell_qty, "pnl_ratio": pnl_ratio}

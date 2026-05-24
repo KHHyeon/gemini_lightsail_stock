@@ -10,6 +10,532 @@ from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
 
 pending_orders = {}
 
+# =====================================================================
+# 주간 단타 예산 세션 (S_PRE -> S0 전이용)
+# =====================================================================
+# orchestrator/scalp_logic 가 import 후 set/get 으로 접근한다.
+# 멀티프로세스를 가정하지 않으므로 모듈 전역 dict 로 충분.
+DEFAULT_WEEKLY_BUDGET = 50_000
+SCALP_LIFECYCLE_STOPPED = "STOPPED"
+SCALP_LIFECYCLE_PRE = "S_PRE"
+SCALP_LIFECYCLE_SCANNING = "S0"
+SCALP_LIFECYCLE_FILTERED = "S1"
+SCALP_LIFECYCLE_VALIDATING = "S2"
+SCALP_LIFECYCLE_EXECUTED = "S3"
+SCALP_LIFECYCLE_RISK = "S4"
+SCALP_LIFECYCLE_LIQUIDATED = "S5"
+
+_scalp_session_dict = {
+    "amount": None,
+    "is_pending_custom": False,
+    "set_via": None,
+    "set_at": None,
+    "lifecycle": SCALP_LIFECYCLE_STOPPED,
+    "is_user_running": False,
+    "backtest_passed": False,
+    "last_backtest": None,
+    "started_at": None,
+    "stopped_at": None,
+    "position": None,
+    "budget_requested_at": None,
+    "hts_condition_name": None,
+}
+
+# 예산 무응답 폴백: 장 개시 09:00 또는 요청 후 N분 경과
+DEFAULT_BUDGET_TIMEOUT_MIN = 30
+
+
+def _touch_session_time(key):
+    from src.utils.timekit import kst_iso_now
+    _scalp_session_dict[key] = kst_iso_now()
+
+
+def set_backtest_gate_result(result_dict):
+    """백테스트 결과를 세션에 반영."""
+    if not isinstance(result_dict, dict):
+        return
+    _scalp_session_dict["backtest_passed"] = bool(result_dict.get("passes_gate"))
+    _scalp_session_dict["last_backtest"] = {
+        "run_at": result_dict.get("run_at"),
+        "passes_gate": result_dict.get("passes_gate"),
+        "win_rate": result_dict.get("win_rate"),
+        "avg_return": result_dict.get("avg_return"),
+        "total_return": result_dict.get("total_return"),
+        "total_trades": result_dict.get("total_trades"),
+        "gate_reason": result_dict.get("gate_reason"),
+    }
+
+
+def is_backtest_passed():
+    return bool(_scalp_session_dict.get("backtest_passed"))
+
+
+def is_scalp_user_running():
+    return bool(_scalp_session_dict.get("is_user_running"))
+
+
+def is_scalp_schedule_enabled():
+    """스케줄러 등록 조건: 백테스트 통과 + 사용자 단타 진행 ON."""
+    return is_backtest_passed() and is_scalp_user_running()
+
+
+def get_scalp_lifecycle():
+    return _scalp_session_dict.get("lifecycle") or SCALP_LIFECYCLE_STOPPED
+
+
+def set_scalp_lifecycle(state_code):
+    _scalp_session_dict["lifecycle"] = str(state_code)
+
+
+def get_scalp_position():
+    pos = _scalp_session_dict.get("position")
+    return dict(pos) if isinstance(pos, dict) else None
+
+
+def set_scalp_position(position_dict):
+    """단타 보유 포지션 세션 적재 (동시 1종목)."""
+    if not isinstance(position_dict, dict):
+        return None
+    _scalp_session_dict["position"] = dict(position_dict)
+    set_scalp_lifecycle(SCALP_LIFECYCLE_RISK)
+    return get_scalp_position()
+
+
+def update_scalp_position(**fields):
+    pos = get_scalp_position()
+    if not pos:
+        return None
+    pos.update(fields)
+    _scalp_session_dict["position"] = pos
+    return pos
+
+
+def clear_scalp_position():
+    _scalp_session_dict["position"] = None
+    if is_scalp_user_running() and get_weekly_budget() is not None:
+        set_scalp_lifecycle(SCALP_LIFECYCLE_SCANNING)
+    return True
+
+
+def has_scalp_position():
+    pos = get_scalp_position()
+    return bool(pos and int(pos.get("qty", 0) or 0) > 0)
+
+
+def get_scalp_condition_name():
+    """`.env` SCALP_CONDITION_NAME (기본: 당일_주도주_발굴)."""
+    return (os.getenv("SCALP_CONDITION_NAME") or "당일_주도주_발굴").strip()
+
+
+def check_hts_condition_registered(kis_client):
+    """HTS 종목조건검색식 등록 여부 확인 (KIS psearch API).
+
+    Returns:
+        dict: ``{"ok": bool, "reason": str, "condition_name": str, "seq": str|None}``.
+    """
+    name = get_scalp_condition_name()
+    if not name:
+        return {"ok": False, "reason": "SCALP_CONDITION_NAME 환경변수 미설정", "condition_name": ""}
+    if kis_client is None:
+        return {"ok": False, "reason": "KIS 클라이언트 없음", "condition_name": name}
+    if not getattr(kis_client, "hts_id", None):
+        return {"ok": False, "reason": "HTS_ID 미설정 - .env 확인 필요", "condition_name": name}
+    if not getattr(kis_client, "token", None):
+        return {"ok": False, "reason": "KIS 토큰 미발급 - HTS 조건식 조회 불가", "condition_name": name}
+    seq = kis_client.find_condition_seq(name)
+    if not seq:
+        return {
+            "ok": False,
+            "reason": f"HTS 조건식 미등록: '{name}' (HTS 저장 후 SCALP_CONDITION_NAME 확인)",
+            "condition_name": name,
+            "seq": None,
+        }
+    return {"ok": True, "reason": "ok", "condition_name": name, "seq": seq}
+
+
+def _budget_timeout_minutes():
+    try:
+        return max(1, int(os.getenv("SCALP_BUDGET_TIMEOUT_MIN", str(DEFAULT_BUDGET_TIMEOUT_MIN))))
+    except (TypeError, ValueError):
+        return DEFAULT_BUDGET_TIMEOUT_MIN
+
+
+def _budget_fallback_timeout_reached(now=None):
+    """예산 요청 후 타임아웃(기본 30분) 경과 여부."""
+    from src.utils.timekit import now_kst, parse_iso_to_kst
+    requested_at = _scalp_session_dict.get("budget_requested_at")
+    if not requested_at:
+        return False
+    req_dt = parse_iso_to_kst(requested_at)
+    if req_dt is None:
+        return False
+    current = now if now is not None else now_kst()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=req_dt.tzinfo)
+    elapsed_min = (current - req_dt).total_seconds() / 60.0
+    return elapsed_min >= _budget_timeout_minutes()
+
+
+def start_scalp_trading(*, via="slack", kis_client=None, app=None, channel_id=None):
+    """단타 진행 시작. 백테스트 PASS + HTS 조건식 등록 필수.
+
+    시작 시 항상 예산을 초기화하고 S_PRE 로 진입한 뒤 Block Kit 예산 메시지를 보낸다.
+    (멈춤 후 재시작 포함 - 이전 예산 재사용하지 않음)
+    """
+    if not is_backtest_passed():
+        return {
+            "ok": False,
+            "reason": "백테스트 게이트 미통과. !단타백테스트 실행 후 재시도",
+        }
+    if kis_client is None:
+        return {"ok": False, "reason": "KIS 클라이언트 없음 - HTS 조건식 확인 불가"}
+    hts = check_hts_condition_registered(kis_client)
+    if not hts.get("ok"):
+        return {"ok": False, "reason": hts.get("reason", "HTS 조건식 확인 실패")}
+
+    reset_weekly_budget_session()
+    _scalp_session_dict["is_user_running"] = True
+    _scalp_session_dict["hts_condition_name"] = hts.get("condition_name")
+    _touch_session_time("started_at")
+    _touch_session_time("budget_requested_at")
+    set_scalp_lifecycle(SCALP_LIFECYCLE_PRE)
+
+    budget_prompt = request_weekly_budget_via_slack(
+        app=app, channel_id=channel_id, reset_budget=False,
+    )
+    return {
+        "ok": True,
+        "lifecycle": SCALP_LIFECYCLE_PRE,
+        "via": via,
+        "hts_condition": hts.get("condition_name"),
+        "budget_prompt_sent": bool(budget_prompt.get("sent")),
+        "budget_prompt_reason": budget_prompt.get("reason"),
+    }
+
+
+def stop_scalp_trading(*, via="slack"):
+    """단타 진행 중단."""
+    _scalp_session_dict["is_user_running"] = False
+    set_scalp_lifecycle(SCALP_LIFECYCLE_STOPPED)
+    _touch_session_time("stopped_at")
+    return {"ok": True, "lifecycle": SCALP_LIFECYCLE_STOPPED, "via": via}
+
+
+def format_scalp_status_text():
+    """슬랙/터미널용 단타 상태 요약 문자열."""
+    bt = _scalp_session_dict.get("last_backtest") or {}
+    budget = get_weekly_budget()
+    lines = [
+        "[ 단타(Scalp) 상태 ]",
+        f"- 진행: {'ON' if is_scalp_user_running() else 'OFF'}",
+        f"- 라이프사이클: {get_scalp_lifecycle()}",
+        f"- 주간 예산: {f'{budget:,}원' if budget else '미설정'}",
+        f"- 예산 설정 경로: {_scalp_session_dict.get('set_via') or '-'}",
+        f"- 백테스트 통과: {'YES' if is_backtest_passed() else 'NO'}",
+        f"- HTS 조건식: {_scalp_session_dict.get('hts_condition_name') or get_scalp_condition_name()}",
+    ]
+    if bt:
+        lines.append(
+            f"- 최근 백테스트: win_rate={bt.get('win_rate', 0):.2%}, "
+            f"avg={float(bt.get('avg_return') or 0):.4f}, "
+            f"total={float(bt.get('total_return') or 0):.4f} "
+            f"({bt.get('gate_reason', '-')})"
+        )
+    lines.append(
+        f"- 스케줄 활성: {'YES' if is_scalp_schedule_enabled() else 'NO'} "
+        "(백테스트 통과 + 진행 ON 필요)"
+    )
+    pos = get_scalp_position()
+    if pos:
+        lines.append(
+            f"- 보유: {pos.get('name', pos.get('ticker'))}({pos.get('ticker')}) "
+            f"{pos.get('qty')}주 @ {int(pos.get('avg_price', 0)):,}원 "
+            f"half_sold={'Y' if pos.get('half_sold') else 'N'}"
+        )
+    else:
+        lines.append("- 보유: 없음")
+    return "\n".join(lines)
+
+
+def get_scalp_session_state():
+    """전체 세션 스냅샷."""
+    snap = dict(_scalp_session_dict)
+    snap["schedule_enabled"] = is_scalp_schedule_enabled()
+    return snap
+
+
+def set_weekly_budget(amount_int, *, via="default"):
+    """확정된 주간 단타 예산을 세션에 안전하게 적재.
+
+    Args:
+        amount_int: 예산 금액(int|str). 정수 변환 실패 시 적재 거부.
+        via: 적재 경로 라벨 ("default" | "custom" | "fallback_timeout").
+
+    Returns:
+        int|None: 적재된 금액(KRW). 거부 시 None.
+    """
+    try:
+        amount = int(amount_int)
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0:
+        return None
+    from src.utils.timekit import kst_iso_now
+    _scalp_session_dict["amount"] = amount
+    _scalp_session_dict["is_pending_custom"] = False
+    _scalp_session_dict["set_via"] = str(via)
+    _scalp_session_dict["set_at"] = kst_iso_now()
+    if is_scalp_user_running():
+        set_scalp_lifecycle(SCALP_LIFECYCLE_SCANNING)
+    return amount
+
+
+def get_weekly_budget():
+    """적재된 주간 단타 예산 반환. 미확정 시 None."""
+    return _scalp_session_dict.get("amount")
+
+
+def reset_weekly_budget_session():
+    """S_PRE 재진입 시 예산 필드만 초기화 (진행/백테스트 상태 유지)."""
+    _scalp_session_dict["amount"] = None
+    _scalp_session_dict["is_pending_custom"] = False
+    _scalp_session_dict["set_via"] = None
+    _scalp_session_dict["set_at"] = None
+
+
+def get_weekly_budget_session_state():
+    """세션 스냅샷 조회(테스트/디버깅). 하위 호환 alias."""
+    return get_scalp_session_state()
+
+
+def _build_weekly_budget_blocks():
+    """주간 단타 예산 + 진행 제어 Block Kit 메시지 블록 생성."""
+    running_label = "ON" if is_scalp_user_running() else "OFF"
+    bt_label = "통과" if is_backtest_passed() else "미통과"
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*[ 주간 단타 설정 ]*\n"
+                    "예산을 선택하세요. *단타 시작/재시작 시마다 예산을 다시 확인*합니다.\n"
+                    f"현재 진행: *{running_label}* | 백테스트: *{bt_label}*\n"
+                    f"무응답 시: 09:00 KST 또는 요청 후 {_budget_timeout_minutes()}분 뒤 기본 5만원 자동 적용."
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "scalp_budget_actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "기본 5만원"},
+                    "style": "primary",
+                    "action_id": "budget_default",
+                    "value": str(DEFAULT_WEEKLY_BUDGET),
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "직접 입력"},
+                    "action_id": "budget_custom",
+                    "value": "custom",
+                },
+            ],
+        },
+        {
+            "type": "actions",
+            "block_id": "scalp_control_actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "단타 진행"},
+                    "style": "primary",
+                    "action_id": "scalp_start",
+                    "value": "start",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "단타 멈춤"},
+                    "style": "danger",
+                    "action_id": "scalp_stop",
+                    "value": "stop",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "상태 확인"},
+                    "action_id": "scalp_status",
+                    "value": "status",
+                },
+            ],
+        },
+    ]
+
+
+def request_weekly_budget_via_slack(app=None, channel_id=None, *, reset_budget=True):
+    """단타 예산 입력 Block Kit 메시지 발송.
+
+    Args:
+        app: slack_bolt App.
+        channel_id: 송신 채널 ID.
+        reset_budget: True 이면 예산 필드 초기화 (월요일 08:30 스케줄용).
+            False 이면 ``start_scalp_trading`` 직후 재요청 시 사용.
+    """
+    if reset_budget:
+        reset_weekly_budget_session()
+    _touch_session_time("budget_requested_at")
+    blocks = _build_weekly_budget_blocks()
+    resolved_channel = channel_id or os.getenv("SLACK_CHANNEL") or os.getenv("SLACK_CHANNEL_ID") or ""
+
+    if app is None:
+        return {"sent": False, "blocks": blocks, "channel": resolved_channel, "reason": "app=None"}
+    if not resolved_channel:
+        return {"sent": False, "blocks": blocks, "channel": None, "reason": "channel 미지정"}
+
+    try:
+        client = getattr(app, "client", None)
+        if client is None or not hasattr(client, "chat_postMessage"):
+            return {"sent": False, "blocks": blocks, "channel": resolved_channel, "reason": "client 없음"}
+        client.chat_postMessage(
+            channel=resolved_channel,
+            text="[주간 단타 예산 입력 요청]",
+            blocks=blocks,
+        )
+        return {"sent": True, "blocks": blocks, "channel": resolved_channel, "reason": "ok"}
+    except Exception as exc:
+        # A-Type: 전송 실패해도 폴백 흐름이 진행되어야 하므로 예외를 흡수.
+        return {
+            "sent": False,
+            "blocks": blocks,
+            "channel": resolved_channel,
+            "reason": f"송신 예외 격리: {type(exc).__name__}: {exc}",
+        }
+
+
+def handle_budget_slack_interaction(payload_dict):
+    """슬랙 인터랙티브 페이로드를 파싱하여 단타 예산 세션을 갱신.
+
+    오케스트레이터/슬랙 핸들러 양측이 동일 진입점을 쓰도록 외부 노출한다.
+    페이로드 종류:
+        - ``actions[0].action_id == "budget_default"``: 기본 5만원 적재.
+        - ``actions[0].action_id == "budget_custom"``: ``is_pending_custom=True`` 플래그
+          만 켜고, 후속 텍스트/모달 입력을 기다린다.
+        - ``view.callback_id == "budget_custom_modal_submit"``: 모달 제출 금액 적재.
+        - 일반 메시지 페이로드(``event.text`` 에 숫자만 포함)도 ``is_pending_custom``
+          상태에서는 금액으로 파싱.
+
+    Args:
+        payload_dict: 슬랙 페이로드 dict (Mock 가능).
+
+    Returns:
+        dict: ``{"status": "ok"|"pending"|"ignored"|"error", "amount": int|None, "via": str}``.
+    """
+    if not isinstance(payload_dict, dict):
+        return {"status": "error", "amount": None, "via": "invalid_payload"}
+
+    actions = payload_dict.get("actions") or []
+    if actions:
+        first = actions[0] if isinstance(actions[0], dict) else {}
+        action_id = first.get("action_id")
+        if action_id == "budget_default":
+            value = first.get("value") or DEFAULT_WEEKLY_BUDGET
+            amount = set_weekly_budget(value, via="default")
+            return {"status": "ok", "amount": amount, "via": "default"}
+        if action_id == "budget_custom":
+            _scalp_session_dict["is_pending_custom"] = True
+            return {"status": "pending", "amount": None, "via": "custom_wait"}
+
+    view = payload_dict.get("view") or {}
+    if view.get("callback_id") == "budget_custom_modal_submit":
+        state_values = ((view.get("state") or {}).get("values") or {})
+        # 임의 block_id 하위 input action 값을 탐색
+        raw_text = None
+        for _bid, blk in state_values.items():
+            if not isinstance(blk, dict):
+                continue
+            for _aid, item in blk.items():
+                if isinstance(item, dict) and item.get("type") == "plain_text_input":
+                    raw_text = item.get("value")
+                    break
+            if raw_text is not None:
+                break
+        if raw_text is None:
+            return {"status": "error", "amount": None, "via": "custom_modal_empty"}
+        digits = re.sub(r"[^\d]", "", str(raw_text))
+        if not digits:
+            return {"status": "error", "amount": None, "via": "custom_modal_invalid"}
+        amount = set_weekly_budget(digits, via="custom")
+        return {"status": "ok", "amount": amount, "via": "custom"}
+
+    event = payload_dict.get("event") or {}
+    raw_text = event.get("text")
+    if raw_text and _scalp_session_dict.get("is_pending_custom"):
+        digits = re.sub(r"[^\d]", "", str(raw_text))
+        if digits:
+            amount = set_weekly_budget(digits, via="custom")
+            return {"status": "ok", "amount": amount, "via": "custom"}
+        return {"status": "error", "amount": None, "via": "custom_text_invalid"}
+
+    return {"status": "ignored", "amount": None, "via": "no_match"}
+
+
+def force_default_budget_if_idle(*, mode="timeout"):
+    """S_PRE 무응답 폴백: 기본 5만원 강제 적재.
+
+    Args:
+        mode: ``"timeout"`` (요청 후 N분) | ``"open_0900"`` (09:00 정시 스케줄).
+
+    Returns:
+        dict: ``{"applied": bool, "amount": int|None, "via": str}``.
+    """
+    if get_weekly_budget() is not None:
+        return {"applied": False, "amount": get_weekly_budget(), "via": "already_set"}
+    if not is_scalp_user_running():
+        return {"applied": False, "amount": None, "via": "not_running"}
+    if get_scalp_lifecycle() != SCALP_LIFECYCLE_PRE:
+        return {"applied": False, "amount": None, "via": "not_s_pre"}
+
+    if mode == "open_0900":
+        eligible = True
+    elif mode == "timeout":
+        eligible = _budget_fallback_timeout_reached()
+    else:
+        eligible = False
+
+    if not eligible:
+        return {"applied": False, "amount": None, "via": "not_due"}
+
+    amount = set_weekly_budget(DEFAULT_WEEKLY_BUDGET, via="fallback_timeout")
+    set_scalp_lifecycle(SCALP_LIFECYCLE_SCANNING)
+    return {"applied": True, "amount": amount, "via": "fallback_timeout"}
+
+
+def try_budget_fallback_during_intraday():
+    """장중 3분 job: S_PRE + 무응답 시 30분 타임아웃 폴백."""
+    return force_default_budget_if_idle(mode="timeout")
+
+
+def handle_scalp_control_interaction(payload_dict, *, kis_client=None, app=None, channel_id=None):
+    """단타 진행/멈춤/상태확인 슬랙 액션 처리."""
+    if not isinstance(payload_dict, dict):
+        return {"status": "error", "reason": "invalid_payload"}
+    actions = payload_dict.get("actions") or []
+    if not actions:
+        return {"status": "ignored"}
+    action_id = (actions[0] or {}).get("action_id")
+    if action_id == "scalp_start":
+        result = start_scalp_trading(
+            via="slack_button", kis_client=kis_client, app=app, channel_id=channel_id,
+        )
+        return {"status": "ok" if result.get("ok") else "error", **result}
+    if action_id == "scalp_stop":
+        result = stop_scalp_trading(via="slack_button")
+        return {"status": "ok", **result}
+    if action_id == "scalp_status":
+        return {"status": "ok", "text": format_scalp_status_text()}
+    return {"status": "ignored"}
+
 def register_slack_handlers(app, kis, config, orchestrator):
     """슬랙 명령 핸들러 등록.
 
@@ -43,6 +569,8 @@ def register_slack_handlers(app, kis, config, orchestrator):
 - !백필재인덱싱 [건당대기초] : 기존 .md 보존, keyphrases 만 v3.2 포맷으로 재추출
 - !백필상태 : reports 트리와 master_index 정합 상태 진단 (읽기 전용)
 - !백필잔여정리 [dry] : master_index 외부의 백필 .md 만 정리 (dry 입력 시 미실행 보고)
+- !단타시작 / !단타멈춤 / !단타상태 : 단타(Scalp) 진행 제어 및 상태 조회
+- !단타백테스트 [일수] : 형태 기반 백테스트 실행 (기본 60일, 가격 무관)
 - 확인 : 직전 백필 스캔 결과를 그대로 실행
 - 완료 : Google Drive Pause 해제 후 재검증"""
         say(help_text)
@@ -575,6 +1103,144 @@ def register_slack_handlers(app, kis, config, orchestrator):
     def action_reject_buy(ack, body, respond):
         ack(); (pending_orders.pop(body["actions"][0]["value"]) if body["actions"][0]["value"] in pending_orders else None)
         respond(text=f"[Notice] <@{body['user']['id']}> 님이 매수를 기각했습니다.", replace_original=True)
+
+    @app.action("budget_default")
+    def action_budget_default(ack, body, respond):
+        """주간 단타 예산 - '기본 5만원' 버튼."""
+        ack()
+        result = handle_budget_slack_interaction(body)
+        if result.get("status") == "ok":
+            respond(
+                text=f"[Success] 주간 단타 예산 {result['amount']:,}원 으로 확정되었습니다. S0 스캐닝으로 전이합니다.",
+                replace_original=True,
+            )
+        else:
+            respond(text=f"[Error] 예산 적재 실패: {result}", replace_original=False)
+
+    @app.action("budget_custom")
+    def action_budget_custom(ack, body, client, respond):
+        """주간 단타 예산 - '직접 입력' 버튼. 모달을 띄워 금액을 받는다."""
+        ack()
+        handle_budget_slack_interaction(body)  # is_pending_custom=True
+        trigger_id = body.get("trigger_id")
+        try:
+            client.views_open(
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "callback_id": "budget_custom_modal_submit",
+                    "title": {"type": "plain_text", "text": "단타 예산 입력"},
+                    "submit": {"type": "plain_text", "text": "확정"},
+                    "close": {"type": "plain_text", "text": "취소"},
+                    "blocks": [
+                        {
+                            "type": "input",
+                            "block_id": "budget_input_block",
+                            "label": {"type": "plain_text", "text": "주간 단타 예산 (KRW)"},
+                            "element": {
+                                "type": "plain_text_input",
+                                "action_id": "budget_input_value",
+                                "placeholder": {"type": "plain_text", "text": "예: 70000"},
+                            },
+                        }
+                    ],
+                },
+            )
+        except Exception as exc:
+            respond(text=f"[Warn] 모달 열기 실패({type(exc).__name__}). 채팅에 숫자만 입력해 주세요.", replace_original=False)
+
+    @app.view("budget_custom_modal_submit")
+    def view_budget_custom_submit(ack, body, client):
+        """직접 입력 모달 제출 처리."""
+        ack()
+        result = handle_budget_slack_interaction(body)
+        user_id = (body.get("user") or {}).get("id") or ""
+        channel_id = config.get("CHANNEL_ID") or os.getenv("SLACK_CHANNEL") or ""
+        if result.get("status") == "ok" and channel_id:
+            try:
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"[Success] <@{user_id}> 님이 단타 예산을 {result['amount']:,}원으로 확정했습니다. S0 스캐닝으로 전이합니다.",
+                )
+            except Exception:
+                pass
+
+    @app.action("scalp_start")
+    def action_scalp_start(ack, body, respond):
+        ack()
+        token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+        kis.set_token(token)
+        result = handle_scalp_control_interaction(
+            body, kis_client=kis, app=app, channel_id=config.get("CHANNEL_ID"),
+        )
+        if result.get("ok"):
+            respond(
+                text=f"[Success] 단타 진행 ON ({result.get('lifecycle')}). 예산 Block Kit 확인.\n{format_scalp_status_text()}",
+                replace_original=False,
+            )
+        else:
+            respond(text=f"[Error] {result.get('reason', '시작 실패')}", replace_original=False)
+
+    @app.action("scalp_stop")
+    def action_scalp_stop(ack, body, respond):
+        ack()
+        handle_scalp_control_interaction(body)
+        respond(
+            text=f"[Notice] 단타 진행 OFF.\n{format_scalp_status_text()}",
+            replace_original=False,
+        )
+
+    @app.action("scalp_status")
+    def action_scalp_status(ack, body, respond):
+        ack()
+        respond(text=format_scalp_status_text(), replace_original=False)
+
+    @app.message(re.compile(r"^!단타시작\s*$", re.IGNORECASE))
+    def cmd_scalp_start(message, say):
+        token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+        kis.set_token(token)
+        result = start_scalp_trading(
+            via="slack_cmd", kis_client=kis, app=app, channel_id=config.get("CHANNEL_ID"),
+        )
+        if result.get("ok"):
+            say(
+                f"[Success] 단타 진행 ON ({result.get('lifecycle')}). 예산 Block Kit 확인.\n"
+                f"{format_scalp_status_text()}"
+            )
+        else:
+            say(f"[Error] {result.get('reason')}")
+
+    @app.message(re.compile(r"^!단타멈춤\s*$", re.IGNORECASE))
+    def cmd_scalp_stop(message, say):
+        stop_scalp_trading(via="slack_cmd")
+        say(f"[Notice] 단타 진행 OFF.\n{format_scalp_status_text()}")
+
+    @app.message(re.compile(r"^!단타상태\s*$", re.IGNORECASE))
+    def cmd_scalp_status(message, say):
+        say(format_scalp_status_text())
+
+    @app.message(re.compile(r"^!단타백테스트(?:\s+(\d+))?\s*$", re.IGNORECASE))
+    def cmd_scalp_backtest(message, say):
+        text = message.get("text", "")
+        m = re.match(r"^!단타백테스트(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
+        n_days = int(m.group(1)) if (m and m.group(1)) else 60
+        say(f"[System] 형태 기반 단타 백테스트 실행 중 (n_days={n_days}, 가격 무관)...")
+
+        def bg_task():
+            from src.strategy import scalp_backtest
+            result = scalp_backtest.run_and_persist(n_days=n_days)
+            set_backtest_gate_result(result)
+            status = "PASS" if result.get("passes_gate") else "FAIL"
+            say(
+                f"[백테스트 {status}] trades={result.get('total_trades')}, "
+                f"win_rate={result.get('win_rate', 0):.2%}, "
+                f"avg={float(result.get('avg_return') or 0):.4f}, "
+                f"total={float(result.get('total_return') or 0):.4f}\n"
+                f"- {result.get('gate_reason')}\n"
+                f"- 스케줄 등록 조건: 백테스트 PASS + !단타시작(진행 ON)"
+            )
+
+        threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!수동등록", re.IGNORECASE))
     def manual_register_stock(message, say):

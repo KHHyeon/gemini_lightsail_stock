@@ -56,6 +56,8 @@ class OrderManager:
         - 그 외 (``SMALL`` / ``NORMAL``) → ``TRADING_MODE_SMALL`` /
           ``TRADING_MODE_NORMAL`` 환경변수를 따른다 (기본 ``"PAPER"``).
         """
+        if mode_type == "SCALP":
+            return os.getenv("TRADING_MODE_SCALP", "PAPER").upper()
         if mode_type == "PAPER_ONLY":
             return "PAPER"
         if mode_type == "LIVE_MANUAL":
