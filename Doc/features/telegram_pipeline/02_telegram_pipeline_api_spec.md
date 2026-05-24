@@ -6,13 +6,18 @@
 - 목적: 텔레그램 인증/채널 설정의 최소 구성 여부 확인.
 - 반환: 구성 완료 시 True. 누락/잘못 구성 시 False(예외 던지지 않음).
 
-### `fetch_new_messages(channel_id_list, last_id_map) -> list[dict]`
-- 목적: 채널별 신규 메시지 조회.
+### `fetch_new_messages(channel_id_list, last_id_map, *, limit_per_channel=None) -> list[dict]`
+- 목적: 채널별 신규 메시지 조회 (Telethon, min_id=last_id_map 값).
 - 인자:
     - `channel_id_list`: 수집 대상 채널 식별자 리스트.
     - `last_id_map`: `{channel_id: last_message_id}` 형태의 영속화 맵.
+    - `limit_per_channel`: 채널당 최대 수집 건수(기본 50).
 - 반환: 정규화 전 메시지 dict 리스트.
     - 단일 메시지 dict 키: `channel_id`, `message_id`, `posted_at`, `raw_text`.
+- 환경 변수 (기능 사양 전용, `.env` 주입):
+    - `TG_API_ID`, `TG_API_HASH`, `TG_SESSION_NAME`: Telethon 인증.
+    - `TG_CHANNEL_ID_LIST`: 쉼표 구분 채널 목록 (파이프라인 기본값).
+    - `TG_SMOKE_CHANNEL_ID`: 스모크 테스트 단일 채널(선택).
 - 에러 격리:
     - 인증/네트워크/Rate Limit 예외는 내부 캡슐화 후 빈 리스트 반환(A-Type).
     - 단일 메시지 파싱 실패는 해당 항목만 스킵(전체는 부분 결과 반환).

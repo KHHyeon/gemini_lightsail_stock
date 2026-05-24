@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Telegram Ingestion Pipeline (스켈레톤).
+"""Telegram Ingestion Pipeline.
 
 본 모듈의 단일 책임:
     1) src/core/telegram_client.py 를 통해 raw 메시지를 받아온다.
@@ -14,15 +14,22 @@
     - 본 모듈의 모든 공개 함수는 호출자에게 예외를 던지지 않는다.
     - 외부 장애·일시 오류는 결과 dict 의 status / note 필드로만 표현한다.
     - 트레이딩 코어의 실행 흐름은 텔레그램 장애와 무관하게 진행된다.
-
-본 파일은 스켈레톤이다. 실제 파싱/키워드 추출 로직은 추후 PR 로 채워넣는다.
 """
 
 from __future__ import annotations
 
+import os
+
+from dotenv import load_dotenv
+
 from src.core import telegram_client
+from src.utils.jsonio import read_local_json, write_local_json
+from src.utils.paths import project_root
+
+load_dotenv()
 
 MAX_TEXT_LENGTH = 1000
+LAST_ID_MAP_FILENAME = "telegram_last_id_map.json"
 
 
 def run_ingestion(channel_id_list=None):
@@ -82,6 +89,7 @@ def run_ingestion(channel_id_list=None):
             message_list.append(normalized_dict)
 
         updated_last_id_map = _update_last_id_map(last_id_map, message_list)
+        _save_last_id_map(updated_last_id_map)
 
         return {
             "status": "ok",
@@ -151,20 +159,28 @@ def _extract_keyword_list(clean_text):
 
 
 def _load_default_channel_id_list():
-    """운영 설정에서 기본 채널 목록을 로드(스켈레톤).
+    """운영 설정(TG_CHANNEL_ID_LIST)에서 기본 채널 목록을 로드."""
+    raw = os.getenv("TG_CHANNEL_ID_LIST", "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
-    구체적인 환경 변수 이름·경로는 운영 매뉴얼에서 관리한다(아키텍처 문서에는
-    운영 정책만 명시). 현재 스켈레톤에서는 빈 리스트만 반환한다.
-    """
-    return []
+
+def _last_id_map_path():
+    return os.path.join(project_root(), LAST_ID_MAP_FILENAME)
 
 
 def _load_last_id_map():
-    """채널별 last_message_id 영속화 맵을 로드(스켈레톤).
+    """채널별 last_message_id 영속화 맵을 로드."""
+    data = read_local_json(_last_id_map_path(), default={})
+    return data if isinstance(data, dict) else {}
 
-    저장 경로/포맷은 운영 매뉴얼에서 관리한다. 본 스켈레톤은 빈 맵만 반환한다.
-    """
-    return {}
+
+def _save_last_id_map(last_id_map):
+    """채널별 last_message_id 영속화 맵을 저장."""
+    if not isinstance(last_id_map, dict):
+        return
+    write_local_json(_last_id_map_path(), last_id_map)
 
 
 def _update_last_id_map(last_id_map, message_list):
