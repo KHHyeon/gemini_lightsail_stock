@@ -183,25 +183,30 @@ def evaluate_chronicle_trigger(vix, kospi_chg, kosdaq_chg):
 # =====================================================================
 #
 # Doc/features/ai_investment_decision/03_state_logic.md §1 참조.
-# 임계값/라벨 변경은 본 파일에서만 수행한다. LLM 은 본 라벨을 재선택할 수 없으며,
-# review_opinion_with_ai 의 ±1 단계 보정 제안만 입력으로 사용된다.
+# v1.3 (2026-05-25):
+#   - "분석보류" 라벨 신설. 데이터 부족/유동성 미달 종목을 0점/매수반대로 처리하지 않는다.
+#   - 임계값 재조정 (80/65/50/35) — 5축 GARP 채점 평균 분포 반영.
+#   - AI sanity 보정 폭을 ±1 → ±2 로 확장 (MAX_OPINION_DELTA).
+# 임계값/라벨 변경은 본 파일에서만 수행한다.
 
+OPINION_LABEL_HOLD = "분석보류"
 OPINION_LABEL_DISAGREE = "매수반대"
 OPINION_LABEL_NEUTRAL = "관망/주의"
 OPINION_LABEL_CAUTION = "매수주의"
 OPINION_LABEL_AGREE = "매수찬성"
 OPINION_LABEL_STRONG = "매수적극찬성"
 
-# (min_score, label) 의 내림차순 리스트.
+# (min_score, label) 의 내림차순 리스트. score=None 은 derive 함수가 별도 처리.
 OPINION_THRESHOLDS_LIST = [
-    (85, OPINION_LABEL_STRONG),
-    (70, OPINION_LABEL_AGREE),
-    (60, OPINION_LABEL_CAUTION),
-    (50, OPINION_LABEL_NEUTRAL),
+    (80, OPINION_LABEL_STRONG),
+    (65, OPINION_LABEL_AGREE),
+    (50, OPINION_LABEL_CAUTION),
+    (35, OPINION_LABEL_NEUTRAL),
     (0, OPINION_LABEL_DISAGREE),
 ]
 
 # 낮은 강도 → 높은 강도 정렬 라벨 리스트 (인접 보정 계산용).
+# 분석보류는 보정 대상에서 제외 (별도 분기).
 OPINION_LABEL_ORDER = [
     OPINION_LABEL_DISAGREE,
     OPINION_LABEL_NEUTRAL,
@@ -210,17 +215,28 @@ OPINION_LABEL_ORDER = [
     OPINION_LABEL_STRONG,
 ]
 
+# AI sanity 검토(review_opinion_with_ai)가 제안 가능한 delta 의 최대 절대값.
+# 기본 ±1, 강한 정성적 근거(어닝 쇼크/패러다임 전환)에 한해 ±2 허용.
+MAX_OPINION_DELTA = 2
+
 
 def derive_opinion_from_score(score):
     """펀더멘털 점수 → 의견 라벨 1종.
 
     Args:
-        score: 정수/실수/문자열 형태의 점수. 변환 실패 시 0 으로 간주.
+        score: 정수/실수/문자열 형태의 점수. ``None``/음수/비숫자 → 분석보류.
 
     Returns:
-        str: ``OPINION_LABEL_ORDER`` 중 1개.
+        str: ``OPINION_LABEL_ORDER`` 중 1개 또는 ``OPINION_LABEL_HOLD``.
     """
-    s = _safe_float(score, default=0.0)
+    if score is None:
+        return OPINION_LABEL_HOLD
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return OPINION_LABEL_HOLD
+    if s < 0:
+        return OPINION_LABEL_HOLD
     for min_s, label in OPINION_THRESHOLDS_LIST:
         if s >= min_s:
             return label
@@ -234,18 +250,26 @@ def adjust_opinion_label(label, delta):
     범위를 벗어나면 양 끝 라벨로 클램프한다.
 
     Args:
-        label: ``OPINION_LABEL_ORDER`` 중 1개.
+        label: ``OPINION_LABEL_ORDER`` 중 1개. ``OPINION_LABEL_HOLD`` 입력 시
+            보정을 적용하지 않고 그대로 반환한다.
         delta: 정수. 양수면 강도 상향, 음수면 하향.
+            절댓값은 ``MAX_OPINION_DELTA`` 로 클램프된다.
 
     Returns:
         str: 보정 후 라벨. 입력 라벨이 미등록이면 입력값 그대로 반환.
     """
+    if label == OPINION_LABEL_HOLD:
+        return label
     if label not in OPINION_LABEL_ORDER:
         return label
     try:
         d = int(delta)
     except (TypeError, ValueError):
         d = 0
+    if d > MAX_OPINION_DELTA:
+        d = MAX_OPINION_DELTA
+    elif d < -MAX_OPINION_DELTA:
+        d = -MAX_OPINION_DELTA
     idx = OPINION_LABEL_ORDER.index(label)
     new_idx = max(0, min(len(OPINION_LABEL_ORDER) - 1, idx + d))
     return OPINION_LABEL_ORDER[new_idx]

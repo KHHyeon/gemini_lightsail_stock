@@ -154,35 +154,59 @@ FALLBACK_REASON_AMBIGUOUS = "AI 가중치 판단 모호 - 국내 펀더멘털 �
 def review_opinion_with_ai(
     ticker, name, score, code_label, val, news, theme_context,
     *, telegram_insight_list=None, domestic_news_list=None,
+    max_abs_delta=None,
 ):
     """코드가 산출한 의견 라벨에 대한 AI sanity 검토 + 정성적 가중치 평가.
 
-    LLM 은 의견 라벨을 재선택하지 못하며, ±1 단계 보정만 제안한다.
-    텔레그램 해외 변수와 국내 뉴스 변수가 동시 주입될 때, 종목 비즈니스 모델
-    (수출주/내수주/기술주 등)에 맞춰 두 변수 사이의 정성적 가중치를 비교하여
-    delta 산출의 핵심 근거로 사용한다.
+    LLM 은 의견 라벨을 재선택하지 못하며, ±max_abs_delta 단계(기본 ±2) 보정만
+    제안한다. 텔레그램 해외 변수와 국내 뉴스 변수가 동시 주입될 때, 종목
+    비즈니스 모델(수출주/내수주/기술주 등)에 맞춰 두 변수 사이의 정성적
+    가중치를 비교하여 delta 산출의 핵심 근거로 사용한다.
+
+    분석보류(score=None 또는 code_label==OPINION_LABEL_HOLD) 인 경우 AI 호출을
+    스킵하고 ``delta=0`` 으로 반환한다 — 보류 라벨은 보정 대상이 아니다.
 
     [폴백 정책]
-    - AI 응답이 파싱 실패/타임아웃이거나, 1문장 사유에서 명확한 결론을 도출하지
-      못하는 모호한 경우(예: '판단 보류', '추가 정보 필요' 등), 코드가 산출한
-      국내 펀더멘털 점수를 최우선 앵커로 신뢰하여 delta=0 으로 폴백한다.
-    - 폴백 사유는 FALLBACK_REASON_AMBIGUOUS 로 일관 로깅한다.
+    - AI 응답 파싱 실패/타임아웃/모호한 경우 → ``delta=0`` + FALLBACK_REASON_AMBIGUOUS.
+    - ±2 토큰은 강한 정성적 근거가 있을 때만 사용. 명확하지 않으면 [유지].
 
     Args:
         ticker/name/score/code_label/val/news/theme_context: 기존 sanity 인자.
-        telegram_insight_list: 텔레그램 파이프라인이 정규화한 dict 리스트.
-            (해외 글로벌 리더 동향, 매크로 전이 분석 등)
-        domestic_news_list: 국내 시황/뉴스 dict 리스트(수급/섹터/정책 이슈 등).
+        telegram_insight_list: 텔레그램 파이프라인 dict 리스트.
+        domestic_news_list: 국내 시황/뉴스 dict 리스트.
+        max_abs_delta: 보정 폭 최대 절대값. ``None`` 이면 ``_mt.MAX_OPINION_DELTA``.
 
     Returns:
-        dict: {"delta": int (-1|0|+1), "reason": str}
+        dict: {"delta": int, "reason": str}
     """
+    if max_abs_delta is None:
+        max_abs_delta = getattr(_mt, "MAX_OPINION_DELTA", 2)
+    try:
+        max_abs_delta = int(max_abs_delta)
+    except (TypeError, ValueError):
+        max_abs_delta = 2
+    max_abs_delta = max(1, min(max_abs_delta, 4))
+
+    # 분석보류 라벨은 보정 대상이 아니다 — AI 호출 자체를 스킵하여 토큰 절약.
+    if code_label == getattr(_mt, "OPINION_LABEL_HOLD", "분석보류") or score is None:
+        return {"delta": 0, "reason": "분석보류 - AI 보정 미적용"}
+
     telegram_block = _format_external_context_block(
         telegram_insight_list, head_label="[해외 변수 (텔레그램)]"
     )
     domestic_block = _format_external_context_block(
         domestic_news_list, head_label="[국내 변수 (뉴스/수급)]"
     )
+
+    if max_abs_delta >= 2:
+        token_guide = (
+            "4) 의견 라벨 변경 폭은 ±2단계 이내. 기본은 ±1, ±2 는 강한 정성적 근거"
+            "(어닝 쇼크/패러다임 전환/임상 실패 등)에 한해 사용한다.\n"
+        )
+        token_set = "[유지] / [+1] / [-1] / [+2] / [-2]"
+    else:
+        token_guide = "4) 의견 라벨 변경 폭은 ±1단계 이내로 제한된다.\n"
+        token_set = "[유지] / [+1] / [-1]"
 
     prompt = (
         "[에이전트: 정성적 가중치 검토관]\n"
@@ -196,10 +220,10 @@ def review_opinion_with_ai(
         "1) 위 데이터에는 텔레그램(해외 글로벌 리더/매크로 전이)과 국내 뉴스(수급/섹터)가 동시 주입될 수 있다.\n"
         "2) 대상 종목의 비즈니스 모델 특성(수출주/내수주/기술주/금융주 등)에 맞춰 두 변수의 정성적 가중치를 비교하라.\n"
         "3) 상충 시(예: 해외 호재 vs 국내 악재) 가중치가 높은 쪽을 따라 delta 를 결정하라.\n"
-        "4) 의견 라벨 변경 폭은 ±1단계 이내로 제한된다.\n"
+        f"{token_guide}"
         "5) 명확한 가중치 비교 결론을 낼 수 없으면 반드시 [유지] 를 선택하라.\n\n"
         "[출력 형식 - 반드시 아래 두 줄만 출력]\n"
-        "1줄: [유지] / [+1] / [-1] 중 1개\n"
+        f"1줄: {token_set} 중 1개\n"
         "2줄: 정성적 가중치 비교 결론이 포함된 사유 1문장"
     )
 
@@ -217,16 +241,26 @@ def review_opinion_with_ai(
         print(f"Log: [ReviewOpinion] 모호 응답 폴백 (raw={res[:80]!r})")
         return {"delta": 0, "reason": FALLBACK_REASON_AMBIGUOUS}
 
-    if "+1" in head:
+    # ±2/±1 토큰 순으로 우선 매칭 (큰 값 우선 — '+2' 가 '+1' 보다 먼저 매칭).
+    if "+2" in head and max_abs_delta >= 2:
+        delta = 2
+    elif "-2" in head and max_abs_delta >= 2:
+        delta = -2
+    elif "+1" in head:
         delta = 1
     elif "-1" in head:
         delta = -1
     elif "유지" in head:
         delta = 0
     else:
-        # 정규식 미일치도 모호 응답으로 간주하여 폴백.
         print(f"Log: [ReviewOpinion] 정규식 미일치 폴백 (head={head!r})")
         return {"delta": 0, "reason": FALLBACK_REASON_AMBIGUOUS}
+
+    # 안전 클램프 — 모델이 가이드를 무시하고 ±2 를 사용한 경우 대비.
+    if delta > max_abs_delta:
+        delta = max_abs_delta
+    elif delta < -max_abs_delta:
+        delta = -max_abs_delta
 
     return {"delta": delta, "reason": reason or head}
 
@@ -270,8 +304,8 @@ def _is_ambiguous_response(raw_text, head):
     for kw in _AMBIGUOUS_KEYWORD_LIST:
         if kw in lowered:
             return True
-    # head 라인에 결정 토큰(유지/+1/-1)이 전혀 없는 경우도 모호로 간주.
-    if not any(token in head for token in ["유지", "+1", "-1"]):
+    # head 라인에 결정 토큰(유지/+1/-1/+2/-2)이 전혀 없는 경우도 모호로 간주.
+    if not any(token in head for token in ["유지", "+1", "-1", "+2", "-2"]):
         # 결정 토큰 없음 -> 호출자에서 정규식 미일치 폴백 경로로 처리하도록 False 반환.
         return False
     return False
@@ -417,25 +451,29 @@ def get_emergency_news_check(name, news_text):
 
 def get_multi_agent_investment_report(
     ticker, stock_name, chart_30d, macro, pf, valuation, theme_context, recent_news,
-    *, fundamental_score, fundamental_details=None
+    *, fundamental_score, fundamental_details=None,
+    unscorable_reason=None, telegram_insights_list=None,
 ):
-    """멀티 에이전트 투자 리포트. v3.5 부터 의견 라벨은 코드가 결정한다.
+    """멀티 에이전트 투자 리포트. v1.3 (5축 GARP) 채점과 정합.
 
     - 코드: ``derive_opinion_from_score(fundamental_score)`` → ``opinion_code``
-    - AI 검토: ``review_opinion_with_ai`` → ``delta`` (±1 단계 이내)
+      (``score=None`` 이면 ``OPINION_LABEL_HOLD``)
+    - AI 검토: ``review_opinion_with_ai`` → ``delta`` (±2 단계 이내).
+      보류 라벨인 경우 AI 호출 스킵.
     - 코드: ``adjust_opinion_label(opinion_code, delta)`` → ``opinion_final``
     - LLM: 분석가/리스크 의견 + 근거/상승/손절 텍스트만 생성.
-    - 코드: ``[한줄요약]`` 라인 직접 조립.
+    - 코드: ``[한줄요약]`` 라인 직접 조립 (보류일 때 별도 양식).
 
     Returns:
         tuple[str, dict]: ``(report_text, meta)``.
             ``meta`` 키: ``score``, ``opinion_code``, ``opinion_final``,
-            ``opinion_delta``, ``ai_review_reason``.
+            ``opinion_delta``, ``ai_review_reason``, ``unscorable_reason``.
     """
     opinion_code = _mt.derive_opinion_from_score(fundamental_score)
     review = review_opinion_with_ai(
         ticker, stock_name, fundamental_score, opinion_code,
         valuation, recent_news, theme_context,
+        telegram_insight_list=telegram_insights_list,
     )
     delta = int(review.get("delta", 0) or 0)
     opinion_final = _mt.adjust_opinion_label(opinion_code, delta)
@@ -504,11 +542,19 @@ def get_multi_agent_investment_report(
     upside = _extract_section(body, "[상승조건]")
     downside = _extract_section(body, "[손절조건]")
 
-    summary_line = (
-        f"[한줄요약] [의견: {opinion_final}] | "
-        f"[점수: {fundamental_score} ({opinion_code} → 보정 {delta:+d})] | "
-        f"[근거] {rationale} | [상승조건] {upside} | [손절조건] {downside}"
-    )
+    if opinion_code == getattr(_mt, "OPINION_LABEL_HOLD", "분석보류"):
+        reason_tag = unscorable_reason or "데이터 부족"
+        summary_line = (
+            f"[한줄요약] [의견: {opinion_final} - {reason_tag}] | "
+            f"[점수: N/A] | [근거] {rationale} | "
+            f"[상승조건] {upside} | [손절조건] {downside}"
+        )
+    else:
+        summary_line = (
+            f"[한줄요약] [의견: {opinion_final}] | "
+            f"[점수: {fundamental_score} ({opinion_code} → 보정 {delta:+d})] | "
+            f"[근거] {rationale} | [상승조건] {upside} | [손절조건] {downside}"
+        )
 
     cleaned_body = re.sub(r"\[한줄요약\].*$", "", body or "", flags=re.DOTALL).rstrip()
     full_report = f"{cleaned_body}\n\n{summary_line}"
@@ -518,6 +564,7 @@ def get_multi_agent_investment_report(
         "opinion_final": opinion_final,
         "opinion_delta": delta,
         "ai_review_reason": review.get("reason", ""),
+        "unscorable_reason": unscorable_reason,
     }
     return full_report, meta
 

@@ -1,54 +1,95 @@
 # AI Investment Decision State Logic
 
-버전별 구현율: v1.1 (100% 설계, 100% 구현) -> v1.2 (국내/해외 변수 정성적 가중치 융합 및 폴백 정책 반영)
+## 구현율
+- v1.3 (2026-05-25): 5축 채점 + 분석보류 라벨 + AI ±2 확장.
 
-1. 점수 → 의견 라벨 결정 (코드)
+## 1. 점수 → 의견 라벨 결정 (코드)
 
 | 점수 범위 | 의견 라벨 | 비고 |
-| ------ | ------ | ------ |
-| 85 이상 | 매수적극찬성 | 최상위 권장 |
-| 70 ~ 84 | 매수찬성 | 통상 매수 권장 |
-| 60 ~ 69 | 매수주의 | 분할/소액 검토 |
-| 50 ~ 59 | 관망/주의 | 신규 매수 보류 권장 |
-| 50 미만 | 매수반대 | 보유 시 비중 축소 검토 |
+|---|---|---|
+| None / 비숫자 | 분석보류 | 데이터 부족 또는 유동성 미달. AI 보정 미적용. |
+| 80 이상 | 매수적극찬성 | 5축 평균 16점 이상. 최상위 권장. |
+| 65 ~ 79 | 매수찬성 | 5축 평균 13점 이상. 통상 매수 권장. |
+| 50 ~ 64 | 매수주의 | 분할/소액 검토. |
+| 35 ~ 49 | 관망/주의 | 신규 매수 보류 권장. |
+| 0 ~ 34 | 매수반대 | 보유 시 비중 축소 검토. |
 
-  - 임계값/라벨은 macro_triggers.OPINION_THRESHOLDS_LIST 와 macro_triggers.OPINION_LABEL_ORDER 에서만 수정한다.
+임계값/라벨은 `macro_triggers.OPINION_THRESHOLDS_LIST` 와 `macro_triggers.OPINION_LABEL_ORDER` 에서만 수정한다.
 
-2. AI sanity 검토 및 정성적 가중치 산출 → delta 적용
+## 2. 5축 GARP 채점 모델 (Greenblatt/Lynch/Piotroski 결합)
 
-  - 코드: opinion_code = derive_opinion_from_score(score)
-  - AI: review_opinion_with_ai(...) 호출 시 추가 컨텍스트 주입.
-      - 프롬프트 평가 기준:
-        1) 국내 뉴스 변수(수급/섹터 등)와 해외 텔레그램 변수(매크로/밸류체인) 병합 확인.
-        2) 타겟 종목의 특성(수출주/내수주/기술주 등)을 기반으로 두 변수 중 어느 쪽이 주가 향방에 더 높은 정성적 가중치를 가지는지 내부 연산.
-        3) 상충 시(예: 해외 호재 vs 국내 악재), 가중치가 높은 쪽을 따라 최종 delta 결정.
-      - 응답 첫 줄: [유지] | [+1] | [-1] 중 1택.
-      - 두 번째 줄: 정성적 가중치 판단이 포함된 1문장 사유.
-      - [신규 안전 폴백]: AI 파싱 실패, 타임아웃, 또는 1문장 사유에서 명확한 결론을 도출하지 못할 경우(모호성 감지), 국내 펀더멘털 점수(코드 산출)를 우선순위 앵커로 간주하여 무조건 delta=0으로 폴백 처리한다.
-  - 코드: opinion_final = adjust_opinion_label(opinion_code, delta)
-      - OPINION_LABEL_ORDER 양 끝에서 클램프.
+### 2.1 비금융 종목
 
-3. theme_context 생성 단일 규칙
+| 축 | 만점 | 근거 |
+|---|---|---|
+| Value | 20 | Joel Greenblatt Magic Formula 의 Earnings Yield 대용 — 낮은 PER/PBR 가점. |
+| Quality | 20 | Greenblatt ROIC 대용으로 KIS 가 제공하는 ROE 절대값 사용. |
+| Growth | 20 | Peter Lynch GARP — 매출/영업이익 증가율. |
+| Momentum | 20 | 60일선/20일선 정배열. Mean-Reversion 회피. |
+| Smart Money | 20 | 외국인·기관 누적 순매수 부호. |
 
-  - target_theme 결정 우선순위:
-    1. !발굴 경로: 네이버 공식 테마 매핑 결과 그대로.
-    2. !ai매수 경로: score_single_ticker 가 산출한 target_theme. 산출 실패 시 "AI매수(단일종목)".
-    3. !수동등록 경로: 동일 산출. 산출 실패 시 "수동등록(단일종목)".
-  - narrative 는 ai_logic.get_theme_stock_narrative 호출 결과.
-  - 저장 경로: theme_context.json[ticker].
+### 2.2 금융주
 
-4. [한줄요약] 라인 조립 규약
+- Value 의 PER 단계(최대 10점) 는 의미가 약하므로 **ROE 추가 가점(+10)** 으로 대체.
+- 나머지 4축 동일.
 
-코드가 다음 포맷으로 1줄을 조립한다(LLM 본문 프롬프트는 이 라인을 만들지 않는다).
+### 2.3 보류 조건
 
-  - llm_rationale / llm_upside / llm_downside 는 LLM 본문에서 정규식으로 추출.
-  - 추출 실패 시 "(자동 추출 실패)" 폴백.
-  - LLM 본문 프롬프트 생성 시, 국내 뉴스 변수와 텔레그램 해외 변수의 가중치 비교 결과가 llm_rationale 항목 서술에 명시적으로 통합되어 작성되도록 프롬프트로 강제한다.
+- `current_price <= 0` → `unscorable_reason = "price_unavailable"`.
+- `tr_amount < 100_000_000` → `unscorable_reason = "liquidity_too_low"`.
 
-5. 데이터 스키마 영향
+기존 거래대금 10억 하드컷은 폐기. 자동발굴(`run_3track_screener`) 의 트랙별 컷(10억/30억)은 유지.
 
-  - pending_orders[oid] 및 split_orders.json[uuid] 추가 필드:
-      - score: int (기존)
-      - opinion: str (신규, 코드 결정 최종 라벨)
-      - opinion_code: str (신규, AI 보정 전 라벨)
-      - opinion_delta: int (신규, -1|0|+1)
+## 3. AI sanity 검토 (±2 확장)
+
+- 코드: `opinion_code = derive_opinion_from_score(score)`
+- AI: `review_opinion_with_ai(..., max_abs_delta=2)`
+  - 입력 토큰: `[유지] | [+1] | [-1] | [+2] | [-2]`
+  - ±2 는 다음 조건에서만 허용: 강한 호재/악재(예: 산업 패러다임 전환, 어닝 쇼크) + 정성적 가중치 명확.
+  - 모호한 경우 `[유지]` 강제, `delta=0` 폴백.
+- 코드: `opinion_final = adjust_opinion_label(opinion_code, delta)` — OPINION_LABEL_ORDER 양 끝 클램프.
+- `opinion_code == OPINION_LABEL_HOLD` 인 경우 AI 호출 스킵.
+
+## 4. theme_context 생성 단일 규칙
+
+- target_theme 결정 우선순위:
+  1. `!발굴`: 네이버 공식 테마 매핑 결과.
+  2. `!ai매수`: `score_single_ticker` 산출 target_theme. 실패 시 `AI매수(단일종목)`.
+  3. `!수동등록`: 동일. 실패 시 `수동등록(단일종목)`.
+- narrative: `ai_logic.get_theme_stock_narrative`.
+- 저장 경로: `theme_context.json[ticker]`.
+
+## 5. [한줄요약] 라인 조립 규약
+
+```
+[한줄요약] [의견: {opinion_final}] | [점수: {score} ({opinion_code} → 보정 {delta:+d})]
+        | [근거] {llm_rationale} | [상승조건] {llm_upside} | [손절조건] {llm_downside}
+```
+
+`opinion_code == OPINION_LABEL_HOLD` 인 경우:
+
+```
+[한줄요약] [의견: 분석보류 - {unscorable_reason}] | [점수: N/A]
+        | [근거] {llm_rationale} | [상승조건] {llm_upside} | [손절조건] {llm_downside}
+```
+
+## 6. 데이터 스키마 영향
+
+`pending_orders[oid]` 및 `split_orders.json[uuid]` 필드:
+
+| 키 | 타입 | 비고 |
+|---|---|---|
+| score | int \| None | 분석보류 시 None |
+| score_breakdown | dict \| None | 5축 분해. 분석보류 시 None |
+| unscorable_reason | str \| None | 분석보류 사유 |
+| opinion | str | 최종 라벨 |
+| opinion_code | str | AI 보정 전 |
+| opinion_delta | int | -2~+2 |
+
+## 7. 파일 매핑
+
+- 점수 산출: `src/strategy/screener.py` (`score_single_ticker`)
+- 의견 라벨: `src/utils/macro_triggers.py`
+- LLM 보정: `src/strategy/ai_logic.py` (`review_opinion_with_ai`, `get_multi_agent_investment_report`)
+- 슬랙 헬퍼: `src/utils/slack_interface.py` (`_build_single_stock_report`)
+- 테스트: `tests/temp_test_investment_decision.py`

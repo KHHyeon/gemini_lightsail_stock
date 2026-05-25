@@ -1001,19 +1001,31 @@ def register_slack_handlers(app, kis, config, orchestrator):
             scored = quant_screener.score_single_ticker(
                 ticker, name, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token,
             )
-            if scored is None:
-                score, score_details = 0, []
-                target_theme = fallback_theme
-            else:
-                score = scored["score"]
-                score_details = scored["score_details"]
-                target_theme = scored["target_theme"] or fallback_theme
-                val.setdefault("pbr", scored["pbr"])
-                val.setdefault("per", scored["per"])
-                val.setdefault("roe", scored["roe"])
+            # v1.3: score_single_ticker 는 항상 dict 반환. score=None 이면 분석보류.
+            if not isinstance(scored, dict):
+                scored = {
+                    "score": None,
+                    "score_breakdown": None,
+                    "score_details": [],
+                    "unscorable_reason": "screener_unknown_error",
+                    "target_theme": fallback_theme,
+                }
+            score = scored.get("score")
+            score_details = scored.get("score_details") or []
+            score_breakdown = scored.get("score_breakdown")
+            unscorable_reason = scored.get("unscorable_reason")
+            target_theme = scored.get("target_theme") or fallback_theme
+            if scored.get("pbr") is not None:
+                val.setdefault("pbr", scored.get("pbr"))
+            if scored.get("per") is not None:
+                val.setdefault("per", scored.get("per"))
+            if scored.get("roe") is not None:
+                val.setdefault("roe", scored.get("roe"))
 
+            # theme_context 에는 표시용 점수 문자열을 넣는다(보류 시 'N/A').
+            display_score = score if score is not None else "N/A"
             ctx_text = ai_strategy.register_theme_context(
-                ticker, name, target_theme, score, score_details, val,
+                ticker, name, target_theme, display_score, score_details, val,
             )
 
             chart_30d = chart_data.get_daily_ohlcv(
@@ -1026,11 +1038,14 @@ def register_slack_handlers(app, kis, config, orchestrator):
             report, meta = ai_strategy.get_multi_agent_investment_report(
                 ticker, name, chart_30d, macro, portfolio, val, ctx_text, news,
                 fundamental_score=score, fundamental_details=score_details,
+                unscorable_reason=unscorable_reason,
             )
             return {
                 "ok": True,
                 "report": report,
                 "score": score,
+                "score_breakdown": score_breakdown,
+                "unscorable_reason": unscorable_reason,
                 "ctx_text": ctx_text,
                 "val": val,
                 "target_theme": target_theme,
@@ -1061,9 +1076,22 @@ def register_slack_handlers(app, kis, config, orchestrator):
                 report = result["report"]
                 val = result["val"]
                 score = result["score"]
+                opinion_final = result.get("opinion_final")
+                unscorable_reason = result.get("unscorable_reason")
                 name = val.get("name", ticker)
                 actual_mode = os.getenv("TRADING_MODE_NORMAL", "PAPER").upper()
                 say(f"[System] {name}({ticker}) AI 보고서 작성 중... ({actual_mode})")
+
+                # 분석보류 라벨은 매수 승인 버튼을 노출하지 않는다 — 사용자에게
+                # 분석 결과만 안내하고 의사결정은 별도 진입점(!수동등록)에 위임.
+                from src.utils.macro_triggers import OPINION_LABEL_HOLD
+                if opinion_final == OPINION_LABEL_HOLD:
+                    say(
+                        f"[Notice] {name}({ticker}) 분석보류 - 사유: "
+                        f"{unscorable_reason or '데이터 부족'}. 매수 승인 버튼을 노출하지 않습니다."
+                    )
+                    say(f"[System] {name}({ticker}) 최종 AI 리포트\n\n{report}")
+                    return
 
                 oid = str(uuid.uuid4())
                 sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
@@ -1073,7 +1101,8 @@ def register_slack_handlers(app, kis, config, orchestrator):
                     "stock_name": name, "mode_type": "NORMAL",
                     "reason": sum_match.group(1).strip() if sum_match else "AI 분석 완료",
                     "score": score,
-                    "opinion": result.get("opinion_final"),
+                    "score_breakdown": result.get("score_breakdown"),
+                    "opinion": opinion_final,
                     "opinion_code": result.get("opinion_code"),
                     "opinion_delta": result.get("opinion_delta", 0),
                 }
@@ -1108,6 +1137,7 @@ def register_slack_handlers(app, kis, config, orchestrator):
                 "daily_budget": res["daily_budget"], "remaining_days": 10,
                 "reason": reason, "mode_type": order["mode_type"],
                 "score": order.get("score", 0),
+                "score_breakdown": order.get("score_breakdown"),
                 "opinion": order.get("opinion"),
                 "opinion_code": order.get("opinion_code"),
                 "opinion_delta": order.get("opinion_delta", 0),
@@ -1295,7 +1325,12 @@ def register_slack_handlers(app, kis, config, orchestrator):
             name = val.get("name", ticker)
 
             sum_match = re.search(r'\[한줄요약\](.*)', report, re.DOTALL)
-            reason = f"수동등록 | {sum_match.group(1).strip() if sum_match else 'AI 팩트체크 완료'}"
+            base_reason = sum_match.group(1).strip() if sum_match else "AI 팩트체크 완료"
+            # 분석보류 종목은 reason 에 사유 태그를 포함하여 추후 리뷰 가능하게 한다.
+            unscorable_reason = result.get("unscorable_reason")
+            if unscorable_reason:
+                base_reason = f"[분석보류-{unscorable_reason}] {base_reason}"
+            reason = f"수동등록 | {base_reason}"
             from src.utils import logger
             logger.record_trade(
                 ticker, name, "BUY", avg_price, qty, reason,

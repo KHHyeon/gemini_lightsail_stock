@@ -312,13 +312,174 @@ def _is_financial_name(stock_name):
     return any(kw in (stock_name or "") for kw in _FINANCIAL_NAME_KEYWORD_LIST)
 
 
+# =====================================================================
+# 5축 GARP 펀더멘털 채점 (Greenblatt Magic Formula + Peter Lynch GARP +
+# Piotroski F-Score 의 핵심 인자 결합)
+# Doc/features/ai_investment_decision/03_state_logic.md §2 참조.
+# =====================================================================
+
+# 유동성 보류 컷. 기존 10억 하드컷 → 1억으로 완화 + 미달 시 분석보류 라벨 처리.
+# (10억 컷은 `run_3track_screener` 의 자동발굴 트랙에서 별도 유지.)
+SCORE_LIQUIDITY_HOLD_KRW = 100_000_000
+
+
+def _score_value(per, pbr, is_financial):
+    """Value 축 (최대 20점). Magic Formula 의 Earnings Yield 대용.
+
+    PER ≤ 0 (적자) 인 비금융주는 PBR 만 평가 + 적자 패널티 명시.
+    금융주는 PER 의미가 약해 ROE 가산점으로 대체 → 본 함수에서는 PBR 만 평가.
+    """
+    pts = 0
+    details = []
+
+    if pbr and pbr > 0:
+        if pbr <= 0.7:
+            pts += 10
+            details.append(f"저PBR({pbr:.2f}/+10)")
+        elif pbr <= 1.0:
+            pts += 7
+            details.append(f"PBR({pbr:.2f}/+7)")
+        elif pbr <= 1.5:
+            pts += 4
+            details.append(f"PBR({pbr:.2f}/+4)")
+        elif pbr <= 2.5:
+            pts += 1
+            details.append(f"PBR({pbr:.2f}/+1)")
+
+    if not is_financial:
+        if per and per > 0:
+            if per <= 8.0:
+                pts += 10
+                details.append(f"저PER({per:.1f}/+10)")
+            elif per <= 12.0:
+                pts += 7
+                details.append(f"PER({per:.1f}/+7)")
+            elif per <= 18.0:
+                pts += 4
+                details.append(f"PER({per:.1f}/+4)")
+            elif per <= 25.0:
+                pts += 1
+                details.append(f"PER({per:.1f}/+1)")
+        elif per is not None and per <= 0:
+            details.append("적자(PER<=0)")
+
+    return min(pts, 20), details
+
+
+def _score_quality(roe, is_financial):
+    """Quality 축 (최대 20점, 금융주 30점). ROE 절대값 단계 가점."""
+    pts = 0
+    details = []
+    if roe is None:
+        return 0, details
+
+    if roe >= 20.0:
+        pts = 20
+        tag = "+20"
+    elif roe >= 15.0:
+        pts = 15
+        tag = "+15"
+    elif roe >= 10.0:
+        pts = 10
+        tag = "+10"
+    elif roe >= 8.0:
+        pts = 6
+        tag = "+6"
+    elif roe >= 5.0:
+        pts = 3
+        tag = "+3"
+    elif roe >= 0.0:
+        pts = 1
+        tag = "+1"
+    else:
+        return 0, ["적자 ROE"]
+
+    details.append(f"ROE({roe:.1f}%/{tag})")
+
+    if is_financial and roe >= 8.0:
+        pts += 10
+        details.append("금융주 ROE 보너스(+10)")
+
+    return pts, details
+
+
+def _score_growth(sales_growth, op_growth, turnaround):
+    """Growth 축 (최대 20점). Lynch GARP."""
+    pts = 0
+    details = []
+
+    if sales_growth is not None:
+        if sales_growth >= 10.0:
+            pts += 5
+            details.append(f"매출성장({sales_growth:.1f}%/+5)")
+        elif sales_growth >= 5.0:
+            pts += 3
+            details.append(f"매출성장({sales_growth:.1f}%/+3)")
+        elif sales_growth >= 0.0:
+            pts += 1
+            details.append(f"매출성장({sales_growth:.1f}%/+1)")
+
+    if op_growth is not None:
+        if op_growth >= 20.0:
+            pts += 10
+            details.append(f"영업이익성장({op_growth:.1f}%/+10)")
+        elif op_growth >= 10.0:
+            pts += 6
+            details.append(f"영업이익성장({op_growth:.1f}%/+6)")
+        elif op_growth >= 0.0:
+            pts += 3
+            details.append(f"영업이익성장({op_growth:.1f}%/+3)")
+
+    if turnaround:
+        pts += 5
+        details.append("턴어라운드(+5)")
+
+    return min(pts, 20), details
+
+
+def _score_momentum(chart_ohlcv):
+    """Momentum 축 (최대 20점). 60일선/20일선 정배열."""
+    if not chart_ohlcv or len(chart_ohlcv) < 60:
+        return 0, []
+
+    closes = [day['close'] for day in chart_ohlcv]
+    current = closes[0]
+    ma20 = sum(closes[:20]) / 20
+    ma60 = sum(closes[:60]) / 60
+
+    pts = 0
+    details = []
+    if current >= ma60:
+        pts += 10
+        details.append("종가>=60일선(+10)")
+    if current >= ma20:
+        pts += 5
+        details.append("종가>=20일선(+5)")
+    if ma20 > ma60:
+        pts += 5
+        details.append("정배열 20>60(+5)")
+    return min(pts, 20), details
+
+
+def _score_smart_money(frgn_net, orgn_net):
+    """Smart Money 축 (최대 20점). 외국인·기관 순매수 부호."""
+    has_frgn = frgn_net is not None and frgn_net > 0
+    has_orgn = orgn_net is not None and orgn_net > 0
+    if has_frgn and has_orgn:
+        return 20, ["외/기 동반 순매수(+20)"]
+    if has_frgn or has_orgn:
+        side = "외국인" if has_frgn else "기관"
+        return 10, [f"{side} 순매수(+10)"]
+    return 0, ["수급 약세"]
+
+
 def score_single_ticker(ticker, name, base_url, app_key, secret_key, token,
                         target_theme=None):
-    """단일 종목 펀더멘털 스코어링 헬퍼 (임계값 필터 미적용).
+    """단일 종목 펀더멘털 스코어링 (5축 GARP, 임계값 필터 미적용).
 
-    `run_unified_screener` 의 종목별 산출 로직을 단일 함수로 분리한 것이며,
     `!ai매수` / `!수동등록` / `!발굴` 세 진입점 모두 본 함수를 사용한다.
-    데이터 부재(주가/거래대금 미달) 시 ``None`` 반환.
+    데이터 부족(주가 미상 / 유동성 미달) 시 ``score=None`` 으로 분석보류 라벨로
+    유도한다 (기존처럼 0점/매수반대로 표시하지 않는다).
 
     Args:
         ticker: 종목코드(6자리).
@@ -327,83 +488,109 @@ def score_single_ticker(ticker, name, base_url, app_key, secret_key, token,
         target_theme: 외부에서 지정한 테마명. ``None`` 이면 산출 결과(금융/성장) 사용.
 
     Returns:
-        dict | None: ``score``, ``score_details``, ``target_theme``,
-        ``current_price``, ``pbr``, ``per``, ``roe``, ``is_financial``.
+        dict:
+            - score: int | None (None 이면 분석보류)
+            - score_breakdown: dict | None
+            - score_details: list[str]
+            - unscorable_reason: str | None
+            - target_theme: str
+            - current_price/pbr/per/roe: 원본 수치
+            - is_financial: bool
     """
-    if not ticker:
-        return None
-
     is_financial = _is_financial_name(name)
+    resolved_theme = target_theme or ("우량 금융주" if is_financial else "가치성장 대장주")
+
+    base = {
+        "score": None,
+        "score_breakdown": None,
+        "score_details": [],
+        "unscorable_reason": None,
+        "target_theme": resolved_theme,
+        "current_price": 0,
+        "pbr": 0.0,
+        "per": 0.0,
+        "roe": 0.0,
+        "is_financial": is_financial,
+    }
+
+    if not ticker:
+        base["unscorable_reason"] = "ticker_missing"
+        return base
 
     val = get_basic_valuation(base_url, app_key, secret_key, token, ticker)
+    base["current_price"] = val.get("current_price", 0)
+    base["pbr"] = val.get("pbr", 0.0)
+    base["per"] = val.get("per", 0.0)
+    base["roe"] = val.get("roe", 0.0)
+
     if val["current_price"] <= 0:
-        return None
+        base["unscorable_reason"] = "price_unavailable"
+        return base
 
-    if val["tr_amount"] < 1000000000:
-        print(f"Log: [Liquidity Filter] {name} 탈락 (거래대금 부족)")
-        return None
+    if val["tr_amount"] < SCORE_LIQUIDITY_HOLD_KRW:
+        print(
+            f"Log: [Liquidity Hold] {name}({ticker}) 거래대금 "
+            f"{val['tr_amount']:,} < {SCORE_LIQUIDITY_HOLD_KRW:,} → 분석보류"
+        )
+        base["unscorable_reason"] = "liquidity_too_low"
+        return base
 
-    score = 0
-    details = []
+    roe = val.get("roe", 0.0) or 0.0
+    if roe <= 0 and val["per"] > 0 and val["pbr"] > 0:
+        # KIS ROE 누락 보정: PBR/PER 근사값.
+        roe = round((val["pbr"] / val["per"]) * 100, 2)
+    base["roe"] = roe
+
+    sales_growth, op_growth, turnaround = (0.0, 0.0, False)
+    if not is_financial:
+        sales_growth, op_growth, turnaround = get_kis_growth_metrics(
+            base_url, app_key, secret_key, token, ticker
+        )
 
     chart_60d = chart_data.get_daily_ohlcv(
         base_url, app_key, secret_key, token, ticker, count=60
     )
-    if chart_60d and len(chart_60d) >= 60:
-        current_close = chart_60d[0]['close']
-        ma60 = sum(day['close'] for day in chart_60d) / 60
-        if current_close >= ma60:
-            score += 20
-            details.append("차트 정배열(+20)")
 
-    frgn, orgn = get_smart_money_accumulation(
+    frgn_net, orgn_net = get_smart_money_accumulation(
         base_url, app_key, secret_key, token, ticker
     )
-    if frgn > 0 or orgn > 0:
-        score += 30
-        details.append("수급 유입(+30)")
 
-    if is_financial:
-        if val["pbr"] > 0 and val["pbr"] <= 1.0:
-            score += 20
-            details.append("저PBR(+20)")
+    val_pts, val_details = _score_value(val["per"], val["pbr"], is_financial)
+    qual_pts, qual_details = _score_quality(roe, is_financial)
+    growth_pts, growth_details = _score_growth(sales_growth, op_growth, turnaround)
+    mom_pts, mom_details = _score_momentum(chart_60d)
+    sm_pts, sm_details = _score_smart_money(frgn_net, orgn_net)
 
-        roe = val.get("roe", 0.0)
-        if roe <= 0:
-            roe = round((val["pbr"] / val["per"]) * 100, 2) if val["per"] > 0 else 0
-        if roe >= 8.0:
-            score += 30
-            details.append("ROE 8% 이상(+30)")
+    # 금융주는 Growth 데이터가 빈 경우가 많으므로 Quality 보너스로 보전.
+    # (Quality 가 이미 +10 보너스를 가져가지만, Growth 0점이 의견에 미치는
+    #  과소평가를 막기 위해 final 합산 시 max 100 클램프.)
+    score = min(val_pts + qual_pts + growth_pts + mom_pts + sm_pts, 100)
 
-        resolved_theme = target_theme or "우량 금융주"
-    else:
-        sales_growth, op_growth, turnaround = get_kis_growth_metrics(
-            base_url, app_key, secret_key, token, ticker
-        )
-        if sales_growth >= 10.0:
-            score += 25
-            details.append("매출성장(+25)")
-        if op_growth >= 15.0 or turnaround:
-            score += 25
-            details.append("이익성장/턴어라운드(+25)")
+    details = []
+    details.extend(val_details)
+    details.extend(qual_details)
+    details.extend(growth_details)
+    details.extend(mom_details)
+    details.extend(sm_details)
 
-        roe = val.get("roe", 0.0)
-        resolved_theme = target_theme or "가치성장 대장주"
-
-    return {
-        "score": score,
-        "score_details": details,
-        "target_theme": resolved_theme,
-        "current_price": val["current_price"],
-        "pbr": val["pbr"],
-        "per": val["per"],
-        "roe": roe,
-        "is_financial": is_financial,
+    base["score"] = score
+    base["score_breakdown"] = {
+        "value": val_pts,
+        "quality": qual_pts,
+        "growth": growth_pts,
+        "momentum": mom_pts,
+        "smart_money": sm_pts,
     }
+    base["score_details"] = details
+    return base
 
 
 def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token):
-    """다종목 스코어링. 비금융 60점 / 금융 80점 이상만 통과."""
+    """다종목 스코어링. 비금융 50점 / 금융 65점 이상만 통과.
+
+    v1.3: 임계값을 5축 채점 평균 분포에 맞게 비금융 60→50, 금융 80→65 로 조정.
+    분석보류(score=None) 종목은 자동 제외된다.
+    """
     if not raw_candidates:
         return []
     final_list = []
@@ -418,10 +605,10 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token):
             ticker, stock_name, base_url, app_key, secret_key, token,
             target_theme=c.get("target_theme"),
         )
-        if scored is None:
+        if scored is None or scored.get("score") is None:
             continue
 
-        threshold = 80 if scored["is_financial"] else 60
+        threshold = 65 if scored["is_financial"] else 50
         if scored["score"] < threshold:
             continue
 
@@ -431,6 +618,7 @@ def run_unified_screener(raw_candidates, base_url, app_key, secret_key, token):
             "per": scored["per"],
             "roe": scored["roe"],
             "score": scored["score"],
+            "score_breakdown": scored["score_breakdown"],
             "score_details": scored["score_details"],
             "target_theme": scored["target_theme"],
         })
