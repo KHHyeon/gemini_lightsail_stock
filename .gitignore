@@ -7,6 +7,7 @@ drive_oauth_token.json
 .drive_pause_local.json
 *.pem
 *.json
+!data/krx_holidays.json
 *.session
 docs_cache/
 lotto/

@@ -47,9 +47,62 @@ class TestMarketCalendar(unittest.TestCase):
         self.assertTrue(mc.is_market_hours(mid))
 
     def test_first_trading_day_when_monday_holiday(self):
-        # 2026-03-02 월요일(거래일), 2026-03-01 일요일+공휴일
+        # 2026-03-02 (월)은 삼일절 대체공휴일 → 거래일 아님.
+        # 2026-03-03 (화)이 그 주의 첫 거래일.
         mon = datetime(2026, 3, 2, 9, 0, tzinfo=KST)
-        self.assertTrue(mc.is_first_trading_day_of_week(mon))
+        tue = datetime(2026, 3, 3, 9, 0, tzinfo=KST)
+        self.assertFalse(mc.is_first_trading_day_of_week(mon))
+        self.assertTrue(mc.is_first_trading_day_of_week(tue))
+
+    def test_substitute_holiday_2026_05_25_buddha(self):
+        """2026-05-25 부처님오신날 대체공휴일 (5/24 일요일) — 거래일 아님."""
+        day = datetime(2026, 5, 25, 10, 0, tzinfo=KST)
+        self.assertFalse(mc.is_trading_day(day))
+        self.assertFalse(mc.is_market_hours(day))
+
+    def test_substitute_holiday_2026_08_17_liberation(self):
+        """2026-08-17 광복절 대체공휴일 (8/15 토요일) — 거래일 아님."""
+        day = datetime(2026, 8, 17, 10, 0, tzinfo=KST)
+        self.assertFalse(mc.is_trading_day(day))
+
+    def test_election_day_2026_06_03(self):
+        """2026-06-03 제8회 전국동시지방선거 — 거래일 아님."""
+        day = datetime(2026, 6, 3, 10, 0, tzinfo=KST)
+        self.assertFalse(mc.is_trading_day(day))
+
+    def test_constitution_day_2026_07_17(self):
+        """2026-07-17 제헌절 부활 — 거래일 아님."""
+        day = datetime(2026, 7, 17, 10, 0, tzinfo=KST)
+        self.assertFalse(mc.is_trading_day(day))
+
+    def test_chuseok_2026_correct_dates(self):
+        """2026 추석은 9/24~25 (목/금). 10/6~10/8 은 정상 거래일."""
+        self.assertFalse(mc.is_trading_day(datetime(2026, 9, 24, 10, 0, tzinfo=KST)))
+        self.assertFalse(mc.is_trading_day(datetime(2026, 9, 25, 10, 0, tzinfo=KST)))
+        self.assertTrue(mc.is_trading_day(datetime(2026, 10, 6, 10, 0, tzinfo=KST)))
+        self.assertTrue(mc.is_trading_day(datetime(2026, 10, 7, 10, 0, tzinfo=KST)))
+        self.assertTrue(mc.is_trading_day(datetime(2026, 10, 8, 10, 0, tzinfo=KST)))
+
+    def test_holiday_label_lookup(self):
+        """get_holiday_label 이 사유 라벨을 정확히 반환."""
+        label = mc.get_holiday_label(datetime(2026, 5, 25, 10, 0, tzinfo=KST))
+        self.assertIsNotNone(label)
+        self.assertIn("부처님오신날", label)
+        # 거래일은 None
+        self.assertIsNone(mc.get_holiday_label(datetime(2026, 5, 22, 10, 0, tzinfo=KST)))
+        # 토/일은 "주말"
+        self.assertEqual(
+            mc.get_holiday_label(datetime(2026, 5, 23, 10, 0, tzinfo=KST)),
+            "주말",
+        )
+
+    def test_holiday_load_status(self):
+        """get_holiday_load_status 가 정상 dict 를 반환."""
+        status = mc.get_holiday_load_status()
+        self.assertTrue(status["loaded"])
+        self.assertTrue(status["file_exists"])
+        self.assertGreater(status["count"], 0)
+        self.assertEqual(status["schema_version"], 2)
 
     def test_auto_discovery_guard_holiday(self):
         from src.execution.orchestrator import MarketOrchestrator

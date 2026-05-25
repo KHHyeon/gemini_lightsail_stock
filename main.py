@@ -50,6 +50,43 @@ def _bootstrap_market_chronicles():
         print(f"Log: [Chronicles Bootstrap] {e}", flush=True)
 
 
+def _bootstrap_market_calendar_status():
+    """기동 시 휴장일 파일 로드 상태와 오늘 거래일 여부를 슬랙으로 1회 알림.
+
+    `data/krx_holidays.json` 누락 시 가드가 무력화되는 사태를 사용자가
+    즉시 인지할 수 있도록 가시화한다. (조용한 SKIP 만 발생하는 기존 동작은
+    공휴일에 자동매매가 잘못 진행되는 사고를 늦게 감지시키는 원인이었다.)
+    """
+    try:
+        from src.utils import market_calendar as mc
+
+        status = mc.get_holiday_load_status()
+        is_trading = mc.is_trading_day()
+        label = mc.get_holiday_label()
+        if not status.get("file_exists"):
+            msg = (
+                "[Calendar][경고] data/krx_holidays.json 미존재. 공휴일/대체공휴일 "
+                "차단 불가 (주말만 제외). 서버 git pull 또는 KRX_HOLIDAYS_EXTRA env 배포 필요."
+            )
+        else:
+            if is_trading:
+                msg = (
+                    f"[Calendar] 휴장일 {status.get('count')}건 로드 "
+                    f"(schema v{status.get('schema_version')}). 오늘은 거래일."
+                )
+            else:
+                reason = label or ("주말" if label == "주말" else "휴장일")
+                msg = (
+                    f"[Calendar] 휴장일 {status.get('count')}건 로드 "
+                    f"(schema v{status.get('schema_version')}). 오늘은 {reason} - "
+                    "자동 매매/시황 routine SKIP, 정기보고만 수동 실행 가능."
+                )
+        orchestrator.send_slack(msg)
+        print(f"Log: [Calendar] {msg}", flush=True)
+    except Exception as exc:
+        print(f"Log: [Calendar Bootstrap] {exc}", flush=True)
+
+
 def _bootstrap_scalp_backtest():
     """기동 시 형태 백테스트 1회 실행 후 세션에 게이트 결과 반영."""
     try:
@@ -77,6 +114,32 @@ def _is_first_trading_day(now=None):
     """주간 첫 거래일 여부 (공휴일 보정)."""
     from src.utils.market_calendar import is_first_trading_day_of_week
     return is_first_trading_day_of_week(now)
+
+
+def _calendar_daily_notice():
+    """매일 08:30 KST — 평일 휴장일이면 슬랙 1회 안내, 그 외엔 침묵.
+
+    Doc/features/market_calendar/03_market_calendar_state_logic.md §3 참조.
+    공휴일에 routine 들이 조용히 SKIP 되어 운영자가 인지하지 못하는 사태를
+    방지한다. 토/일은 노이즈 회피를 위해 침묵한다.
+    """
+    try:
+        from datetime import datetime as _dt
+        from src.utils import market_calendar as mc
+        from src.utils.timekit import now_kst
+
+        current = now_kst()
+        if current.weekday() >= 5:
+            return
+        if mc.is_trading_day(current):
+            return
+        label = mc.get_holiday_label(current) or "휴장일"
+        orchestrator.send_slack(
+            f"[Calendar] 오늘({current.strftime('%Y-%m-%d')}) 휴장 — 사유: {label}. "
+            "자동 매매/시황 routine SKIP. 필요 시 수동 정기보고만 실행 가능."
+        )
+    except Exception as exc:
+        print(f"Log: [Calendar Daily Notice] {exc}", flush=True)
 
 
 def _scalp_pre_job():
@@ -121,6 +184,7 @@ def run_scheduler():
     except Exception as exc:
         print(f"Log: [ScalpSession] bootstrap failed: {exc}", flush=True)
     schedule.every().day.at("08:00").do(orchestrator.issue_daily_token)
+    schedule.every().day.at("08:30").do(_calendar_daily_notice)
     schedule.every().day.at("08:45").do(orchestrator.daily_routine)
     schedule.every().day.at("08:50").do(lambda: orchestrator.auto_stock_discovery(KST))
     schedule.every().day.at("10:00").do(orchestrator.deep_market_routine)
@@ -151,6 +215,7 @@ def run_scheduler():
 if __name__ == "__main__":
     print("Log: [System] Active KST", flush=True)
     _bootstrap_market_chronicles()
+    _bootstrap_market_calendar_status()
     slack_interface.register_slack_handlers(app, kis, CONFIG, orchestrator)
     threading.Thread(target=run_scheduler, daemon=True).start()
     SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN")).start()

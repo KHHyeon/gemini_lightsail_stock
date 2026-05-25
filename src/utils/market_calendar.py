@@ -14,17 +14,29 @@ from src.utils.timekit import KST, now_kst
 
 _HOLIDAY_FILE = os.path.join(project_root(), "data", "krx_holidays.json")
 _holiday_date_set = None
+_holiday_label_map = {}  # date -> 사유 라벨 (있는 경우만)
 _holiday_file_warned = False
+_holiday_load_status = {
+    "file_exists": False,
+    "file_path": _HOLIDAY_FILE,
+    "count": 0,
+    "extra_count": 0,
+    "schema_version": None,
+    "loaded": False,
+}
 
 
 def load_holiday_date_set(*, reload=False):
     """KRX 공휴일 date set (lazy load)."""
-    global _holiday_date_set, _holiday_file_warned
+    global _holiday_date_set, _holiday_label_map, _holiday_file_warned
     if _holiday_date_set is not None and not reload:
         return _holiday_date_set
 
     holiday_set = set()
-    if not os.path.isfile(_HOLIDAY_FILE):
+    label_map = {}
+    file_exists = os.path.isfile(_HOLIDAY_FILE)
+    _holiday_load_status["file_exists"] = file_exists
+    if not file_exists:
         if not _holiday_file_warned:
             print(
                 f"Log: [MarketCalendar] 휴장일 파일 없음: {_HOLIDAY_FILE} "
@@ -32,12 +44,27 @@ def load_holiday_date_set(*, reload=False):
             )
             _holiday_file_warned = True
     payload = read_local_json(_HOLIDAY_FILE, default=None) or {}
+    _holiday_load_status["schema_version"] = payload.get("schema_version")
     for raw in payload.get("holidays") or []:
         try:
             holiday_set.add(date.fromisoformat(str(raw).strip()))
         except ValueError:
             continue
+    # details_YYYY 매핑은 사유 노출에 사용. 키 형식: "details_2026" 같은 yearly map.
+    for key, mapping in (payload.items() if isinstance(payload, dict) else []):
+        if not isinstance(key, str) or not key.startswith("details_"):
+            continue
+        if not isinstance(mapping, dict):
+            continue
+        for raw_date, label in mapping.items():
+            try:
+                d = date.fromisoformat(str(raw_date).strip())
+            except ValueError:
+                continue
+            if isinstance(label, str) and label.strip():
+                label_map[d] = label.strip()
 
+    extra_count = 0
     extra = (os.getenv("KRX_HOLIDAYS_EXTRA") or "").strip()
     if extra:
         for part in extra.split(","):
@@ -46,11 +73,39 @@ def load_holiday_date_set(*, reload=False):
                 continue
             try:
                 holiday_set.add(date.fromisoformat(part))
+                extra_count += 1
             except ValueError:
                 continue
 
     _holiday_date_set = holiday_set
+    _holiday_label_map = label_map
+    _holiday_load_status.update({
+        "count": len(holiday_set),
+        "extra_count": extra_count,
+        "loaded": True,
+    })
     return _holiday_date_set
+
+
+def get_holiday_label(now=None):
+    """입력일이 공휴일이면 사유 라벨(있을 때) 또는 빈 문자열을 반환.
+
+    거래일이면 None 을 반환.
+    """
+    current = _as_kst_datetime(now)
+    if current.weekday() >= 5:
+        return "주말"
+    holiday_set = load_holiday_date_set()
+    if current.date() not in holiday_set:
+        return None
+    return _holiday_label_map.get(current.date(), "")
+
+
+def get_holiday_load_status():
+    """기동·진단용 — 휴장일 파일 로드 상태 dict 반환."""
+    if not _holiday_load_status.get("loaded"):
+        load_holiday_date_set()
+    return dict(_holiday_load_status)
 
 
 def _as_kst_datetime(now):

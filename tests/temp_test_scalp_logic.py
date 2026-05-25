@@ -284,7 +284,9 @@ class TestScenario3RiskAndLiquidation(unittest.TestCase):
         def failing_sell(ticker, qty):
             return {"success": False, "msg": "KIS RC=-9999 매도 거부"}
 
-        result = orch.scalp_force_liquidation(sell_fn=failing_sell)
+        # 실제 시각이 휴장일일 수 있으므로 거래일 가드를 강제 True.
+        with patch("src.execution.orchestrator.market_hours.is_trading_day", return_value=True):
+            result = orch.scalp_force_liquidation(sell_fn=failing_sell)
         self.assertEqual(result["state"], "HALT_B_TYPE")
         self.assertEqual(len(result["failures"]), 1)
         self.assertTrue(any("[B-Type]" in m for m in slack_messages),
@@ -317,7 +319,8 @@ class TestScenario3RiskAndLiquidation(unittest.TestCase):
         def ok_sell(ticker, qty):
             return {"success": True, "msg": f"{ticker} 시장가 매도 OK"}
 
-        result = orch.scalp_force_liquidation(sell_fn=ok_sell)
+        with patch("src.execution.orchestrator.market_hours.is_trading_day", return_value=True):
+            result = orch.scalp_force_liquidation(sell_fn=ok_sell)
         self.assertEqual(result["state"], "LIQUIDATED")
         # SCALP 만 청산 대상 (PAPER_ONLY 는 제외)
         self.assertEqual(result["count"], 1)
@@ -508,10 +511,17 @@ class TestScenario5LiveCycle(unittest.TestCase):
         original_market_open = market_hours.is_market_open
         market_hours.is_market_open = lambda now=None: True
         try:
+            # 휴장일 환경에서도 거래일 가드 통과 강제 (테스트 시각 의존성 제거).
             with patch(
                 "src.execution.orchestrator.macro_collector.get_macro_indicators",
                 return_value={"VIX": 15.0},
-            ), patch.object(orch, "_scalp_detect_good_news", return_value=True):
+            ), patch.object(orch, "_scalp_detect_good_news", return_value=True), patch(
+                "src.execution.orchestrator.market_hours.is_trading_day",
+                return_value=True,
+            ), patch(
+                "src.strategy.scalp_logic.is_force_liquidation_time",
+                return_value=False,
+            ):
                 result = orch.scalp_scan_cycle(
                     candidate_provider=[{"ticker": "005930", "name": "삼성전자"}],
                     chart_provider=chart_provider,

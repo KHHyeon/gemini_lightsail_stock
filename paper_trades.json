@@ -135,5 +135,27 @@
         "reason": "[PAPER-SCALP] Scalp 진입 sim=0.993 thr=0.80",
         "mode_type": "SCALP",
         "strategy_tag": "SCALP"
+    },
+    {
+        "timestamp": "2026-05-25 18:14:46",
+        "ticker": "005930",
+        "name": "삼성전자",
+        "action": "BUY",
+        "price": 10425,
+        "quantity": 4,
+        "reason": "[PAPER-SCALP] Scalp 진입 sim=0.993 thr=0.80",
+        "mode_type": "SCALP",
+        "strategy_tag": "SCALP"
+    },
+    {
+        "timestamp": "2026-05-25 18:15:24",
+        "ticker": "005930",
+        "name": "삼성전자",
+        "action": "BUY",
+        "price": 10425,
+        "quantity": 4,
+        "reason": "[PAPER-SCALP] Scalp 진입 sim=0.993 thr=0.80",
+        "mode_type": "SCALP",
+        "strategy_tag": "SCALP"
     }
 ]
