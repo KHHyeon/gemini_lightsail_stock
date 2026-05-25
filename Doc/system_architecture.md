@@ -26,9 +26,15 @@ System Architecture (Atomic)
 - 거래일/장중: src/utils/market_calendar.py (`is_trading_day`, `is_market_hours`). 기존 `is_market_open` = 장중.
 - KIS 토큰: src/core/token_manager.py (24h TTL, 거래일 08:00 scheduled, on-demand). Doc/features/kis_token/
 - 매수 결정 단일화: !ai매수/!수동등록/!발굴 은 동일한 점수 산출 로직을 사용한다.
-- Execution Mode: 
+- 슬랙 명령어 컨벤션 (v1.4, 2026-05-25): **`!카테고리 [서브명령] [옵션]`** 패턴으로 통일.
+  - 통합 카테고리: `!보고`, `!단타`, `!백필`, `!테스트` (예: `!보고 일일`, `!단타 시작`, `!백필 스캔 30`).
+  - 단독 명령: `!잔고`, `!성과`, `!HTS스캔`, `!역발상`, `!발굴`, `!타점분석`, `!ai매수`, `!수동등록`, `!크로니클`, `!초기화`, `!명령어`, `완료`, `확인`.
+  - 구 명령어(`!일일보고`, `!단타시작`, `!백필스캔` 등)는 하위호환 OR 정규식으로 수용되며, 입력 시 새 컨벤션 안내 메시지 1줄을 출력한다.
+  - 잘못된 서브명령·옵션 입력 시 각 카테고리는 자체 `_xxx_usage()` 헬퍼로 사용법을 출력한다.
+  - 모든 사용법 표시는 `!명령어` 매뉴얼과 일치한다.
+- Execution Mode:
   - 기본 모드 (Fundamental Swing)
-  - 단타 모드 (Aggressive Day-Trading): src/strategy/scalp_logic.py를 통해 3분봉 기반의 패턴 매칭 및 3중 리스크 방어막 수행. 기동 전 형태 백테스트(scalp_backtest.py) 게이트 PASS + Slack `!단타시작` 으로 스케줄 실행 활성화.
+  - 단타 모드 (Aggressive Day-Trading): src/strategy/scalp_logic.py를 통해 3분봉 기반의 패턴 매칭 및 3중 리스크 방어막 수행. 기동 전 형태 백테스트(scalp_backtest.py) 게이트 PASS + Slack `!단타 시작` 으로 스케줄 실행 활성화 (구 `!단타시작` 호환).
 
 4. 전역 에러/중단 정책
 - A-Type: 자가복구(재시도/스킵). 텔레그램 API Rate Limit, 외부 인제스트 장애 등. 주간 예산 입력 대기 중 사용자의 미입력 타임아웃 상황도 A-Type 폴백 정책으로 처리한다.

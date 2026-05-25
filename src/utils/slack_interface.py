@@ -568,28 +568,54 @@ def register_slack_handlers(app, kis, config, orchestrator):
 
     @app.message(re.compile(r"^!명령어", re.IGNORECASE))
     def cmd_help(message, say):
-        help_text = """[ 봇 명령어 매뉴얼 ]
-- !잔고 : 실계좌 현금 및 포트폴리오 요약 조회
-- !HTS스캔 : 3-Track(기대주/배당주/낙폭과대) 통합 스캔 및 검증
-- !타점분석 [코드] : 특정 종목의 도지/거래량 정밀 타점 진단
-- !역발상 : RSI 과매도 및 하락 진정 패턴 포착 스캔
-- !발굴 [배당률/테마] : 기존 100점 만점 펀더멘털 스크리닝
-- !ai매수 [코드] [예산] : 정밀 분석 후 10일 분할매수 세팅
-- !수동등록 [코드] [트랙] : 내 보유종목 방어막 감시망에 편입 (트랙: A, B, C, M)
-- !성과 : AI vs 수동 트랙별 승률 및 수익률 비교 리포트
-- !일일보고 / !주간보고 / !월간보고 / !분기보고 : 각종 리포트 수동 생성
-- !초기화 : 장부 및 주문 데이터 초기화
-- !크로니클 : T-Day 시장 크로니클 수동 작성 (트리거 충족 시)
-- !백필스캔 [일수] : 최근 N일(기본 60) 변동성 장세 스캔 + 후보 보고
-- !백필실행 [건당대기초] : 저장된 백필 큐 1건씩 소급 작성 (기본 3초)
-- !백필초기화 [purge] : 기존 백필 결과 정리 (purge 입력 시 .md 리포트까지 삭제)
-- !백필재인덱싱 [건당대기초] : 기존 .md 보존, keyphrases 만 v3.2 포맷으로 재추출
-- !백필상태 : reports 트리와 master_index 정합 상태 진단 (읽기 전용)
-- !백필잔여정리 [dry] : master_index 외부의 백필 .md 만 정리 (dry 입력 시 미실행 보고)
-- !단타시작 / !단타멈춤 / !단타상태 : 단타(Scalp) 진행 제어 및 상태 조회
-- !단타백테스트 [일수] : 형태 기반 백테스트 실행 (기본 60일, 가격 무관)
-- 확인 : 직전 백필 스캔 결과를 그대로 실행
-- 완료 : Google Drive Pause 해제 후 재검증"""
+        help_text = """[ 봇 명령어 매뉴얼 (v1.4 / 2026-05-25 통일) ]
+
+[1] 계좌/성과 조회
+- !잔고               : KIS 실계좌 + AI 가상 장부 현황
+- !성과               : AI/수동 트랙별 승률·수익률 리포트
+
+[2] 종목 발굴/스크리닝
+- !HTS스캔             : 3-Track(기대주/배당주/낙폭과대) 통합 스캔
+- !역발상             : RSI 과매도 + 하락 진정 + AI 악재 3단계 교차
+- !발굴 [배당률%]      : 고배당 가치주 (숫자 입력)
+- !발굴 [테마키워드]   : 네이버 테마 매핑 + 100점 스코어링
+- !테스트 [기대주/배당주] : 조건식 기반 테스트 출력
+
+[3] 개별 종목 진단/매매
+- !타점분석 [코드]              : 도지/거래량 정밀 타점 진단
+- !ai매수 [코드] [예산]          : 5축 GARP + AI 본문 + 10일 분할매수 세팅
+- !수동등록 [코드] [트랙(A/B/C/M)] : 내 보유종목 방어막 편입
+                                  * 트랙: A=성장 / B=가치 / C=역발상 / M=일반(기본)
+                                  * 자동매도는 추적익절(최고점 -10%)만 적용
+
+[4] 단타(Scalp)
+- !단타 시작           : 진행 ON (장중 진입)
+- !단타 멈춤           : 진행 OFF
+- !단타 상태           : 세션/보유/PnL 조회
+- !단타 백테스트 [일수] : 형태 기반 백테스트 (기본 60)
+
+[5] Market Chronicles (외장 메모리)
+- !크로니클           : T-Day 크로니클 수동 작성 (KST 거래일 + 트리거 충족 시)
+
+[6] 백필 운영
+- !백필 스캔 [일수]        : 최근 N일 변동성 장세 스캔 (기본 60)
+- !백필 실행 [건당대기초]   : 저장된 큐 1건씩 작성 (기본 3)
+- !백필 상태               : reports ↔ master_index 정합 진단
+- !백필 초기화 [purge]      : 엔트리·state 제거 (purge 시 .md 삭제)
+- !백필 재인덱싱 [건당대기초] : keyphrases 재추출
+- !백필 잔여정리 [dry]      : 인덱스 외부 .md 정리 (dry 시 시뮬레이션)
+- 확인                    : 직전 !백필 스캔 큐 그대로 실행
+
+[7] 정기 리포트
+- !보고 일일 / 주간 / 월간 / 분기 : 각 기간별 리포트 즉시 생성
+
+[8] 시스템/유틸
+- !명령어             : 이 매뉴얼
+- !초기화             : 장부·주문·테마컨텍스트 초기화
+- 완료               : Google Drive Pause 해제 후 재검증
+
+※ 구 명령어(`!일일보고`, `!단타시작`, `!백필스캔` 등)도 당분간 수용되지만,
+  사용 시 위 통일 명령어로 안내됩니다."""
         say(help_text)
 
     @app.message(re.compile(r"^완료\s*$"))
@@ -599,72 +625,114 @@ def register_slack_handlers(app, kis, config, orchestrator):
         result = drive_client.try_resume_after_user_ack()
         say(result)
 
-    @app.message(re.compile(r"^!백필스캔(?:\s+(\d+))?\s*$", re.IGNORECASE))
-    def cmd_backfill_scan(message, say):
-        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
-        m = re.match(r"^!백필스캔(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
-        lookback = int(m.group(1)) if (m and m.group(1)) else 60
-        say(f"[System] 최근 {lookback}일 변동성 장세 스캔을 시작합니다...")
-        threading.Thread(
-            target=lambda: orchestrator.backfill_scan(lookback_days=lookback),
-            daemon=True,
-        ).start()
+    # =================================================================
+    # [v1.4 / 2026-05-25] 슬랙 명령어 컨벤션 통일
+    # - 기능별로 `!카테고리 서브명령 [옵션]` 패턴으로 통합.
+    # - 구 명령어(`!백필스캔` 등)는 동일 핸들러로 OR 흡수하여 하위 호환 유지.
+    # - 사용자가 새 컨벤션을 학습하도록 잘못된 서브명령 시 사용법 안내 출력.
+    # =================================================================
 
-    @app.message(re.compile(r"^!백필실행(?:\s+(\d+))?\s*$", re.IGNORECASE))
-    def cmd_backfill_run(message, say):
-        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
-        m = re.match(r"^!백필실행(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
-        delay_sec = int(m.group(1)) if (m and m.group(1)) else 3
-        say(f"[System] 저장된 백필 큐를 실행합니다 (건당 {delay_sec}초 대기).")
-        threading.Thread(
-            target=lambda: orchestrator.backfill_run(delay_sec=delay_sec),
-            daemon=True,
-        ).start()
+    # ----- 백필 통합: !백필 [스캔|실행|상태|초기화|재인덱싱|잔여정리] -----
+    _BACKFILL_PATTERN = (
+        r"^!백필(?:\s+(스캔|실행|상태|초기화|재인덱싱|잔여정리|고아청소))?"
+        r"(?:\s+([^\s]+))?\s*$"
+    )
+    _BACKFILL_LEGACY_PATTERN = (
+        r"^!(?:백필스캔|백필실행|백필초기화|백필상태|백필재인덱싱|백필잔여정리|백필고아청소)"
+        r"(?:\s+([^\s]+))?\s*$"
+    )
 
-    @app.message(re.compile(r"^!백필초기화(?:\s+(purge))?\s*$", re.IGNORECASE))
-    def cmd_backfill_reset(message, say):
-        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
-        m = re.match(r"^!백필초기화(?:\s+(purge))?\s*$", text, re.IGNORECASE)
-        purge = bool(m and m.group(1))
-        warn = " (리포트 .md 까지 삭제)" if purge else " (master_index 엔트리·state만 제거, .md 보존)"
-        say(f"[System] 백필 초기화를 시작합니다.{warn}")
-        threading.Thread(
-            target=lambda: orchestrator.backfill_reset(delete_reports=purge),
-            daemon=True,
-        ).start()
-
-    @app.message(re.compile(r"^!백필상태\s*$", re.IGNORECASE))
-    def cmd_backfill_diagnose(message, say):
-        say("[System] reports 트리와 master_index 정합 상태를 진단합니다 (읽기 전용).")
-        threading.Thread(target=orchestrator.backfill_diagnose, daemon=True).start()
-
-    @app.message(re.compile(r"^!백필(?:잔여정리|고아청소)(?:\s+(dry))?\s*$", re.IGNORECASE))
-    def cmd_backfill_purge_leftover(message, say):
-        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
-        m = re.match(r"^!백필(?:잔여정리|고아청소)(?:\s+(dry))?\s*$", text, re.IGNORECASE)
-        dry = bool(m and m.group(1))
-        say(
-            "[System] master_index 외부의 백필 표식 .md (인덱스 미등록 잔여 파일) 만 정리합니다. "
-            + ("(드라이런: 미삭제 보고)" if dry else "(실삭제)")
+    def _backfill_usage():
+        return (
+            "[사용법] !백필 [서브명령] [옵션]\n"
+            "- !백필 스캔 [일수]      : 최근 N일 변동성 장세 스캔 (기본 60)\n"
+            "- !백필 실행 [건당대기초] : 저장된 큐 1건씩 작성 (기본 3)\n"
+            "- !백필 상태             : reports ↔ master_index 정합 진단\n"
+            "- !백필 초기화 [purge]    : 엔트리·state 제거 (purge 시 .md 삭제)\n"
+            "- !백필 재인덱싱 [건당대기초] : keyphrases 재추출\n"
+            "- !백필 잔여정리 [dry]    : 인덱스 외부 .md 정리 (dry 시 시뮬레이션)"
         )
-        threading.Thread(
-            target=lambda: orchestrator.backfill_purge_leftover(dry_run=dry),
-            daemon=True,
-        ).start()
 
-    @app.message(re.compile(r"^!백필재인덱싱(?:\s+(\d+))?\s*$", re.IGNORECASE))
-    def cmd_backfill_reindex(message, say):
-        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
-        m = re.match(r"^!백필재인덱싱(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
-        delay_sec = int(m.group(1)) if (m and m.group(1)) else 3
-        say(
-            f"[System] 백필 엔트리 재인덱싱을 시작합니다 (.md 보존, keyphrases 재추출, "
-            f"건당 {delay_sec}초 대기)."
-        )
-        threading.Thread(
-            target=lambda: orchestrator.backfill_reindex(delay_sec=delay_sec),
-            daemon=True,
-        ).start()
+    @app.message(re.compile(_BACKFILL_PATTERN + "|" + _BACKFILL_LEGACY_PATTERN, re.IGNORECASE))
+    def cmd_backfill_unified(message, say):
+        text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", "")).strip()
+
+        m_new = re.match(_BACKFILL_PATTERN, text, re.IGNORECASE)
+        m_legacy = re.match(_BACKFILL_LEGACY_PATTERN, text, re.IGNORECASE)
+
+        if m_legacy and not (m_new and m_new.group(1)):
+            head = text.split()[0]
+            sub_map = {
+                "!백필스캔": "스캔", "!백필실행": "실행", "!백필상태": "상태",
+                "!백필초기화": "초기화", "!백필재인덱싱": "재인덱싱",
+                "!백필잔여정리": "잔여정리", "!백필고아청소": "잔여정리",
+            }
+            sub = sub_map.get(head.lower(), None) or sub_map.get(head, "")
+            opt = m_legacy.group(1) or ""
+            say(f"[안내] 명령어가 통일되었습니다 → `!백필 {sub} {opt}`. (`!명령어` 참조)")
+        else:
+            sub = (m_new.group(1) if m_new else None) or ""
+            opt = (m_new.group(2) if m_new else None) or ""
+
+        if not sub:
+            return say(_backfill_usage())
+
+        if sub == "스캔":
+            try:
+                lookback = int(opt) if opt else 60
+            except ValueError:
+                return say("[Error] !백필 스캔 [일수] — 일수는 정수여야 합니다.")
+            say(f"[System] 최근 {lookback}일 변동성 장세 스캔을 시작합니다...")
+            threading.Thread(
+                target=lambda: orchestrator.backfill_scan(lookback_days=lookback),
+                daemon=True,
+            ).start()
+        elif sub == "실행":
+            try:
+                delay_sec = int(opt) if opt else 3
+            except ValueError:
+                return say("[Error] !백필 실행 [건당대기초] — 정수여야 합니다.")
+            say(f"[System] 저장된 백필 큐를 실행합니다 (건당 {delay_sec}초 대기).")
+            threading.Thread(
+                target=lambda: orchestrator.backfill_run(delay_sec=delay_sec),
+                daemon=True,
+            ).start()
+        elif sub == "상태":
+            say("[System] reports 트리와 master_index 정합 상태를 진단합니다 (읽기 전용).")
+            threading.Thread(target=orchestrator.backfill_diagnose, daemon=True).start()
+        elif sub == "초기화":
+            purge = (opt.lower() == "purge")
+            warn = " (.md 까지 삭제)" if purge else " (.md 보존)"
+            say(f"[System] 백필 초기화를 시작합니다.{warn}")
+            threading.Thread(
+                target=lambda: orchestrator.backfill_reset(delete_reports=purge),
+                daemon=True,
+            ).start()
+        elif sub == "재인덱싱":
+            try:
+                delay_sec = int(opt) if opt else 3
+            except ValueError:
+                return say("[Error] !백필 재인덱싱 [건당대기초] — 정수여야 합니다.")
+            say(
+                f"[System] 백필 엔트리 재인덱싱을 시작합니다 (.md 보존, keyphrases 재추출, "
+                f"건당 {delay_sec}초 대기)."
+            )
+            threading.Thread(
+                target=lambda: orchestrator.backfill_reindex(delay_sec=delay_sec),
+                daemon=True,
+            ).start()
+        elif sub in ("잔여정리", "고아청소"):
+            dry = (opt.lower() == "dry")
+            say(
+                "[System] master_index 외부의 백필 표식 .md (인덱스 미등록 잔여 파일) 만 정리합니다. "
+                + ("(드라이런: 미삭제 보고)" if dry else "(실삭제)")
+            )
+            threading.Thread(
+                target=lambda: orchestrator.backfill_purge_leftover(dry_run=dry),
+                daemon=True,
+            ).start()
+        else:
+            say(_backfill_usage())
 
     @app.message(re.compile(r"^(확인)\s*$"))
     def cmd_backfill_confirm(message, say):
@@ -809,43 +877,67 @@ def register_slack_handlers(app, kis, config, orchestrator):
             say("\n".join(msg))
         threading.Thread(target=bg_task, daemon=True).start()
 
-    @app.message(re.compile(r"^!기대주테스트", re.IGNORECASE))
-    def cmd_test_gem(message, say):
-        say("[System] 기대주 발굴 중입니다 (기준: 60점 이상)...")
-        def task():
-            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
-            kis.set_token(token)
-            stocks = quant_screener.run_condition_screener(kis, "기대주_발굴")
-            if not stocks: return say("[결과] 조건식 통과 종목이 없습니다.")
-            passed_gem = quant_screener.run_unified_screener(stocks, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
-            top_gems = [p for p in passed_gem if p.get('score', 0) >= 60]
-            if not top_gems: return say("[결과] 60점 이상 펀더멘털 대장주가 없습니다.")
-            output = ["[ 기대주 (60점 이상) 테스트 결과 ]\n"]
-            for s in top_gems[:5]:
-                name, _, _ = stock_info_crawler.get_stock_info_naver(s['ticker'])
-                news = news_crawler.get_latest_news(name, limit=2)
-                rating = ai_strategy.get_quick_rating(s['ticker'], name, news, "기대주", s)
-                output.append(f"- {name} ({s['ticker']}) [{s.get('score')}점]\n{rating}\n")
-            say("\n".join(output))
-        threading.Thread(target=task, daemon=True).start()
+    # ----- 테스트 통합: !테스트 [기대주|배당주] -----
+    _TEST_PATTERN = r"^!테스트(?:\s+(기대주|배당주))?\s*$"
+    _TEST_LEGACY_PATTERN = r"^!(기대주테스트|배당주테스트)\s*$"
 
-    @app.message(re.compile(r"^!배당주테스트", re.IGNORECASE))
-    def cmd_test_div(message, say):
-        say("[System] 배당주 스캔 및 AI 위험 검증 중...")
-        def task():
-            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
-            kis.set_token(token)
-            stocks = quant_screener.run_condition_screener(kis, "배당주_발굴")
-            if not stocks: return say("[결과] 조건식 통과 종목이 없습니다.")
-            output = ["[ 배당 가치주 테스트 결과 ]\n"]
-            for s in stocks[:5]:
-                name, _, _ = stock_info_crawler.get_stock_info_naver(s['ticker'])
-                news = news_crawler.get_latest_news(name, limit=2)
-                val = kis.get_valuation_data(s['ticker']) or {}
-                rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, val)
-                output.append(f"- {name} ({s['ticker']})\n{rating}\n")
-            say("\n".join(output))
-        threading.Thread(target=task, daemon=True).start()
+    def _test_usage():
+        return (
+            "[사용법] !테스트 [서브명령]\n"
+            "- !테스트 기대주 : 조건식 통과 + 60점 이상 펀더멘털 대장주 추출\n"
+            "- !테스트 배당주 : 조건식 통과 + AI 위험 검증"
+        )
+
+    @app.message(re.compile(_TEST_PATTERN + "|" + _TEST_LEGACY_PATTERN, re.IGNORECASE))
+    def cmd_test_unified(message, say):
+        text = (message.get("text") or "").strip()
+        m_new = re.match(_TEST_PATTERN, text, re.IGNORECASE)
+        m_legacy = re.match(_TEST_LEGACY_PATTERN, text, re.IGNORECASE)
+
+        sub = ""
+        if m_legacy:
+            legacy_head = m_legacy.group(1).lower()
+            sub = "기대주" if legacy_head.startswith("기대주") else "배당주"
+            say(f"[안내] 명령어가 통일되었습니다 → `!테스트 {sub}`. (`!명령어` 참조)")
+        elif m_new:
+            sub = m_new.group(1) or ""
+
+        if sub == "기대주":
+            say("[System] 기대주 발굴 중입니다 (기준: 60점 이상)...")
+            def task_gem():
+                token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+                kis.set_token(token)
+                stocks = quant_screener.run_condition_screener(kis, "기대주_발굴")
+                if not stocks: return say("[결과] 조건식 통과 종목이 없습니다.")
+                passed_gem = quant_screener.run_unified_screener(stocks, config["URL"], config["APP_KEY"], config["SECRET_KEY"], token)
+                top_gems = [p for p in passed_gem if p.get('score', 0) >= 60]
+                if not top_gems: return say("[결과] 60점 이상 펀더멘털 대장주가 없습니다.")
+                output = ["[ 기대주 (60점 이상) 테스트 결과 ]\n"]
+                for s in top_gems[:5]:
+                    name, _, _ = stock_info_crawler.get_stock_info_naver(s['ticker'])
+                    news = news_crawler.get_latest_news(name, limit=2)
+                    rating = ai_strategy.get_quick_rating(s['ticker'], name, news, "기대주", s)
+                    output.append(f"- {name} ({s['ticker']}) [{s.get('score')}점]\n{rating}\n")
+                say("\n".join(output))
+            threading.Thread(target=task_gem, daemon=True).start()
+        elif sub == "배당주":
+            say("[System] 배당주 스캔 및 AI 위험 검증 중...")
+            def task_div():
+                token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+                kis.set_token(token)
+                stocks = quant_screener.run_condition_screener(kis, "배당주_발굴")
+                if not stocks: return say("[결과] 조건식 통과 종목이 없습니다.")
+                output = ["[ 배당 가치주 테스트 결과 ]\n"]
+                for s in stocks[:5]:
+                    name, _, _ = stock_info_crawler.get_stock_info_naver(s['ticker'])
+                    news = news_crawler.get_latest_news(name, limit=2)
+                    val = kis.get_valuation_data(s['ticker']) or {}
+                    rating = ai_strategy.get_dividend_risk_check(s['ticker'], name, news, val)
+                    output.append(f"- {name} ({s['ticker']})\n{rating}\n")
+                say("\n".join(output))
+            threading.Thread(target=task_div, daemon=True).start()
+        else:
+            say(_test_usage())
 
     @app.message(re.compile(r"^!역발상", re.IGNORECASE))
     def contrarian_scan(message, say):
@@ -1242,62 +1334,127 @@ def register_slack_handlers(app, kis, config, orchestrator):
         ack()
         respond(text=format_scalp_status_text(), replace_original=False)
 
-    @app.message(re.compile(r"^!단타시작\s*$", re.IGNORECASE))
-    def cmd_scalp_start(message, say):
-        token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
-        kis.set_token(token)
-        result = start_scalp_trading(
-            via="slack_cmd", kis_client=kis, app=app, channel_id=config.get("CHANNEL_ID"),
+    # ----- 단타 통합: !단타 [시작|멈춤|상태|백테스트] -----
+    _SCALP_PATTERN = r"^!단타(?:\s+(시작|멈춤|상태|백테스트))?(?:\s+(\d+))?\s*$"
+    _SCALP_LEGACY_PATTERN = (
+        r"^!(단타시작|단타멈춤|단타상태|단타백테스트)(?:\s+(\d+))?\s*$"
+    )
+
+    def _scalp_usage():
+        return (
+            "[사용법] !단타 [서브명령] [옵션]\n"
+            "- !단타 시작            : 단타 진행 ON (장중에만 진입)\n"
+            "- !단타 멈춤            : 단타 진행 OFF\n"
+            "- !단타 상태            : 현재 세션/보유/PnL 조회\n"
+            "- !단타 백테스트 [일수]   : 형태 기반 백테스트 (기본 60일, 가격 무관)"
         )
-        if result.get("ok"):
-            say(
-                f"[Success] 단타 진행 ON ({result.get('lifecycle')}). 예산 Block Kit 확인.\n"
-                f"{format_scalp_status_text()}"
+
+    @app.message(re.compile(_SCALP_PATTERN + "|" + _SCALP_LEGACY_PATTERN, re.IGNORECASE))
+    def cmd_scalp_unified(message, say):
+        text = (message.get("text") or "").strip()
+        m_new = re.match(_SCALP_PATTERN, text, re.IGNORECASE)
+        m_legacy = re.match(_SCALP_LEGACY_PATTERN, text, re.IGNORECASE)
+
+        sub, opt = "", None
+        if m_legacy:
+            legacy_map = {
+                "단타시작": "시작", "단타멈춤": "멈춤",
+                "단타상태": "상태", "단타백테스트": "백테스트",
+            }
+            sub = legacy_map.get(m_legacy.group(1), "")
+            opt = m_legacy.group(2)
+            say(f"[안내] 명령어가 통일되었습니다 → `!단타 {sub}` (`!명령어` 참조)")
+        elif m_new:
+            sub = m_new.group(1) or ""
+            opt = m_new.group(2)
+
+        if not sub:
+            return say(_scalp_usage())
+
+        if sub == "시작":
+            token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
+            kis.set_token(token)
+            result = start_scalp_trading(
+                via="slack_cmd", kis_client=kis, app=app, channel_id=config.get("CHANNEL_ID"),
             )
+            if result.get("ok"):
+                say(
+                    f"[Success] 단타 진행 ON ({result.get('lifecycle')}). 예산 Block Kit 확인.\n"
+                    f"{format_scalp_status_text()}"
+                )
+            else:
+                say(f"[Error] {result.get('reason')}")
+        elif sub == "멈춤":
+            stop_scalp_trading(via="slack_cmd")
+            say(f"[Notice] 단타 진행 OFF.\n{format_scalp_status_text()}")
+        elif sub == "상태":
+            say(format_scalp_status_text())
+        elif sub == "백테스트":
+            try:
+                n_days = int(opt) if opt else 60
+            except ValueError:
+                return say("[Error] !단타 백테스트 [일수] — 정수여야 합니다.")
+            say(f"[System] 형태 기반 단타 백테스트 실행 중 (n_days={n_days}, 가격 무관)...")
+
+            def bg_task():
+                from src.strategy import scalp_backtest
+                result = scalp_backtest.run_and_persist(n_days=n_days)
+                set_backtest_gate_result(result)
+                status = "PASS" if result.get("passes_gate") else "FAIL"
+                say(
+                    f"[백테스트 {status}] trades={result.get('total_trades')}, "
+                    f"win_rate={result.get('win_rate', 0):.2%}, "
+                    f"avg={float(result.get('avg_return') or 0):.4f}, "
+                    f"total={float(result.get('total_return') or 0):.4f}\n"
+                    f"- {result.get('gate_reason')}\n"
+                    f"- 스케줄 등록 조건: 백테스트 PASS + !단타 시작(진행 ON)"
+                )
+
+            threading.Thread(target=bg_task, daemon=True).start()
         else:
-            say(f"[Error] {result.get('reason')}")
+            say(_scalp_usage())
 
-    @app.message(re.compile(r"^!단타멈춤\s*$", re.IGNORECASE))
-    def cmd_scalp_stop(message, say):
-        stop_scalp_trading(via="slack_cmd")
-        say(f"[Notice] 단타 진행 OFF.\n{format_scalp_status_text()}")
+    # ----- 수동등록: 옵션 명확화 (v1.4, 2026-05-25) -----
+    _MANUAL_TRACK_MAP = {
+        "A": "TRACK_A",   # 성장 (기대주 라인)
+        "B": "TRACK_B",   # 가치 (배당주 라인)
+        "C": "TRACK_C",   # 역발상 (낙폭과대 라인)
+        "M": "MANUAL",    # 일반 수동등록 (기본값)
+    }
 
-    @app.message(re.compile(r"^!단타상태\s*$", re.IGNORECASE))
-    def cmd_scalp_status(message, say):
-        say(format_scalp_status_text())
-
-    @app.message(re.compile(r"^!단타백테스트(?:\s+(\d+))?\s*$", re.IGNORECASE))
-    def cmd_scalp_backtest(message, say):
-        text = message.get("text", "")
-        m = re.match(r"^!단타백테스트(?:\s+(\d+))?\s*$", text, re.IGNORECASE)
-        n_days = int(m.group(1)) if (m and m.group(1)) else 60
-        say(f"[System] 형태 기반 단타 백테스트 실행 중 (n_days={n_days}, 가격 무관)...")
-
-        def bg_task():
-            from src.strategy import scalp_backtest
-            result = scalp_backtest.run_and_persist(n_days=n_days)
-            set_backtest_gate_result(result)
-            status = "PASS" if result.get("passes_gate") else "FAIL"
-            say(
-                f"[백테스트 {status}] trades={result.get('total_trades')}, "
-                f"win_rate={result.get('win_rate', 0):.2%}, "
-                f"avg={float(result.get('avg_return') or 0):.4f}, "
-                f"total={float(result.get('total_return') or 0):.4f}\n"
-                f"- {result.get('gate_reason')}\n"
-                f"- 스케줄 등록 조건: 백테스트 PASS + !단타시작(진행 ON)"
-            )
-
-        threading.Thread(target=bg_task, daemon=True).start()
+    def _manual_register_usage():
+        return (
+            "[사용법] !수동등록 [종목코드] [트랙]\n"
+            "- 종목코드: 6자리 숫자 (예: 005930)\n"
+            "- 트랙(선택, 기본 M):\n"
+            "    A = 성장(기대주 라인)\n"
+            "    B = 가치(배당주 라인)\n"
+            "    C = 역발상(낙폭과대 라인)\n"
+            "    M = 일반 수동등록 (기본)\n"
+            "예시: `!수동등록 005930 A`, `!수동등록 005930`\n"
+            "[정책] 수동등록 종목은 자동매도가 추적익절(최고점 -10%)에만 동작합니다.\n"
+            "       원금 손절·펀더멘털 훼손 매도는 적용되지 않습니다."
+        )
 
     @app.message(re.compile(r"^!수동등록", re.IGNORECASE))
     def manual_register_stock(message, say):
         text = re.sub(r'<[^|>]*\|([^>]+)>|<([^>]+)>', r'\1', message.get("text", ""))
         parts = text.split()
-        if len(parts) < 2: return say("[Error] 사용법: !수동등록 [종목코드] [트랙(A/B/C/M)]")
+        if len(parts) < 2:
+            return say(_manual_register_usage())
         ticker = re.sub(r'[^A-Za-z0-9]', '', parts[1])[:6].upper()
-        track_map = {"A": "TRACK_A", "B": "TRACK_B", "C": "TRACK_C", "M": "MANUAL"}
+        if not ticker or not ticker.isdigit() or len(ticker) != 6:
+            return say(
+                f"[Error] 종목코드 형식 오류: '{parts[1]}' (6자리 숫자여야 함)\n\n"
+                + _manual_register_usage()
+            )
         raw_track = parts[2].upper() if len(parts) > 2 else "M"
-        strategy_tag = track_map.get(raw_track, "MANUAL")
+        if len(parts) > 2 and raw_track not in _MANUAL_TRACK_MAP:
+            return say(
+                f"[Error] 트랙 옵션 오류: '{parts[2]}' (허용: A/B/C/M)\n\n"
+                + _manual_register_usage()
+            )
+        strategy_tag = _MANUAL_TRACK_MAP.get(raw_track, "MANUAL")
         say(f"[System] {ticker} 수동 등록({strategy_tag}) 및 AI 팩트체크를 시작합니다...")
 
         def bg_task():
@@ -1339,23 +1496,63 @@ def register_slack_handlers(app, kis, config, orchestrator):
             say(f"[Success] {name}({ticker}) {strategy_tag} 등록 완료.\n\n{report}")
         threading.Thread(target=bg_task, daemon=True).start()
 
-    @app.message(re.compile(r"^!(일일|주간|월간|분기)보고", re.IGNORECASE))
-    def cmd_reports(message, say):
-        text = message.get("text", "")
+    # ----- 보고 통합: !보고 [일일|주간|월간|분기] -----
+    _REPORT_PATTERN = r"^!보고(?:\s+(일일|주간|월간|분기))?\s*$"
+    _REPORT_LEGACY_PATTERN = r"^!(일일|주간|월간|분기)보고\s*$"
+
+    def _report_usage():
+        return (
+            "[사용법] !보고 [기간]\n"
+            "- !보고 일일 : 일일 마감 브리핑 즉시 생성\n"
+            "- !보고 주간 : 주간 포트폴리오 회고\n"
+            "- !보고 월간 : 월간 포트폴리오 회고\n"
+            "- !보고 분기 : 분기 포트폴리오 회고"
+        )
+
+    @app.message(re.compile(_REPORT_PATTERN + "|" + _REPORT_LEGACY_PATTERN, re.IGNORECASE))
+    def cmd_reports_unified(message, say):
+        text = (message.get("text") or "").strip()
+        m_new = re.match(_REPORT_PATTERN, text, re.IGNORECASE)
+        m_legacy = re.match(_REPORT_LEGACY_PATTERN, text, re.IGNORECASE)
+
+        period = ""
+        if m_legacy:
+            period = m_legacy.group(1)
+            say(f"[안내] 명령어가 통일되었습니다 → `!보고 {period}` (`!명령어` 참조)")
+        elif m_new:
+            period = m_new.group(1) or ""
+
+        if period not in ("일일", "주간", "월간", "분기"):
+            return say(_report_usage())
+
         def bg_task():
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"]); kis.set_token(token)
             macro = macro_collector.get_macro_indicators()
             portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-            if "!일일" in text:
+            if period == "일일":
                 us_kw, kr_kw = ai_strategy.infer_news_keywords().split(',')[:2]
-                report = ai_strategy.get_daily_market_report(macro, news_crawler.get_latest_news(us_kw, limit=5, search_type="macro"), news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro"), research_crawler.get_latest_industry_reports(limit=8), "수동 요청")
+                report = ai_strategy.get_daily_market_report(
+                    macro,
+                    news_crawler.get_latest_news(us_kw, limit=5, search_type="macro"),
+                    news_crawler.get_latest_news(kr_kw, limit=5, search_type="macro"),
+                    research_crawler.get_latest_industry_reports(limit=8),
+                    "수동 요청",
+                )
             else:
-                if not portfolio: return say("[결과] 보유 종목이 없습니다.")
-                news_dict = {i["name"]: news_crawler.get_latest_news(i["name"], limit=5, search_type="stock") for i in portfolio.values() if i.get("quantity", 0) > 0}
-                if "!주간" in text: report = ai_strategy.get_weekly_portfolio_report(portfolio, news_dict)
-                elif "!월간" in text: report = ai_strategy.get_monthly_portfolio_report(portfolio, news_dict)
-                else: report = ai_strategy.get_quarterly_portfolio_report(portfolio, news_dict)
+                if not portfolio:
+                    return say("[결과] 보유 종목이 없습니다.")
+                news_dict = {
+                    i["name"]: news_crawler.get_latest_news(i["name"], limit=5, search_type="stock")
+                    for i in portfolio.values() if i.get("quantity", 0) > 0
+                }
+                if period == "주간":
+                    report = ai_strategy.get_weekly_portfolio_report(portfolio, news_dict)
+                elif period == "월간":
+                    report = ai_strategy.get_monthly_portfolio_report(portfolio, news_dict)
+                else:  # 분기
+                    report = ai_strategy.get_quarterly_portfolio_report(portfolio, news_dict)
             say(report)
+
         threading.Thread(target=bg_task, daemon=True).start()
 
     @app.message(re.compile(r"^!초기화", re.IGNORECASE))
