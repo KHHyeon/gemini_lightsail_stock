@@ -52,12 +52,9 @@ def parse_iso_to_kst(iso_text):
 
 
 def is_market_open(now=None):
-    """한국 주식 시장 개장 여부 (KST 평일 09:00 ~ 15:30)."""
-    current_time = now if now is not None else now_kst()
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=KST)
-    if current_time.weekday() >= 5:
-        return False
-    start_time = current_time.replace(hour=9, minute=0, second=0, microsecond=0)
-    end_time = current_time.replace(hour=15, minute=30, second=0, microsecond=0)
-    return start_time <= current_time <= end_time
+    """한국 주식 장중 여부 (KST 거래일 09:00 ~ 15:30).
+
+    ``is_market_hours`` 와 동일. 휴장일 판별은 ``market_calendar.is_trading_day`` 사용.
+    """
+    from src.utils.market_calendar import is_market_hours
+    return is_market_hours(now)

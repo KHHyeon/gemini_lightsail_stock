@@ -74,10 +74,9 @@ def _bootstrap_scalp_backtest():
 
 
 def _is_first_trading_day(now=None):
-    """주간 첫 거래일(월요일) 여부. 공휴일 보정은 후속."""
-    from src.utils.timekit import now_kst
-    current = now if now is not None else now_kst()
-    return current.weekday() == 0
+    """주간 첫 거래일 여부 (공휴일 보정)."""
+    from src.utils.market_calendar import is_first_trading_day_of_week
+    return is_first_trading_day_of_week(now)
 
 
 def _scalp_pre_job():
@@ -116,6 +115,11 @@ def _scalp_intraday_job():
 
 def run_scheduler():
     bt_result = _bootstrap_scalp_backtest()
+    try:
+        from src.memory import scalp_session_store
+        scalp_session_store.bootstrap_scalp_session()
+    except Exception as exc:
+        print(f"Log: [ScalpSession] bootstrap failed: {exc}", flush=True)
     schedule.every().day.at("08:00").do(orchestrator.issue_daily_token)
     schedule.every().day.at("08:45").do(orchestrator.daily_routine)
     schedule.every().day.at("08:50").do(lambda: orchestrator.auto_stock_discovery(KST))

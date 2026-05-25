@@ -11,11 +11,17 @@ from src.utils.timekit import (
     is_market_open as _is_market_open_impl,
     kst_strftime,
 )
+from src.utils.market_calendar import is_trading_day as _is_trading_day_impl
 
 
 def is_market_open():
-    """한국 주식 시장 개장 여부 (KST 평일 09:00 ~ 15:30)."""
+    """한국 주식 장중 여부 (KST 거래일 09:00 ~ 15:30)."""
     return _is_market_open_impl()
+
+
+def is_trading_day(now=None):
+    """KST 거래일 여부 (평일 + KRX 공휴일 제외)."""
+    return _is_trading_day_impl(now)
 
 
 def get_current_kst_time():
@@ -23,4 +29,4 @@ def get_current_kst_time():
     return kst_strftime("%Y-%m-%d %H:%M:%S KST")
 
 
-__all__ = ["KST", "is_market_open", "get_current_kst_time"]
+__all__ = ["KST", "is_market_open", "is_trading_day", "get_current_kst_time"]

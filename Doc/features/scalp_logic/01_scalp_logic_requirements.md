@@ -44,6 +44,12 @@ R8. 실전 KIS 3분봉 연동 (S0~S5 Live Cycle)
 - 장중 3분 주기 `_scalp_intraday_job`: 포지션 없으면 `scalp_scan_cycle`, 있으면 `scalp_risk_monitor_cycle`.
 - 청산 시 `scalp_trainer.record_trade_result` 학습 적재. 주문 모드 `TRADING_MODE_SCALP`(기본 PAPER).
 
+R9. 단타 세션 영속화 (Service Restart Recovery)
+- 모듈 메모리 `_scalp_session_dict` 를 `scalp_session.json`(Drive/로컬)에 동기화한다.
+- 저장 대상: `is_user_running`, `lifecycle`, 예산, `budget_requested_at`, `hts_condition_name`, `backtest_passed`, `last_backtest`, `position`(half_sold/highest_price/shape_vector 포함).
+- 기동 시 `load_scalp_session()` -> 메모리 복원 -> `paper_portfolio.json` SCALP 포지션과 reconcile.
+- 매수/매도는 기존 `record_trade` 로 `paper_trades`/`paper_portfolio` 유지; 리스크 감시는 **세션 position** 우선, 없으면 portfolio SCALP 에서 복구.
+
 2. 비기능 요구사항 (Non-Functional)
 N1. 연산 효율성
 - 복잡한 이미지 딥러닝(CNN) 대신 1D 수치 배열의 피어슨 상관계수 연산을 통해 AWS LightSail의 CPU 부하를 최소화한다.

@@ -2,7 +2,7 @@
 
 1. 상태 모델 (State Model)
 - STOPPED: 사용자 `!단타멈춤` 또는 초기 상태. 스케줄 job 은 등록되나 내부 가드로 SKIP.
-- S_PRE. Budget Allocation: 매주 첫 거래일(월) 08:30 KST. `is_scalp_schedule_enabled()` 일 때만 활성.
+- S_PRE. Budget Allocation: **주간 첫 거래일** 08:30 KST (`is_first_trading_day_of_week`). `is_scalp_schedule_enabled()` 일 때만 활성.
 - S0. Scanning: 주간 예산이 확정(사용자 입력 완료 또는 09:00 KST 타임아웃 폴백 자동 적용)된 후, KIS API를 통해 거래대금 급등 종목 3분봉 폴링 개시.
 - S1. Filtered: 3분간 거래대금 5억 돌파 및 20선 눌림목 근접 포착.
 - S2. Validating: 30종 프리셋과 상관계수 비교 및 Dynamic Threshold 검사 수행.
@@ -34,12 +34,19 @@
 - (50% 매도 이후 `half_sold=True`) 현재가 <= 최고가 * 0.99: 잔여 50% 전량 매도 ("TRAILING_STOP")
 - 시각 >= "15:10:00" KST (`is_force_liquidation_time`): `MarketOrchestrator.scalp_force_liquidation()` 가 SCALP 포지션 전량 시장가 매도. 매도 실패 시 즉시 B-Type 알림 발행(`HALT_B_TYPE`).
 
-5. 파일 매핑 (구현 동기화)
+5. 단타 세션 영속화 (scalp_session.json)
+- schema_version: 1
+- 필드: is_user_running, lifecycle, amount, set_via, set_at, is_pending_custom, backtest_passed, last_backtest, started_at, stopped_at, budget_requested_at, hts_condition_name, position|null
+- 기동: load -> `_scalp_session_dict` merge -> portfolio SCALP 와 position reconcile
+- position 세션 없고 portfolio SCALP qty>0 이면 S4 복구용 최소 position 생성 (half_sold=False, highest=avg)
+
+6. 파일 매핑 (구현 동기화)
 - 슬랙/세션: `src/utils/slack_interface.py` (예산+진행+position, start/stop/status)
+- **세션 영속화**: `src/memory/scalp_session_store.py`, `scalp_session.json`
 - KIS 3분봉: `src/data/chart.py` (분봉/3분봉/MA20)
 - 백테스트: `src/strategy/scalp_backtest.py`, CLI `scripts/run_scalp_backtest.py`
 - 형태/리스크/진입평가: `src/strategy/scalp_logic.py`
 - 오케스트레이션: `src/execution/orchestrator.py` (scan_cycle, risk_monitor_cycle), 스케줄 `main.py`
 - 주문: `src/execution/order.py` (`TRADING_MODE_SCALP`)
 - 학습 데이터: `src/memory/scalp_trainer.py`
-- 테스트: `tests/temp_test_scalp_logic.py` (31 케이스)
+- 테스트: `tests/temp_test_scalp_logic.py` (31), `tests/temp_test_market_calendar_and_token.py` (11)

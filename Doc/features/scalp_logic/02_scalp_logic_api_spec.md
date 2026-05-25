@@ -163,3 +163,18 @@ get_training_metadata() -> dict
 
 get_recent_trade_list(limit=20) -> list[dict]
 - 목적: 최근 trade 리스트 역순 조회.
+
+5. 단타 세션 영속화 API (src/memory/scalp_session_store.py)
+
+```python
+SCALP_SESSION_FILENAME = "scalp_session.json"
+load_scalp_session() -> dict|None
+save_scalp_session(session_dict) -> bool
+restore_scalp_session_to_module() -> dict
+persist_scalp_session_from_module() -> bool
+reconcile_scalp_position_with_portfolio() -> dict
+bootstrap_scalp_session() -> dict
+```
+
+- `slack_interface` 의 `_scalp_session_dict` 변경 시 `persist_scalp_session_from_module()` 호출.
+- `main.py` 기동: `bootstrap_scalp_session()` (load + reconcile).

@@ -45,6 +45,15 @@ _scalp_session_dict = {
 DEFAULT_BUDGET_TIMEOUT_MIN = 30
 
 
+def _persist_scalp_session():
+    """scalp_session.json 동기 저장 (실패 시 로그만)."""
+    try:
+        from src.memory import scalp_session_store
+        scalp_session_store.persist_scalp_session_from_module()
+    except Exception as exc:
+        print(f"Log: [ScalpSession] persist failed: {exc}")
+
+
 def _touch_session_time(key):
     from src.utils.timekit import kst_iso_now
     _scalp_session_dict[key] = kst_iso_now()
@@ -64,6 +73,7 @@ def set_backtest_gate_result(result_dict):
         "total_trades": result_dict.get("total_trades"),
         "gate_reason": result_dict.get("gate_reason"),
     }
+    _persist_scalp_session()
 
 
 def is_backtest_passed():
@@ -98,6 +108,7 @@ def set_scalp_position(position_dict):
         return None
     _scalp_session_dict["position"] = dict(position_dict)
     set_scalp_lifecycle(SCALP_LIFECYCLE_RISK)
+    _persist_scalp_session()
     return get_scalp_position()
 
 
@@ -107,6 +118,7 @@ def update_scalp_position(**fields):
         return None
     pos.update(fields)
     _scalp_session_dict["position"] = pos
+    _persist_scalp_session()
     return pos
 
 
@@ -114,6 +126,7 @@ def clear_scalp_position():
     _scalp_session_dict["position"] = None
     if is_scalp_user_running() and get_weekly_budget() is not None:
         set_scalp_lifecycle(SCALP_LIFECYCLE_SCANNING)
+    _persist_scalp_session()
     return True
 
 
@@ -203,6 +216,7 @@ def start_scalp_trading(*, via="slack", kis_client=None, app=None, channel_id=No
     budget_prompt = request_weekly_budget_via_slack(
         app=app, channel_id=channel_id, reset_budget=False,
     )
+    _persist_scalp_session()
     return {
         "ok": True,
         "lifecycle": SCALP_LIFECYCLE_PRE,
@@ -218,6 +232,7 @@ def stop_scalp_trading(*, via="slack"):
     _scalp_session_dict["is_user_running"] = False
     set_scalp_lifecycle(SCALP_LIFECYCLE_STOPPED)
     _touch_session_time("stopped_at")
+    _persist_scalp_session()
     return {"ok": True, "lifecycle": SCALP_LIFECYCLE_STOPPED, "via": via}
 
 
@@ -287,6 +302,7 @@ def set_weekly_budget(amount_int, *, via="default"):
     _scalp_session_dict["set_at"] = kst_iso_now()
     if is_scalp_user_running():
         set_scalp_lifecycle(SCALP_LIFECYCLE_SCANNING)
+    _persist_scalp_session()
     return amount
 
 
@@ -385,6 +401,7 @@ def request_weekly_budget_via_slack(app=None, channel_id=None, *, reset_budget=T
     if reset_budget:
         reset_weekly_budget_session()
     _touch_session_time("budget_requested_at")
+    _persist_scalp_session()
     blocks = _build_weekly_budget_blocks()
     resolved_channel = channel_id or os.getenv("SLACK_CHANNEL") or os.getenv("SLACK_CHANNEL_ID") or ""
 

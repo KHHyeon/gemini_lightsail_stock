@@ -21,10 +21,14 @@ class MarketOrchestrator:
             self.app.client.chat_postMessage(channel=self.config["CHANNEL_ID"], text=text)
 
     def issue_daily_token(self):
-        if not market_hours.is_market_open(): return
-        token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"], force=True)
-        self.kis.set_token(token)
-        self.send_slack("[System] 08:00 KIS API 일일 접근 토큰 갱신 완료.")
+        result = token_manager.issue_scheduled_token(
+            self.config["APP_KEY"], self.config["SECRET_KEY"],
+        )
+        token = result.get("token")
+        if token:
+            self.kis.set_token(token)
+        if result.get("issued"):
+            self.send_slack("[System] 08:00 KIS API 일일 접근 토큰 갱신 완료.")
 
     def get_parsed_keywords(self):
         kw_text = ai_strategy.infer_news_keywords()
@@ -34,7 +38,7 @@ class MarketOrchestrator:
         return us_kw, kr_kw
 
     def daily_routine(self):
-        if not market_hours.is_market_open(): return
+        if not market_hours.is_trading_day(): return
         self.send_slack("[System] 일일 시황 브리핑 작성을 시작합니다.")
         macro = macro_collector.get_macro_indicators()
         us_kw, kr_kw = self.get_parsed_keywords()
@@ -45,7 +49,8 @@ class MarketOrchestrator:
         self.send_slack(f"[일간 마감 브리핑]\n\n{report}")
 
     def chronicle_routine(self):
-        """15:35 T-Day Market Chronicles (지수 급변/VIX 경계 시)."""
+        """15:35 T-Day Market Chronicles (거래일만)."""
+        if not market_hours.is_trading_day(): return
         self.send_slack("[System] Market Chronicles T-Day 분석을 시작합니다.")
         macro = macro_collector.get_macro_indicators()
         us_kw, kr_kw = self.get_parsed_keywords()
@@ -119,7 +124,7 @@ class MarketOrchestrator:
         self.send_slack(f"[10:00 심층 시황 및 전략]\n\n{report}")
 
     def auto_stock_discovery(self, kst):
-        if datetime.now(kst).weekday() >= 5: return
+        if not market_hours.is_trading_day(): return
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
         self.kis.set_token(token)
         
@@ -485,6 +490,8 @@ class MarketOrchestrator:
     def scalp_pre_routine(self):
         """매주 첫 거래일 08:30 KST 트리거. S_PRE 상태 개시 + 슬랙 Block Kit 송신."""
         from src.utils import slack_interface as si
+        if not market_hours.is_trading_day():
+            return {"state": "SKIP", "reason": "not_trading_day"}
         if not si.is_scalp_schedule_enabled():
             return {"state": "SKIP", "reason": "scalp_schedule_disabled"}
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
@@ -528,6 +535,8 @@ class MarketOrchestrator:
         실패 시 B-Type 에러 슬랙 알림을 발행하고 상태를 ``HALT_B_TYPE`` 으로 반환.
         """
         from src.utils import slack_interface as si
+        if not market_hours.is_trading_day():
+            return {"state": "SKIP", "reason": "not_trading_day"}
         if not si.is_scalp_user_running():
             return {"state": "SKIP", "reason": "scalp_not_running"}
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
