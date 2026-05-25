@@ -115,6 +115,166 @@ class TestMarketCalendar(unittest.TestCase):
         slack_mock.assert_not_called()
 
 
+class TestChronicleTradingDayGuard(unittest.TestCase):
+    """write_chronicle_for_today 가 거래일이 아닐 때 거부하는지 검증."""
+
+    def setUp(self):
+        mc.load_holiday_date_set(reload=True)
+
+    def test_skip_on_weekend(self):
+        """주말이면 write_chronicle_for_today 가 거부 메시지 반환."""
+        from src.memory import chronicle_writer
+        from unittest.mock import MagicMock
+
+        sat = datetime(2026, 5, 23, 16, 0, tzinfo=KST)
+        with patch("src.memory.chronicle_writer.now_kst", return_value=sat):
+            ok, msg = chronicle_writer.write_chronicle_for_today(
+                {"VIX": 30.0, "KOSPI_CHG": -2.0, "KOSDAQ_CHG": -2.0},
+                us_news=[], kr_news=[], notify_fn=MagicMock(),
+            )
+        self.assertFalse(ok)
+        self.assertIn("거래일", msg)
+
+    def test_skip_on_holiday(self):
+        """평일 대체공휴일(2026-05-25 부처님오신날 대체)이면 거부."""
+        from src.memory import chronicle_writer
+        from unittest.mock import MagicMock
+
+        holiday = datetime(2026, 5, 25, 16, 0, tzinfo=KST)
+        with patch("src.memory.chronicle_writer.now_kst", return_value=holiday):
+            ok, msg = chronicle_writer.write_chronicle_for_today(
+                {"VIX": 30.0, "KOSPI_CHG": -2.0, "KOSDAQ_CHG": -2.0},
+                us_news=[], kr_news=[], notify_fn=MagicMock(),
+            )
+        self.assertFalse(ok)
+        self.assertIn("거래일", msg)
+
+    def test_trading_day_passes_guard(self):
+        """거래일이면 거래일 가드는 통과하고 다음 단계(트리거 조건)에서 평가."""
+        from src.memory import chronicle_writer
+        from unittest.mock import MagicMock
+
+        trading = datetime(2026, 5, 22, 16, 0, tzinfo=KST)  # 금
+        # 트리거 조건 미충족 시 "크로니클 트리거 조건 미충족" 메시지가 나오면
+        # 거래일 가드는 통과한 것이다.
+        with patch("src.memory.chronicle_writer.now_kst", return_value=trading):
+            ok, msg = chronicle_writer.write_chronicle_for_today(
+                {"VIX": 10.0, "KOSPI_CHG": 0.1, "KOSDAQ_CHG": 0.1},
+                us_news=[], kr_news=[], notify_fn=MagicMock(),
+            )
+        self.assertFalse(ok)
+        self.assertNotIn("거래일", msg)
+        self.assertIn("트리거", msg)
+
+
+class TestManualRegisteredStopLossPolicy(unittest.TestCase):
+    """수동등록 종목은 추적익절만 자동매도 — daily_fundamental_stop_loss 정책 검증."""
+
+    def _run_daily_with_portfolio(self, portfolio, current_price):
+        """daily_fundamental_stop_loss 를 mock 환경에서 1회 실행하고 trigger_reason 캡쳐."""
+        from src.execution import orchestrator as orch_mod
+        from src.execution.orchestrator import MarketOrchestrator
+        from unittest.mock import MagicMock
+
+        kis = MagicMock()
+        kis.get_valuation_data.return_value = {"current_price": current_price}
+        orch = MarketOrchestrator(kis, MagicMock(), {
+            "APP_KEY": "x", "SECRET_KEY": "y", "URL": "z", "ACC_NO": "0",
+        })
+
+        captured = {"submitted": []}
+
+        class MockOM:
+            def __init__(self, *a, **kw):
+                pass
+
+            def submit(self, req):
+                captured["submitted"].append(req)
+                return {"success": True, "msg": f"{req.ticker} 매도 OK"}
+
+        with patch.object(orch_mod, "market_hours") as mh, \
+             patch.object(orch_mod, "load_json_from_gdrive") as load_mock, \
+             patch.object(orch_mod, "save_json_to_gdrive"), \
+             patch.object(orch_mod, "token_manager") as tm_mock, \
+             patch.object(orch_mod, "OrderManager", MockOM), \
+             patch.object(orch_mod, "macro_collector") as macro_mock, \
+             patch.object(orch_mod, "ai_strategy") as ai_mock, \
+             patch.object(orch_mod, "chart_data") as chart_mock, \
+             patch.object(orch, "send_slack"):
+
+            mh.is_market_open.return_value = True
+            load_mock.side_effect = lambda name: (
+                dict(portfolio) if name == "paper_portfolio.json" else {}
+            )
+            tm_mock.get_access_token.return_value = "T"
+            macro_mock.get_macro_indicators.return_value = {}
+            chart_mock.get_daily_ohlcv.return_value = []
+            # 펀더멘털 훼손 진단을 항상 [펀더멘털훼손] 으로 강제 → 자동 종목엔 매도,
+            # 수동 종목엔 호출 자체 차단 여부 검증.
+            ai_mock.check_fundamental_damage.return_value = "[펀더멘털훼손] 매출 절벽"
+
+            orch.daily_fundamental_stop_loss()
+            return captured["submitted"], ai_mock.check_fundamental_damage
+
+    def test_manual_skip_principal_stop_loss(self):
+        """수동등록 종목은 원금 -10% 이탈에도 자동 매도 안 한다."""
+        portfolio = {
+            "000001": {
+                "name": "수동주식", "quantity": 10,
+                "avg_price": 10000, "mode_type": "PAPER_ONLY",
+                "reason": "수동등록 | AI 팩트체크 완료",
+            },
+        }
+        # 현재가가 평균가의 -15% 라도 (원금손절 트리거) 수동등록이면 SKIP.
+        submitted, dmg_mock = self._run_daily_with_portfolio(portfolio, current_price=8500)
+        self.assertEqual(submitted, [], "수동등록 종목은 원금손절로 자동 매도되면 안 됨")
+        dmg_mock.assert_not_called()
+
+    def test_manual_skip_fundamental_damage(self):
+        """수동등록 종목은 AI 펀더멘털 훼손 판정에도 자동 매도 안 한다."""
+        portfolio = {
+            "000002": {
+                "name": "수동주식2", "quantity": 5,
+                "avg_price": 10000, "mode_type": "PAPER_ONLY",
+                "reason": "수동등록 | TRACK_M",
+            },
+        }
+        # 현재가는 평균가 부근(-5%) — 추적익절도 원금손절도 트리거 안 됨.
+        submitted, dmg_mock = self._run_daily_with_portfolio(portfolio, current_price=9500)
+        self.assertEqual(submitted, [], "수동등록은 펀더멘털 훼손 매도 트리거되면 안 됨")
+        # AI 호출 자체가 일어나면 안 됨 (토큰 절약 + 정책 일관성).
+        dmg_mock.assert_not_called()
+
+    def test_manual_allows_trailing_stop(self):
+        """수동등록 종목도 최고점 대비 -10% 추적익절은 동작한다."""
+        portfolio = {
+            "000003": {
+                "name": "수동주식3", "quantity": 3,
+                "avg_price": 10000, "mode_type": "PAPER_ONLY",
+                "high_water_mark": 15000,  # 50% 상승 후
+                "reason": "수동등록 | TRACK_A",
+            },
+        }
+        # 최고점 15000 의 -10% = 13500. 그 아래로 떨어지면 추적익절.
+        submitted, _ = self._run_daily_with_portfolio(portfolio, current_price=13000)
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0].reason,
+                         "최고점 대비 하락선(-10%) 이탈 (추적 익절/손절)")
+
+    def test_auto_stock_applies_full_defense(self):
+        """자동발굴/AI매수 종목은 원금손절/펀더멘털훼손까지 3중 방어막 적용."""
+        portfolio = {
+            "000004": {
+                "name": "자동주식", "quantity": 10,
+                "avg_price": 10000, "mode_type": "NORMAL",
+                "reason": "AI 자동발굴 (기대주_발굴)",
+            },
+        }
+        submitted, _ = self._run_daily_with_portfolio(portfolio, current_price=8500)
+        self.assertEqual(len(submitted), 1)
+        self.assertIn("원금 방어선", submitted[0].reason)
+
+
 class TestTokenPolicy(unittest.TestCase):
     def setUp(self):
         self.token_path = tm._token_path()

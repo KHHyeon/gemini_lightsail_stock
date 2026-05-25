@@ -4,6 +4,7 @@ import uuid
 
 from src.memory import chronicle_common, drive_client
 from src.strategy import ai_logic as ai_strategy
+from src.utils import market_calendar
 from src.utils.macro_triggers import evaluate_chronicle_trigger
 from src.utils.timekit import now_kst
 
@@ -52,13 +53,25 @@ def _build_chronicle_prompt(macro, us_news, kr_news, trigger_reason):
 
 
 def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
-    """크로니클 작성. Drive 미준비 시 Pause 후 False 반환.
+    """T-Day 크로니클 작성 (KST 기준).
+
+    [거래일 가드 - v1.1, 2026-05-25]
+    어떤 진입점(`chronicle_routine` / `!크로니클` 슬랙 명령 / 백필 외 자동 트리거)
+    에서 호출되더라도 KST 기준 거래일이 아니면 즉시 거부한다. Market Chronicles
+    는 본 함수에서 T-Day(오늘) 의 한국 시장 흐름을 정리하는 목적이므로 주말/공휴일에는
+    절대 작성하지 않는다. 과거 임의 날짜 작성은 `backfill._write_chronicle_for_event`
+    가 별도로 담당.
 
     Args:
         macro: 매크로 지표 dict (`VIX`/`KOSPI_CHG`/`KOSDAQ_CHG` 키 사용).
         us_news / kr_news: 뉴스 스니펫.
         notify_fn: 슬랙 등 알림 콜백 (문자열 1개 인자).
     """
+    now = now_kst()
+    if not market_calendar.is_trading_day(now):
+        label = market_calendar.get_holiday_label(now) or "비거래일"
+        return False, f"T-Day 크로니클은 KST 거래일에만 작성합니다 (오늘: {label})"
+
     ok, reason = should_write_chronicle(macro)
     if not ok:
         return False, "크로니클 트리거 조건 미충족"
@@ -74,7 +87,7 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
         if not success:
             return False, msg
 
-    today = now_kst().strftime("%Y-%m-%d")
+    today = now.strftime("%Y-%m-%d")
     rel_path = chronicle_common.report_rel_path(today)
     if drive_client.file_exists_relative(rel_path):
         return False, f"오늘({today}) 크로니클이 이미 존재합니다."

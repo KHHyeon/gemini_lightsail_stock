@@ -11,6 +11,16 @@ S1. Triggered
   - 트리거 조건 충족(T-Day), 백필 큐 존재, 또는 오케스트레이터가 위임한 외부
     인제스트 결과 수신(예: Telegram Pipeline). Market Chronicles 는 외부 수집기를
     직접 호출하지 않는다.
+  - **거래일 가드 (v1.1, 2026-05-25)**: T-Day 트리거 평가 이전에
+    `market_calendar.is_trading_day(now_kst())` 를 먼저 확인. KST 주말/공휴일이면
+    S1 자체를 거부하고 `(False, "T-Day 크로니클은 KST 거래일에만 작성합니다 ...")` 로 즉시 종료.
+    백필(S1-B) 은 별도 경로(`backfill._write_chronicle_for_event`) 에서 처리하며 본 가드의 영향을 받지 않는다.
+
+S1-K. 시간대 기준
+
+  - 모든 날짜/시각 처리는 **KST (Asia/Seoul)** 고정.
+  - `write_chronicle_for_today` 의 `today` 문자열: `now_kst().strftime("%Y-%m-%d")`.
+  - `context_retriever._recency_bonus` 의 age 계산: `now_kst().date() - d` (서버 로컬·UTC 영향 차단).
 
 S2. Generated
 

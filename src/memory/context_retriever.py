@@ -27,6 +27,7 @@ from src.utils.macro_triggers import (
     _safe_float,
     resolve_regime,
 )
+from src.utils.timekit import now_kst
 
 MASTER_INDEX_REL = drive_client.MASTER_INDEX_REL
 STOPWORDS = {"및", "등", "의", "이", "가", "을", "를", "에", "에서", "으로", "the", "and", "of"}
@@ -112,7 +113,9 @@ def _recency_bonus(date_str):
         d = _date.fromisoformat(str(date_str)[:10])
     except Exception:
         return 0.0
-    age = (_date.today() - d).days
+    # v1.1 (2026-05-25): Market Chronicles 의 모든 기준 시간은 KST.
+    # 서버가 UTC 일 때 _date.today() 가 KST 와 9시간 차이로 age 가 어긋나는 버그 정정.
+    age = (now_kst().date() - d).days
     if age < 0:
         return 0.0
     if age <= 30:

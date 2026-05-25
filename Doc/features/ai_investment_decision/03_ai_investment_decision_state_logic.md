@@ -92,4 +92,35 @@
 - 의견 라벨: `src/utils/macro_triggers.py`
 - LLM 보정: `src/strategy/ai_logic.py` (`review_opinion_with_ai`, `get_multi_agent_investment_report`)
 - 슬랙 헬퍼: `src/utils/slack_interface.py` (`_build_single_stock_report`)
-- 테스트: `tests/temp_test_investment_decision.py`
+- 자동매도 (v1.3.1): `src/execution/orchestrator.py` (`daily_fundamental_stop_loss`)
+- 테스트: `tests/temp_test_investment_decision.py`,
+  `tests/temp_test_market_calendar_and_token.py::TestManualRegisteredStopLossPolicy`
+
+## 8. 자동매도 — 등록 출처에 따른 차등 (v1.3.1, 2026-05-25)
+
+`orchestrator.MarketOrchestrator.daily_fundamental_stop_loss` 의 매도 트리거 흐름
+(14:30 안전진단, `afternoon_routine` 가 호출).
+
+```
+for ticker, info in portfolio:
+    is_manual = "수동등록" in info["reason"]
+    high_water_mark = max(high_water_mark, current_price)
+
+    trailing_hit  = avg_price > 0 and HWM > avg_price and current_price <= HWM * 0.90
+    principal_hit = avg_price > 0 and current_price <= avg_price * 0.90
+
+    if trailing_hit:
+        reason = "최고점 대비 하락선(-10%) 이탈 (추적 익절/손절)"   # 자동/수동 공통
+    elif principal_hit and not is_manual:
+        reason = "원금 방어선(-10%) 이탈 (기계적 손절)"            # 자동만
+    elif not is_manual:
+        report = ai_strategy.check_fundamental_damage(...)
+        if "[펀더멘털훼손]" in report:
+            reason = "AI 팩트체크: 투자 이유 훼손"                  # 자동만
+```
+
+핵심 정책: **수동등록 종목은 사용자가 명시적으로 등록 의사를 표시했으므로
+시스템이 펀더멘털 악화나 단기 가격 하락만으로 임의 매도하지 않는다**. 단, 한 번
+이상 평균가 위로 올라가서 최고점이 형성된 뒤 -10% 이상 하락하면 **이미 발생한
+미실현 이익을 보존하기 위해** 추적 익절만 발동한다. AI `check_fundamental_damage`
+호출 자체를 스킵하여 토큰을 추가 절약한다.

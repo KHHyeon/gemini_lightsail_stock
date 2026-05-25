@@ -1,7 +1,12 @@
 # Market Chronicles (Feature Index)
 
+## 구현율
+- v1.1 (2026-05-25): KST 시간대 고정 + write_chronicle_for_today 거래일 가드 — 구현 완료
+- v1.0: master_index v2 + 의미 기반 검색 + 백필/마이그레이션
+
 ## 기능 요약
 Market Chronicles는 장세 이벤트를 기록/색인하고, 현재 시장과 유사한 과거 대응 지침을 AI 프롬프트에 주입하는 외장 메모리 기능이다.
+**모든 시각 기준은 한국 표준시(KST) 고정이며, T-Day 리포트는 KST 거래일에만 작성된다 (주말/공휴일 절대 차단).**
 
 ## 목표
 - 단어 매칭 오판 방지(의미 기반 매칭).

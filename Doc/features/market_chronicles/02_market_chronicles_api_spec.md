@@ -16,6 +16,20 @@ drive_client.write_master_index(index_dict) -> None
 
   - 목적: 인덱스 전체 덮어쓰기(마이그레이션/정리용).
 
+1-A) Chronicle Writer (v1.1)
+
+chronicle_writer.write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None) -> tuple[bool, str]
+
+  - 목적: KST 기준 오늘(T-Day) 한 건의 크로니클 리포트 작성.
+  - **거래일 가드 (v1.1, 2026-05-25)**: 진입 즉시 `now_kst()` 를 기준으로
+    `market_calendar.is_trading_day()` 를 확인. 거래일이 아니면 (주말/공휴일/임시휴장)
+    즉시 `(False, "T-Day 크로니클은 KST 거래일에만 작성합니다 (오늘: <라벨>)")` 반환.
+    이 가드는 호출자(`orchestrator.chronicle_routine` / `slack_interface.cmd_chronicle_manual`)
+    의 가드와 별개로 동작하는 이중 방어선이며, 어떤 자동/수동 진입점이든 거래일 외에는
+    절대 T-Day 리포트를 작성하지 않는다.
+  - 다음 단계: 거래일 통과 → 트리거 조건(`evaluate_chronicle_trigger`) → Drive 상태 → 본문 생성.
+  - 모든 날짜 문자열(`today`, `report_rel_path` 의 YYYY-MM-DD)은 `now_kst()` 로 산출.
+
 2) Chronicles 공통 헬퍼
 
 chronicle_common.parse_action_preview(ai_text) -> str

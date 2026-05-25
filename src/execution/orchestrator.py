@@ -265,6 +265,15 @@ class MarketOrchestrator:
             self.send_slack("[수동 등록 종목 매수 타점 알림]\n현재 아래 수동 종목들이 매수 타이밍(눌림목)에 진입했습니다. 최종 매수 여부를 직접 결정해 주십시오.\n" + "\n".join(messages))
 
     def daily_fundamental_stop_loss(self):
+        """14:30 안전진단 — 3중 방어막.
+
+        v1.1 (2026-05-25) 정책:
+        - **자동 발굴/AI매수 종목**: 3중 방어막 모두 적용
+          (1) 원금 -10% 기계적 손절, (2) 최고점 대비 -10% 추적 익절, (3) AI 펀더멘털 훼손 매도.
+        - **수동등록(`reason` 에 "수동등록" 포함) 종목**: 자동 매도는 **추적 익절(2)** 만 적용.
+          원금 손절·펀더멘탈 훼손 자동 매도는 사용자가 직접 등록한 의사를 존중하여 스킵한다.
+          (사용자가 매수 의사를 명시한 종목에 대해 시스템이 임의 매도를 결정하지 않는다.)
+        """
         if not market_hours.is_market_open(): return
         portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
         if not portfolio: return
@@ -285,6 +294,7 @@ class MarketOrchestrator:
             
             name, mode_type, avg_price = info.get("name", ticker), info.get("mode_type", "PAPER_ONLY"), info.get("avg_price", 0)
             high_water_mark = info.get("high_water_mark", avg_price)
+            is_manual = "수동등록" in info.get("reason", "")
             
             val = self.kis.get_valuation_data(ticker)
             if not val or int(val.get("current_price", 0)) <= 0: continue
@@ -296,12 +306,21 @@ class MarketOrchestrator:
                 portfolio_updated = True
                 
             trigger_reason, report_comment = None, ""
-            
-            if avg_price > 0 and current_price <= avg_price * 0.90:
-                trigger_reason = "원금 방어선(-10%) 이탈 (기계적 손절)"
-            elif avg_price > 0 and high_water_mark > avg_price and current_price <= high_water_mark * 0.90:
+
+            # 추적 익절은 수동/자동 종목 모두 공통 적용.
+            trailing_hit = (
+                avg_price > 0
+                and high_water_mark > avg_price
+                and current_price <= high_water_mark * 0.90
+            )
+            principal_hit = avg_price > 0 and current_price <= avg_price * 0.90
+
+            if trailing_hit:
                 trigger_reason = "최고점 대비 하락선(-10%) 이탈 (추적 익절/손절)"
-            else:
+            elif principal_hit and not is_manual:
+                trigger_reason = "원금 방어선(-10%) 이탈 (기계적 손절)"
+            elif not is_manual:
+                # 자동 발굴/AI매수 종목만 AI 펀더멘털 훼손 점검 진행.
                 chart_30d = chart_data.get_daily_ohlcv(self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"], token, ticker, count=30)
                 report = ai_strategy.check_fundamental_damage(ticker, name, chart_30d, macro, val, info.get("reason", ""))
                 if "[펀더멘털훼손]" in report:
