@@ -14,15 +14,23 @@ from src.utils.timekit import KST, now_kst
 
 _HOLIDAY_FILE = os.path.join(project_root(), "data", "krx_holidays.json")
 _holiday_date_set = None
+_holiday_file_warned = False
 
 
 def load_holiday_date_set(*, reload=False):
     """KRX 공휴일 date set (lazy load)."""
-    global _holiday_date_set
+    global _holiday_date_set, _holiday_file_warned
     if _holiday_date_set is not None and not reload:
         return _holiday_date_set
 
     holiday_set = set()
+    if not os.path.isfile(_HOLIDAY_FILE):
+        if not _holiday_file_warned:
+            print(
+                f"Log: [MarketCalendar] 휴장일 파일 없음: {_HOLIDAY_FILE} "
+                "(주말만 제외. KRX_HOLIDAYS_EXTRA 또는 data/krx_holidays.json 배포 필요)"
+            )
+            _holiday_file_warned = True
     payload = read_local_json(_HOLIDAY_FILE, default=None) or {}
     for raw in payload.get("holidays") or []:
         try:

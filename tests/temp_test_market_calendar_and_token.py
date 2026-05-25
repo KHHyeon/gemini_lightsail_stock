@@ -23,6 +23,9 @@ from src.utils import slack_interface as si
 
 
 class TestMarketCalendar(unittest.TestCase):
+    def setUp(self):
+        mc.load_holiday_date_set(reload=True)
+
     def test_weekend_not_trading_day(self):
         sat = datetime(2026, 5, 23, 10, 0, tzinfo=KST)
         self.assertFalse(mc.is_trading_day(sat))
