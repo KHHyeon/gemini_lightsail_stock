@@ -9,7 +9,7 @@ Aggressive Day-Trading: 백테스트 게이트, Slack 예산/진행 제어, HTS 
 ## 문서 인덱스
 - `./01_scalp_logic_requirements.md`
 - `./02_scalp_logic_api_spec.md`
-- `./03_scalp_logic_api_state_logic.md`
+- `./03_scalp_logic_state_logic.md`
 
 ## 연관
 - `./../market_calendar/`: 첫 거래일·장중 게이트

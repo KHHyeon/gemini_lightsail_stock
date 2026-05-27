@@ -3,20 +3,20 @@ alwaysApply: true
 ---
 1. [Strict MD Management] 문서 관리 및 워크플로우 (원자적 구조)
 
-    문서 구조: 본 프로젝트의 모든 사양 문서는 토큰 효율을 위해 원자적(Atomic) 구조로 분리되어 있다.
+    문서 구조: 본 프로젝트의 모든 사양 문서는 토큰 효율을 위해 원자적(Atomic) 구조로 분리되어 있다. 모든 features 하위 파일명은 외부 검색·grep 시 충돌을 방지하기 위해 **`[기능명]_` prefix 를 반드시 포함**한다.
         Doc/system_architecture.md : 전역 시스템 규칙·공통 사항 (시스템 설계 레벨)
-        Doc/features/[기능명]/README.md : 해당 기능의 핵심 요약 및 하위 파일 인덱스
-        Doc/features/[기능명]/01_requirements.md : 상세 요구사항 (기능/비기능/제약)
-        Doc/features/[기능명]/02_api_spec.md : 공개 API·시그니처·입출력 규약
-        Doc/features/[기능명]/03_state_logic.md : 상태 전이·데이터 스키마·비즈니스 로직
+        Doc/features/[기능명]/[기능명]_README.md : 해당 기능의 핵심 요약 및 하위 파일 인덱스
+        Doc/features/[기능명]/01_[기능명]_requirements.md : 상세 요구사항 (기능/비기능/제약)
+        Doc/features/[기능명]/02_[기능명]_api_spec.md : 공개 API·시그니처·입출력 규약
+        Doc/features/[기능명]/03_[기능명]_state_logic.md : 상태 전이·데이터 스키마·비즈니스 로직
         GEMINI.md : 레거시 통합 기록 (열람 전용, 수정·삭제 금지)
 
-    참조 우선순위: 모든 작업은 Doc/system_architecture.md 분석으로 시작하며, 작업 대상 기능이 식별되면 Doc/features/[기능명]/README.md 인덱스를 먼저 읽고, 필요한 하위 파일(01/02/03)만 선택적으로 로드한다. 불필요한 전체 로드는 금지한다.
-    선(先) 설계 후(後) 개발: 요구사항 변경 시 반드시 관련 Doc/features/[기능명]/0N_*.md 사양서를 먼저 업데이트하여 '설계 컨펌'을 받은 후 코드를 수정한다.
-    동기화 (Post-Update): 코드 작성이 완료되면 실제 구현된 세부 로직(변수명, 함수 시그니처, 상태 전이 등)을 확인하여 관련 0N_*.md 파일에 최종 반영하고 보고한다. API 변경은 02_api_spec.md, 상태/로직 변경은 03_state_logic.md, 요구사항/제약 변경은 01_requirements.md 에 매핑한다.
-    버전 관리: 기능이 업데이트·변경·분리될 때마다 버전별 구현율(%)을 README.md 또는 03_state_logic.md 상단에 재계산하여 표기한다. 업데이트 시 이전 내용을 생략하지 않고 전체 유지(append-only).
-    신규 기능 추가: 새 기능은 Doc/features/[기능명]/ 디렉터리를 만들고 README.md + 01_requirements.md + 02_api_spec.md + 03_state_logic.md 4개 파일을 함께 생성한다. 단일 파일에 모든 정보를 몰아넣는 것을 금지한다.
-    Git 커밋 메시지 정책: 커밋 메시지는 핵심만 담아 2~3줄 이내로 간결하게 작성한다. 상세 설명이 필요하면 본문 대신 "자세한 내역은 Doc/system_architecture.md, Doc/features/[기능명]/0N_*.md §N 참조" 한 줄로 대체한다.
+    참조 우선순위: 모든 작업은 Doc/system_architecture.md 분석으로 시작하며, 작업 대상 기능이 식별되면 Doc/features/[기능명]/[기능명]_README.md 인덱스를 먼저 읽고, 필요한 하위 파일(01/02/03)만 선택적으로 로드한다. 불필요한 전체 로드는 금지한다.
+    선(先) 설계 후(後) 개발: 요구사항 변경 시 반드시 관련 Doc/features/[기능명]/0N_[기능명]_*.md 사양서를 먼저 업데이트하여 '설계 컨펌'을 받은 후 코드를 수정한다.
+    동기화 (Post-Update): 코드 작성이 완료되면 실제 구현된 세부 로직(변수명, 함수 시그니처, 상태 전이 등)을 확인하여 관련 0N_[기능명]_*.md 파일에 최종 반영하고 보고한다. API 변경은 02_[기능명]_api_spec.md, 상태/로직 변경은 03_[기능명]_state_logic.md, 요구사항/제약 변경은 01_[기능명]_requirements.md 에 매핑한다.
+    버전 관리: 기능이 업데이트·변경·분리될 때마다 버전별 구현율(%)을 [기능명]_README.md 또는 03_[기능명]_state_logic.md 상단에 재계산하여 표기한다. 업데이트 시 이전 내용을 생략하지 않고 전체 유지(append-only).
+    신규 기능 추가: 새 기능은 Doc/features/[기능명]/ 디렉터리를 만들고 [기능명]_README.md + 01_[기능명]_requirements.md + 02_[기능명]_api_spec.md + 03_[기능명]_state_logic.md 4개 파일을 함께 생성한다. 단일 파일에 모든 정보를 몰아넣는 것을 금지한다. 파일명 prefix(`[기능명]_`) 누락은 룰 위반으로 즉시 정정 대상이다.
+    Git 커밋 메시지 정책: 커밋 메시지는 핵심만 담아 2~3줄 이내로 간결하게 작성한다. 상세 설명이 필요하면 본문 대신 "자세한 내역은 Doc/system_architecture.md, Doc/features/[기능명]/0N_[기능명]_*.md §N 참조" 한 줄로 대체한다.
 
 2. [Coding Standards] 함수 및 변수 정의 원칙
 
@@ -41,9 +41,9 @@ alwaysApply: true
 
     작업 유형별 최소 로드 셋:
         전역 규칙/표준 확인 → Doc/system_architecture.md 만 로드.
-        기능 개요 파악 → Doc/features/[기능명]/README.md 만 로드.
-        요구사항/제약 검토 → 01_requirements.md 추가 로드.
-        API 호출부 작성/수정 → 02_api_spec.md 추가 로드.
-        상태 전이·스키마·매칭 로직 수정 → 03_state_logic.md 추가 로드.
+        기능 개요 파악 → Doc/features/[기능명]/[기능명]_README.md 만 로드.
+        요구사항/제약 검토 → 01_[기능명]_requirements.md 추가 로드.
+        API 호출부 작성/수정 → 02_[기능명]_api_spec.md 추가 로드.
+        상태 전이·스키마·매칭 로직 수정 → 03_[기능명]_state_logic.md 추가 로드.
     전체 로드 금지: 단일 질문/단일 수정 작업에서 한 기능의 4개 파일을 모두 로드하지 않는다.
-    교차 참조: 한 파일에서 다른 파일의 §N 을 참조할 때는 상대 경로(예: ../README.md 또는 ./02_api_spec.md §3)로 명시한다.
+    교차 참조: 한 파일에서 다른 파일의 §N 을 참조할 때는 상대 경로(예: `../[기능명]/[기능명]_README.md` 또는 `./02_[기능명]_api_spec.md §3`)로 명시한다.

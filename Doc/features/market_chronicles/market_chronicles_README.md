@@ -14,9 +14,9 @@ Market Chronicles는 장세 이벤트를 기록/색인하고, 현재 시장과 �
 - 운영 중단 없는 백필/마이그레이션/재개 흐름 보장.
 
 ## 문서 인덱스
-- `01_requirements.md`: 기능 요구사항, 제약, 운영 규칙
-- `02_api_spec.md`: 공개 API/시그니처/입출력 규약
-- `03_state_logic.md`: 상태 전이, 스키마, 점수화/매칭 로직
+- `./01_market_chronicles_requirements.md`: 기능 요구사항, 제약, 운영 규칙
+- `./02_market_chronicles_api_spec.md`: 공개 API/시그니처/입출력 규약
+- `./03_market_chronicles_state_logic.md`: 상태 전이, 스키마, 점수화/매칭 로직
 
 ## 핵심 흐름
 1. 트리거 감지(VIX/지수 변동)  

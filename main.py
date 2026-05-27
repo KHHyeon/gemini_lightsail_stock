@@ -37,6 +37,7 @@ def _bootstrap_market_chronicles():
         from src.memory import drive_client
         from src.memory.oauth_token import check_oauth_token_status, ensure_oauth_token_valid
 
+        drive_client.register_oauth_notifier(orchestrator.send_slack)
         st = check_oauth_token_status()
         if st["exists"]:
             creds = ensure_oauth_token_valid(verbose=True)

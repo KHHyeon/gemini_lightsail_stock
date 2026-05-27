@@ -182,7 +182,7 @@ def evaluate_chronicle_trigger(vix, kospi_chg, kosdaq_chg):
 # 펀더멘털 점수 → 의견 라벨 (코드 결정, LLM 비참여)
 # =====================================================================
 #
-# Doc/features/ai_investment_decision/03_state_logic.md §1 참조.
+# Doc/features/ai_investment_decision/03_ai_investment_decision_state_logic.md §1 참조.
 # v1.3 (2026-05-25):
 #   - "분석보류" 라벨 신설. 데이터 부족/유동성 미달 종목을 0점/매수반대로 처리하지 않는다.
 #   - 임계값 재조정 (80/65/50/35) — 5축 GARP 채점 평균 분포 반영.

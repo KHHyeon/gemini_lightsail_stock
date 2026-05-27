@@ -27,6 +27,20 @@ def _use_drive_storage():
         return False
 
 
+def _maybe_handle_oauth_expiry(exc):
+    """fallback 경로에서도 OAuth invalid_grant 자동 Pause 트리거 (L2 안전망).
+
+    drive_client 진입점 (read/write_json_relative) 에서 이미 처리되지만,
+    구식 호출 경로나 향후 신규 호출자에 대비한 이중 안전망이다.
+    """
+    try:
+        from src.memory import drive_client
+
+        drive_client._handle_oauth_expiry_if_needed(exc)
+    except Exception:
+        pass
+
+
 def load_json_from_gdrive(filename):
     if _use_drive_storage():
         try:
@@ -37,6 +51,7 @@ def load_json_from_gdrive(filename):
                 return data
         except Exception as e:
             print(f"Log: [Drive Read Fallback] {filename}: {e}")
+            _maybe_handle_oauth_expiry(e)
     return _load_local(filename)
 
 
@@ -49,6 +64,7 @@ def save_json_to_gdrive(data, filename):
             return
         except Exception as e:
             print(f"Log: [Drive Write Fallback] {filename}: {e}")
+            _maybe_handle_oauth_expiry(e)
     _save_local(data, filename)
 
 

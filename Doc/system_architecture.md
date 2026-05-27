@@ -41,6 +41,7 @@ System Architecture (Atomic)
 - B-Type: 사용자 개입 필요 시 Pause + Slack 안내 + 완료로 재개. 단타 모드(Aggressive Day-Trading) 중 주문 실패, 15:10 강제 청산 실패 시 B-Type으로 처리하여 오버나이트 리스크를 방지한다.
 - C-Type: 치명적 오류 즉시 중단.
 - 스키마 불일치: DriveSchemaMismatchError를 B-Type으로 처리.
+- OAuth `invalid_grant` 자동 감지 (B-Type): 런타임 중 Google Drive refresh_token 만료/취소 발생 시 `drive_client._handle_oauth_expiry_if_needed` 가 자동으로 Pause + 슬랙 알림 + `_DRIVE_SERVICE` 캐시 무효화를 수행한다. 진입점은 `read_json_relative`/`write_json_relative` 와 `logger.{load,save}_json_from_gdrive` 의 fallback 핸들러 두 곳이다. 사용자가 `scripts/drive_oauth_setup.py --no-browser` 로 재발급 후 슬랙 `완료` 입력 시 재개. Testing 모드(7일 만료) 회피를 위해 OAuth 동의 화면 Production 승격을 권장한다.
 
 5. 인프라/운영 기준
 - 환경: AWS LightSail, Ubuntu 22.04, Python 3.10+

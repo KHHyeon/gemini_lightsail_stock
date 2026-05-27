@@ -127,3 +127,11 @@ E3. Drive 일시 장애
 
   - 부분 적용 금지(백업 후 단일 apply).
   - 실패 시 재실행 가능한 idempotent 흐름 유지.
+
+E4. OAuth 토큰 만료/취소 (invalid_grant, B-Type)
+
+  - 트리거: 런타임 Drive 호출 중 `invalid_grant` / `Token has been expired or revoked` 감지.
+  - 처리: `drive_client._handle_oauth_expiry_if_needed` 가 자동 Pause + 슬랙 알림 + `_DRIVE_SERVICE` 캐시 무효화.
+  - 진입점: `read_json_relative` / `write_json_relative` (L1), `logger.{load,save}_json_from_gdrive` 의 fallback (L2 안전망).
+  - 재개: `python scripts/drive_oauth_setup.py --no-browser` 로 재발급 후 슬랙 `완료` 입력 시 `try_resume_after_user_ack` 가 재검증.
+  - 사전 회피: Google Cloud Console 의 OAuth 동의 화면을 Production 으로 승격하여 7일 refresh_token 만료를 제거 권장.

@@ -21,6 +21,7 @@ MASTER_INDEX_REL = f"{CHRONICLES_ROOT}/index/master_index.json"
 _DRIVE_SERVICE = None
 _FOLDER_CACHE = None
 _AUTH_MODE = None  # oauth | delegation | shared_drive | sa_plain
+_OAUTH_NOTIFY_FN = None  # OAuth invalid_grant 자동 감지 시 슬랙 알림용 콜백 (main 기동 시 등록)
 
 
 class DrivePausedError(Exception):
@@ -314,6 +315,61 @@ def clear_pause():
         pass
 
 
+def register_oauth_notifier(notify_fn):
+    """OAuth invalid_grant 자동 감지 시 호출할 슬랙 알림 콜백 등록.
+
+    main 기동 1회 호출. 미등록(None) 이어도 Pause 진입과 캐시 무효화는 정상 동작.
+    """
+    global _OAUTH_NOTIFY_FN
+    if callable(notify_fn):
+        _OAUTH_NOTIFY_FN = notify_fn
+
+
+def _is_oauth_expiry_error(exc):
+    """예외 메시지가 OAuth refresh_token 만료/취소(invalid_grant) 여부 판정."""
+    msg = str(exc).lower()
+    return (
+        "invalid_grant" in msg
+        or "token has been expired or revoked" in msg
+    )
+
+
+def _handle_oauth_expiry_if_needed(exc):
+    """런타임 OAuth invalid_grant 자동 감지 → Pause + 캐시 무효화 + 슬랙 알림.
+
+    - drive_client 의 모든 외부 진입점(read/write_json_relative)과
+      logger 의 fallback 핸들러 두 곳에서 호출되는 공통 게이트키퍼.
+    - 이미 Pause 상태면 no-op (중복 알림 방지).
+    - `_DRIVE_SERVICE` 캐시를 무효화하여 재인증 후 다음 호출이 새 토큰으로 동작.
+
+    Returns:
+        bool: True 면 OAuth 만료 케이스로 처리됨, False 면 다른 예외.
+    """
+    if not _is_oauth_expiry_error(exc):
+        return False
+    if is_paused():
+        return True
+    global _DRIVE_SERVICE
+    _DRIVE_SERVICE = None
+    action = (
+        "서버에서 `python scripts/drive_oauth_setup.py --no-browser` 로 토큰 재발급 후 "
+        "슬랙에 '완료' 를 입력하세요."
+    )
+    try:
+        pause(f"Drive OAuth 토큰 만료/취소(invalid_grant): {exc}", action)
+    except Exception:
+        pass
+    if callable(_OAUTH_NOTIFY_FN):
+        try:
+            _OAUTH_NOTIFY_FN(
+                "[OAuth][B-Type] Drive 토큰 만료/revoke 감지 (invalid_grant). "
+                + action
+            )
+        except Exception:
+            pass
+    return True
+
+
 def try_resume_after_user_ack():
     """사용자 '완료' 응답 후 Drive 재검사."""
     if not is_drive_configured():
@@ -595,11 +651,23 @@ def write_text_relative(rel_path, text, mime_type="text/plain"):
 
 def read_json_relative(rel_path):
     _check_pause_guard()
-    return _read_json_direct(rel_path)
+    try:
+        return _read_json_direct(rel_path)
+    except Exception as e:
+        _handle_oauth_expiry_if_needed(e)
+        raise
 
 
 def write_json_relative(rel_path, data):
-    write_text_relative(rel_path, json.dumps(data, ensure_ascii=False, indent=2), mime_type="application/json")
+    try:
+        write_text_relative(
+            rel_path,
+            json.dumps(data, ensure_ascii=False, indent=2),
+            mime_type="application/json",
+        )
+    except Exception as e:
+        _handle_oauth_expiry_if_needed(e)
+        raise
 
 
 def read_app_json(filename):

@@ -24,9 +24,9 @@
 - 임계값을 `macro_triggers.py` 한 곳에서 튜닝 가능하도록 통합.
 
 ## 문서 인덱스
-- `01_requirements.md`: 기능 요구사항·제약·운영 규칙
-- `02_api_spec.md`: 공개 API/시그니처/입출력 규약
-- `03_state_logic.md`: 상태 전이·점수 산출·의견 라벨 결정 로직
+- `./01_ai_investment_decision_requirements.md`: 기능 요구사항·제약·운영 규칙
+- `./02_ai_investment_decision_api_spec.md`: 공개 API/시그니처/입출력 규약
+- `./03_ai_investment_decision_state_logic.md`: 상태 전이·점수 산출·의견 라벨 결정 로직
 
 ## 핵심 흐름
 1. 진입점 명령 수신 (`!ai매수`/`!수동등록`/`!발굴`)

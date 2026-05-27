@@ -504,7 +504,7 @@ class MarketOrchestrator:
 
     # =================================================================
     # 단타 모드 (scalp_logic) 진입점
-    # 상세: Doc/features/scalp_logic/03_scalp_logic_api_state_logic.md
+    # 상세: Doc/features/scalp_logic/03_scalp_logic_state_logic.md
     # =================================================================
     def scalp_pre_routine(self):
         """매주 첫 거래일 08:30 KST 트리거. S_PRE 상태 개시 + 슬랙 Block Kit 송신."""

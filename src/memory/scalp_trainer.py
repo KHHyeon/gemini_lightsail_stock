@@ -6,7 +6,7 @@
 사용된다. 본 모듈은 데이터 적재 인터페이스만 제공하며, 학습/모델 갱신 로직은
 포함하지 않는다(관심사 분리).
 
-스키마: Doc/features/scalp_logic/03_scalp_logic_api_state_logic.md §3 참조.
+스키마: Doc/features/scalp_logic/03_scalp_logic_state_logic.md §3 참조.
 """
 
 from __future__ import annotations

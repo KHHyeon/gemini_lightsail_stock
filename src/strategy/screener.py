@@ -315,7 +315,7 @@ def _is_financial_name(stock_name):
 # =====================================================================
 # 5축 GARP 펀더멘털 채점 (Greenblatt Magic Formula + Peter Lynch GARP +
 # Piotroski F-Score 의 핵심 인자 결합)
-# Doc/features/ai_investment_decision/03_state_logic.md §2 참조.
+# Doc/features/ai_investment_decision/03_ai_investment_decision_state_logic.md §2 참조.
 # =====================================================================
 
 # 유동성 보류 컷. 기존 10억 하드컷 → 1억으로 완화 + 미달 시 분석보류 라벨 처리.
