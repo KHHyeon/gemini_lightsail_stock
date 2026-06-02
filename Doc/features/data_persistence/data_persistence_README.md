@@ -2,7 +2,11 @@
 
 ## 구현율
 - v1.0 (Phase 1, 2026-06-02): 도메인 API(`state_store`) 추상화 레이어 신설. 백엔드는 Drive 그대로 위임 — **사양 정의 + 구현 100%**.
-- v1.1~v1.4 (Phase 2~5, 예정): SQLite 백엔드 구현, Market Chronicles DB 전환, 백업 cron, Drive/OAuth 인프라 제거.
+- v1.1 (Phase 2, 진행 중): A/B 도메인 SQLite 백엔드 + 마이그레이션 러너 + 1회성 이관 스크립트.
+  - Step 1 (문서 사양 확정): **100%** (본 PR).
+  - Step 2 (백엔드+러너 구현): 대기.
+  - Step 3 (이관 스크립트+검증): 대기.
+- v1.2~v1.4 (Phase 3~5, 예정): Market Chronicles DB 전환(C/D 도메인), 백업 cron, Drive/OAuth 인프라 제거.
 
 ## 기능 요약
 본 봇의 영속화 책임을 **단일 도메인 API (`src/storage/state_store.py`)** 로 일원화한다.
@@ -35,8 +39,12 @@ Market Chronicles 인덱스/본문(C/D 도메인) 은 Phase 3 에서 별도 진�
 - `../kis_token/`: 별개 도메인 (OAuth/KIS 토큰)
 
 ## Phase 로드맵 (참고)
-1. **Phase 1 (완료)**: `state_store` 도메인 API + Drive 위임 백엔드. 호출자 26곳 교체. **봇 동작 100% 동일**.
-2. **Phase 2 (예정)**: SQLite 백엔드 + `data/autostock.db` + 마이그레이션 러너 + Drive→SQLite 일괄 마이그레이션 스크립트.
+1. **Phase 1 (완료, commit `1652b24` + `dad168e`)**: `state_store` 도메인 API + Drive 위임 백엔드. 호출자 6 파일 교체 (32 호출 + 6 import). **봇 동작 100% 동일**.
+2. **Phase 2 (진행 중)**: SQLite 백엔드 + `data/sqlite/autostock.db` + 마이그레이션 러너 + 수동 이관 스크립트. A/B 도메인만.
+   - 환경변수 `STATE_STORE_BACKEND` (기본 `drive`, `sqlite` 명시 시 전환).
+   - 환경변수 `STATE_STORE_DB_PATH` (기본 `data/sqlite/autostock.db`).
+   - 이관 후 Drive 데이터는 그대로 보존 (Phase 5 에서 일괄 정리).
+   - `logger.record_trade` 의 self-call 은 Phase 2.5 에서 별도 처리.
 3. **Phase 3 (예정)**: Market Chronicles C/D 도메인을 SQLite + FTS5 + `chronicle_report_sections` 정규화로 전환.
 4. **Phase 4 (예정)**: 백업 cron (GitHub Private Repo 또는 S3) + Lightsail Snapshot 2차 안전망.
 5. **Phase 5 (예정)**: Drive/OAuth 인프라 통째로 제거 + 문서 정리.

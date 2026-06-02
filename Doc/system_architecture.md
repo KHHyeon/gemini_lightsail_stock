@@ -23,7 +23,7 @@ System Architecture (Atomic)
 - 인제스트 파이프라인:
   - Telegram Pipeline: src/pipeline/telegram_pipeline.py (외부 정보 수집 전용 채널)
 - 공통 유틸: src/utils/{timekit,market_calendar,paths,jsonio,macro_triggers}.py
-- 데이터 영속화: src/storage/state_store.py (도메인 API). 호출자는 백엔드(Drive/SQLite/PG) 를 알지 못한다. Doc/features/data_persistence/
+- 데이터 영속화: src/storage/state_store.py (도메인 API). 호출자는 백엔드(Drive/SQLite/PG) 를 알지 못한다. 백엔드 선택은 환경변수 `STATE_STORE_BACKEND`(기본 `drive`), 파일 경로는 `STATE_STORE_DB_PATH`(기본 `data/sqlite/autostock.db`). Doc/features/data_persistence/
 - 거래일/장중: src/utils/market_calendar.py (`is_trading_day`, `is_market_hours`). 기존 `is_market_open` = 장중.
 - KIS 토큰: src/core/token_manager.py (24h TTL, 거래일 08:00 scheduled, on-demand). Doc/features/kis_token/
 - 매수 결정 단일화: !ai매수/!수동등록/!발굴 은 동일한 점수 산출 로직을 사용한다.
@@ -42,12 +42,13 @@ System Architecture (Atomic)
 - B-Type: 사용자 개입 필요 시 Pause + Slack 안내 + 완료로 재개. 단타 모드(Aggressive Day-Trading) 중 주문 실패, 15:10 강제 청산 실패 시 B-Type으로 처리하여 오버나이트 리스크를 방지한다.
 - C-Type: 치명적 오류 즉시 중단.
 - 스키마 불일치: DriveSchemaMismatchError를 B-Type으로 처리.
+- SQLite IO 실패 (Phase 2 이후): sqlite3.OperationalError 류는 즉시 전파하여 B-Type 으로 처리. Drive 자동 폴백 금지(이중 쓰기 리스크 차단).
 - OAuth `invalid_grant` 자동 감지 (B-Type): 런타임 중 Google Drive refresh_token 만료/취소 발생 시 `drive_client._handle_oauth_expiry_if_needed` 가 자동으로 Pause + 슬랙 알림 + `_DRIVE_SERVICE` 캐시 무효화를 수행한다. 진입점은 `read_json_relative`/`write_json_relative` 와 `logger.{load,save}_json_from_gdrive` 의 fallback 핸들러 두 곳이다. 사용자가 `scripts/drive_oauth_setup.py --no-browser` 로 재발급 후 슬랙 `완료` 입력 시 재개. Testing 모드(7일 만료) 회피를 위해 OAuth 동의 화면 Production 승격을 권장한다.
 
 5. 인프라/운영 기준
 - 환경: AWS LightSail, Ubuntu 22.04, Python 3.10+
 - 실행: 상시 실행(systemd/nohup)
-- 설정: .env 기반(인증키/모드/Drive/Slack API 설정)
+- 설정: .env 기반(인증키/모드/Drive/Slack API 설정). 데이터 영속화 백엔드 전환은 `STATE_STORE_BACKEND=sqlite` 명시 (생략 시 Drive 유지).
 - 슬랙 게이트웨이: 모든 시스템 알림 송신 및 사용자 제어 명령(슬랙 앱 핸들러 및 인터랙티브 웹훅) 주입을 일원화하여 관리한다.
 
 6. 커밋/변경 기록 정책

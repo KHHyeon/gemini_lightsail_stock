@@ -40,9 +40,88 @@ class _StateStoreBackend(Protocol):
 - `read_json` -> `src.utils.logger.load_json_from_gdrive(filename)` 위임. None 시 default 반환.
 - `write_json` -> `src.utils.logger.save_json_to_gdrive(data, filename)` 위임.
 
-### Phase 2 에서 추가될 백엔드 (예고)
-- `_SQLiteBackend` — `data/autostock.db` 단일 파일. `_StateStoreBackend` 인터페이스 동일.
-- 환경변수 `STATE_STORE_BACKEND=sqlite|drive` 로 모듈 로드 시 1회 결정.
+### Phase 2 백엔드: `_SQLiteBackend`
+- 위치: `src/storage/sqlite_backend.py`.
+- 인터페이스: `_StateStoreBackend` 동일 (`read_json`/`write_json`).
+- 생성자: `_SQLiteBackend(db_path: str)`.
+- 책임:
+  1. DB 파일 디렉터리 자동 생성 (`os.makedirs(exist_ok=True)`).
+  2. `sqlite3.connect(db_path)` + PRAGMA(WAL/synchronous=NORMAL/foreign_keys=ON) 적용.
+  3. `migrations.runner.apply_pending(conn, notify_fn)` 호출하여 스키마 부트스트랩.
+  4. 파일명을 도메인으로 매핑하여 적절한 테이블에 SELECT/INSERT.
+- 파일명 → 테이블 매핑(`_FILENAME_TABLE_MAP`):
+  | 파일명 | 테이블 | shape |
+  |---|---|---|
+  | `paper_portfolio.json` | `portfolio` | dict: ticker → payload |
+  | `split_orders.json` | `split_orders` | dict: order_id → payload |
+  | `theme_context.json` | `theme_context` | dict: ticker → payload |
+  | `scalp_session.json` | `scalp_session` | dict (단일 row) |
+  | `paper_trades.json` | `trades` | list: payload[] |
+
+### Phase 2 환경변수 분기 (`state_store.py` 모듈 최상단 1회 결정)
+```python
+import os
+_BACKEND_NAME = os.getenv("STATE_STORE_BACKEND", "drive").strip().lower()
+_DB_PATH = os.getenv("STATE_STORE_DB_PATH", "data/sqlite/autostock.db")
+
+if _BACKEND_NAME == "sqlite":
+    from src.storage.sqlite_backend import _SQLiteBackend
+    _backend = _SQLiteBackend(db_path=_DB_PATH)
+else:
+    _backend = _DriveBackend()
+```
+
+- 기본값 `"drive"` → 환경변수 미설정 시 Phase 1 동작 100% 유지.
+- 알 수 없는 값(`"sqlite3"` 같은 오타) → `_DriveBackend` fallback. 모듈 로드 시 1회 stderr 경고 출력.
+
+### Phase 2 마이그레이션 러너 (`src/storage/migrations/runner.py`)
+```python
+def apply_pending(conn: sqlite3.Connection, notify_fn=None) -> list[int]:
+    """schema_version 에 기록되지 않은 v0NN_*.py 파일을 버전 오름차순으로 적용.
+
+    Args:
+        conn: sqlite3 connection.
+        notify_fn: 적용 발생 시 호출되는 callable(text). 일반적으로 slack 전송.
+
+    Returns:
+        실제로 적용된 버전 번호 list (예: [1] 또는 []).
+
+    예외:
+        - 파일 import 실패 시 RuntimeError 로 변환.
+        - up(conn) 실행 중 예외 → ROLLBACK + 예외 전파.
+    """
+```
+
+각 마이그레이션 파일(`v001_initial.py`):
+```python
+VERSION = 1
+DESCRIPTION = "A/B 도메인 5 테이블 + schema_version"
+
+def up(conn: sqlite3.Connection) -> None:
+    """스키마 생성 + 초기 schema_version row INSERT."""
+```
+
+### Phase 2 이관 스크립트 (`scripts/migrate_drive_to_sqlite.py`)
+```
+$ python scripts/migrate_drive_to_sqlite.py [--db-path PATH] [--dry-run] [--no-slack]
+```
+
+- `--db-path`: 기본 `data/sqlite/autostock.db`.
+- `--dry-run`: SELECT 만 수행. INSERT/스키마 변경 미실행. 카운트만 출력.
+- `--no-slack`: 슬랙 보고 생략 (로컬 검증용).
+
+흐름:
+1. Drive 5 도메인을 `logger.load_json_from_gdrive` 로 로드 (인증 실패 시 즉시 중단).
+2. SQLite connect + `apply_pending` 으로 스키마 보장.
+3. dry-run 이 아니면: 도메인별로 DELETE FROM + bulk INSERT.
+4. SELECT COUNT(*) 비교 → 표 형식 출력.
+5. 슬랙 보고: 도메인별 row 수 + 적용 버전 + 소요 시간.
+
+종료 코드:
+- 0: 정상 (또는 dry-run 정상).
+- 1: Drive 로드 실패.
+- 2: SQLite 마이그레이션 실패.
+- 3: 카운트 불일치 (Drive vs SQLite, 단 dry-run 은 비교 생략).
 
 ## 3. 파일명 매핑 (Phase 1 내부 상수)
 | 도메인 | 파일명 |

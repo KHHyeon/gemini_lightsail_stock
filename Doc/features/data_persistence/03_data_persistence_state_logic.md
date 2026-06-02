@@ -99,3 +99,147 @@ sqlite3 (stdlib)
 - 본 §4 매트릭스의 실제 변경 라인 수와 일치 여부 재확인.
 - `src/storage/state_store.py` 의 공개 시그니처가 §02 API Spec 과 일치 여부 재확인.
 - 변동 시 본 문서를 갱신한다.
+
+## 9. Phase 2 — SQLite 백엔드 동작 흐름
+### 9.1 모듈 의존 그래프 (sqlite 백엔드 선택 시)
+```
+호출자 (orchestrator / risk_monitor / slack_interface / backtester / ai_logic / scalp_session_store)
+       |
+       v
+src.storage.state_store  (모듈 로드 시 1회 분기)
+       |
+       v  (STATE_STORE_BACKEND=sqlite)
+src.storage.sqlite_backend._SQLiteBackend
+       |
+       v
+sqlite3 (stdlib) ← src.storage.migrations.runner.apply_pending(conn)
+       |
+       v
+data/sqlite/autostock.db
+```
+
+### 9.2 SQLite 스키마 v1 (A/B 도메인만)
+```sql
+-- 메타
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL,
+    description TEXT
+);
+
+-- A. 운영 상태
+CREATE TABLE IF NOT EXISTS portfolio (
+    ticker TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS split_orders (
+    order_id TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS theme_context (
+    ticker TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scalp_session (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- B. 거래 이력 (append-only 의미)
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uuid TEXT UNIQUE,
+    ts TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    extra_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
+CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
+```
+
+설계 의도:
+- Phase 1 dict 인터페이스를 100% 통과시키기 위해 `payload_json` 단일 컬럼.
+- 자주 검색되는 키(예: `mode_type`, `strategy_tag`) 는 Phase 3+ 에서 점진적 외부화. **2-phase migration** 패턴 사용.
+- `trades.trade_uuid` 는 UNIQUE 이나 기존 데이터에 없을 수 있어 NULL 허용. Phase 2.5 에서 강제화 검토.
+
+### 9.3 read_json 동작
+- `paper_portfolio.json` → `SELECT ticker, payload_json FROM portfolio` → `{ticker: json.loads(payload), ...}` 재구성.
+- `split_orders.json` → 동일 패턴 (key=order_id).
+- `theme_context.json` → 동일 패턴 (key=ticker).
+- `scalp_session.json` → `SELECT payload_json FROM scalp_session WHERE id=1` → dict 또는 default.
+- `paper_trades.json` → `SELECT payload_json FROM trades ORDER BY ts, id` → `[json.loads(p), ...]`.
+
+### 9.4 write_json 동작 (트랜잭션 1건)
+- A 도메인(dict): `DELETE FROM <table>` → bulk `INSERT INTO <table>` → COMMIT.
+- B 도메인(trades): `DELETE FROM trades` → bulk `INSERT INTO trades` → COMMIT.
+- 트랜잭션 실패 시 ROLLBACK 자동.
+
+### 9.5 마이그레이션 러너 흐름
+```
+1. SELECT MAX(version) FROM schema_version  (또는 0)
+2. src/storage/migrations/ 하위 v0NN_*.py 파일 수집, 버전 오름차순 정렬
+3. current < version 인 파일들을 순서대로:
+   a. BEGIN
+   b. mod.up(conn)
+   c. INSERT INTO schema_version VALUES (version, NOW, mod.DESCRIPTION)
+   d. COMMIT
+   e. notify_fn(f"[Storage] v{version} 마이그레이션 적용") 호출
+4. 반환: 적용된 version list
+```
+
+### 9.6 Drive→SQLite 이관 스크립트 동작
+```
+[Step 1/5] Drive 로드
+  - paper_portfolio.json (예: 7 entries)
+  - split_orders.json (예: 3 entries)
+  - theme_context.json (예: 0 entries)
+  - scalp_session.json (예: 1 entry)
+  - paper_trades.json (예: 142 entries)
+
+[Step 2/5] SQLite 스키마 부트스트랩
+  - data/sqlite/autostock.db 디렉터리/파일 생성
+  - apply_pending → [1] (v001_initial)
+
+[Step 3/5] dry-run? → INSERT 건너뜀
+
+[Step 4/5] INSERT
+  - portfolio: DELETE + 7 INSERT
+  - split_orders: DELETE + 3 INSERT
+  - theme_context: DELETE + 0 INSERT
+  - scalp_session: DELETE + 1 INSERT
+  - trades: DELETE + 142 INSERT
+
+[Step 5/5] 카운트 검증
+  - portfolio:        Drive=7   SQLite=7   OK
+  - split_orders:     Drive=3   SQLite=3   OK
+  - theme_context:    Drive=0   SQLite=0   OK
+  - scalp_session:    Drive=1   SQLite=1   OK
+  - trades:           Drive=142 SQLite=142 OK
+
+[결과] OK. 0.42s. 슬랙 보고 완료.
+```
+
+### 9.7 폴백/에러 정책 (Phase 2)
+- E1. **SQLite IO 실패** (`sqlite3.OperationalError` 등): 예외 전파. 상위 호출자가 try/except 하거나 `drive_client` Pause 라인과 동일 수준에서 B-Type 처리.
+- E2. **DB 파일 잠금 (locked)**: WAL 모드 + 재시도 없이 즉시 전파. 운영 중 동일 프로세스이므로 발생 확률 매우 낮음.
+- E3. **마이그레이션 실패**: ROLLBACK + 예외 전파. `schema_version` 미기록 → 다음 기동 시 재시도 가능. 단 dirty state 가능성 알림.
+- E4. **스키마 누락 row** (예: scalp_session 빈 테이블): `get_scalp_session()` → None 반환 (Phase 1 의미 보존).
+- E5. **`STATE_STORE_BACKEND` 알 수 없는 값**: stderr 경고 1회 + Drive fallback. 의도적 misconfiguration 방어.
+
+### 9.8 Phase 2 회귀 검증 체크리스트 (Step 2 PR 시 갱신 예정)
+- [ ] `STATE_STORE_BACKEND` 미설정 → 백엔드 = `_DriveBackend` 확인.
+- [ ] `STATE_STORE_BACKEND=sqlite` + 빈 DB → 자동 스키마 생성 + 정상 read/write.
+- [ ] dry-run 이관 → INSERT 미실행 + 카운트만 출력.
+- [ ] 실제 이관 → Drive 와 row count 일치.
+- [ ] 봇 기동(sqlite 모드) → orchestrator/risk_monitor/slack 모든 흐름 무오류.
+- [ ] `STATE_STORE_BACKEND` 를 drive 로 되돌려도 동일 동작.
+
+## 10. Post-Update 동기화 (Phase 2 적용 후, Step 2/3 진행 시 갱신)
+- `_SQLiteBackend` 의 실제 시그니처/PRAGMA 와 §02 API Spec 일치 여부.
+- 마이그레이션 러너의 실제 동작이 §9.5 와 일치 여부.
+- 이관 스크립트의 실제 출력 포맷이 §9.6 와 일치 여부.
