@@ -136,14 +136,14 @@ def register_theme_context(ticker, name, target_theme, score, score_details, val
 
     저장 실패(드라이브 연결 끊김 등)는 상위에서 처리한다.
     """
-    from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
+    from src.storage import state_store
 
     entry = build_theme_context_entry(
         ticker, name, target_theme, score, score_details, val
     )
-    theme_memory = load_json_from_gdrive("theme_context.json") or {}
+    theme_memory = state_store.get_theme_context()
     theme_memory[ticker] = entry
-    save_json_to_gdrive(theme_memory, "theme_context.json")
+    state_store.save_theme_context(theme_memory)
     return entry
 
 

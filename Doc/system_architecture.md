@@ -23,6 +23,7 @@ System Architecture (Atomic)
 - 인제스트 파이프라인:
   - Telegram Pipeline: src/pipeline/telegram_pipeline.py (외부 정보 수집 전용 채널)
 - 공통 유틸: src/utils/{timekit,market_calendar,paths,jsonio,macro_triggers}.py
+- 데이터 영속화: src/storage/state_store.py (도메인 API). 호출자는 백엔드(Drive/SQLite/PG) 를 알지 못한다. Doc/features/data_persistence/
 - 거래일/장중: src/utils/market_calendar.py (`is_trading_day`, `is_market_hours`). 기존 `is_market_open` = 장중.
 - KIS 토큰: src/core/token_manager.py (24h TTL, 거래일 08:00 scheduled, on-demand). Doc/features/kis_token/
 - 매수 결정 단일화: !ai매수/!수동등록/!발굴 은 동일한 점수 산출 로직을 사용한다.

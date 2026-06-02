@@ -6,7 +6,7 @@ from src.data.crawler import news_crawler, theme_crawler, stock_info_crawler, re
 from src.data import collector as macro_collector, chart as chart_data
 from src.strategy import ai_logic as ai_strategy, screener as quant_screener, finder as stock_finder
 from src.execution.order import OrderManager
-from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
+from src.storage import state_store
 
 pending_orders = {}
 
@@ -849,7 +849,7 @@ def register_slack_handlers(app, kis, config, orchestrator):
     def cmd_performance(message, say):
         say("[System] 전략 트랙별 성과 분석 리포트를 생성합니다...")
         def bg_task():
-            trades = load_json_from_gdrive("paper_trades.json") or []
+            trades = state_store.list_trades()
             if not trades: return say("[결과] 거래 기록이 없어 성과를 분석할 수 없습니다.")
             
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
@@ -979,8 +979,8 @@ def register_slack_handlers(app, kis, config, orchestrator):
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"])
             kis.set_token(token)
             cash_balance = kis.get_psbl_cash()
-            portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
-            split_orders = load_json_from_gdrive("split_orders.json") or {}
+            portfolio = state_store.get_portfolio()
+            split_orders = state_store.get_split_orders()
             msg = ["[ 현재 계좌 및 포트폴리오 현황 ]", f"KIS 실계좌 매수 가능 현금: {cash_balance:,}원\n"]
             if not portfolio: msg.append("텅~ (현재 장부에 감시 중인 보유 종목이 없습니다.)")
             else:
@@ -1124,7 +1124,7 @@ def register_slack_handlers(app, kis, config, orchestrator):
                 config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, ticker, count=30,
             )
             macro = macro_collector.get_macro_indicators()
-            portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+            portfolio = state_store.get_portfolio()
             news = news_crawler.get_latest_news(name, limit=5, search_type="stock")
 
             report, meta = ai_strategy.get_multi_agent_investment_report(
@@ -1223,7 +1223,7 @@ def register_slack_handlers(app, kis, config, orchestrator):
         reason = f"AI 승인 | {order.get('reason', '사유 누락')}"
         res = OrderManager(config["URL"], config["APP_KEY"], config["SECRET_KEY"], token, config["ACC_NO"]).simulate_split_buy(order["ticker"], order["stock_name"], order["total_budget"], order["current_price"], f"{reason} (1/10회차 대기)")
         if res["success"]:
-            split_orders = load_json_from_gdrive("split_orders.json") or {}
+            split_orders = state_store.get_split_orders()
             split_orders[str(uuid.uuid4())] = {
                 "ticker": order["ticker"], "name": order["stock_name"],
                 "daily_budget": res["daily_budget"], "remaining_days": 10,
@@ -1234,7 +1234,7 @@ def register_slack_handlers(app, kis, config, orchestrator):
                 "opinion_code": order.get("opinion_code"),
                 "opinion_delta": order.get("opinion_delta", 0),
             }
-            save_json_to_gdrive(split_orders, "split_orders.json")
+            state_store.save_split_orders(split_orders)
             respond(text=f"[Success] <@{body['user']['id']}> 님이 승인했습니다.\n{res['msg']}", replace_original=True)
         else: respond(text=f"[Fail] {res['msg']}", replace_original=True)
 
@@ -1528,7 +1528,7 @@ def register_slack_handlers(app, kis, config, orchestrator):
         def bg_task():
             token = token_manager.get_access_token(config["APP_KEY"], config["SECRET_KEY"]); kis.set_token(token)
             macro = macro_collector.get_macro_indicators()
-            portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+            portfolio = state_store.get_portfolio()
             if period == "일일":
                 us_kw, kr_kw = ai_strategy.infer_news_keywords().split(',')[:2]
                 report = ai_strategy.get_daily_market_report(
@@ -1557,5 +1557,5 @@ def register_slack_handlers(app, kis, config, orchestrator):
 
     @app.message(re.compile(r"^!초기화", re.IGNORECASE))
     def reset_data(message, say):
-        for f in ["paper_trades.json", "paper_portfolio.json", "split_orders.json", "theme_context.json"]: save_json_to_gdrive({} if "trades" not in f else [], f)
+        state_store.reset_app_data()
         say("[System] 데이터 초기화 완료.")

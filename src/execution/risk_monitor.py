@@ -12,7 +12,7 @@ import time
 from src.core import token_manager
 from src.execution.order import OrderManager, OrderRequest
 from src.utils import helpers as market_hours
-from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
+from src.storage import state_store
 from src.utils.timekit import now_kst
 
 
@@ -27,7 +27,7 @@ def run_risk_monitor(kis_client, config, send_slack):
     if not market_hours.is_market_open():
         return
 
-    portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+    portfolio = state_store.get_portfolio()
     if not portfolio:
         return
 
@@ -43,7 +43,7 @@ def run_risk_monitor(kis_client, config, send_slack):
     kis_client.set_token(token)
 
     order_mgr = OrderManager(base_url, app_key, secret_key, token, acc_no)
-    split_orders = load_json_from_gdrive("split_orders.json") or {}
+    split_orders = state_store.get_split_orders()
 
     keys_to_delete_list = []
     message_list = []
@@ -139,9 +139,9 @@ def run_risk_monitor(kis_client, config, send_slack):
             del portfolio[k]
 
     if keys_to_delete_list or portfolio_updated:
-        save_json_to_gdrive(portfolio, "paper_portfolio.json")
+        state_store.save_portfolio(portfolio)
     if split_orders_updated:
-        save_json_to_gdrive(split_orders, "split_orders.json")
+        state_store.save_split_orders(split_orders)
 
     if message_list and callable(send_slack):
         send_slack("[Risk Manager 실시간 방어막 가동]\n" + "\n\n".join(message_list))

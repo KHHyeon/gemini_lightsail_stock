@@ -5,9 +5,8 @@
 """
 from __future__ import annotations
 
-from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
+from src.storage import state_store
 
-SCALP_SESSION_FILENAME = "scalp_session.json"
 SESSION_SCHEMA_VERSION = 1
 
 _PERSIST_KEYS = (
@@ -36,18 +35,15 @@ def _export_session_dict(source_dict):
 
 
 def load_scalp_session():
-    """scalp_session.json 로드."""
-    data = load_json_from_gdrive(SCALP_SESSION_FILENAME)
-    if not isinstance(data, dict):
-        return None
-    return data
+    """단타 세션 페이로드 로드 (없으면 None)."""
+    return state_store.get_scalp_session()
 
 
 def save_scalp_session(session_dict):
-    """scalp_session.json 저장."""
+    """단타 세션 페이로드 저장."""
     if not isinstance(session_dict, dict):
         return False
-    save_json_to_gdrive(session_dict, SCALP_SESSION_FILENAME)
+    state_store.save_scalp_session(session_dict)
     return True
 
 
@@ -79,7 +75,7 @@ def reconcile_scalp_position_with_portfolio():
     if si.has_scalp_position():
         return {"reconciled": False, "reason": "session_has_position"}
 
-    portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+    portfolio = state_store.get_portfolio()
     scalp_entry = None
     for ticker, info in portfolio.items():
         if not isinstance(info, dict):

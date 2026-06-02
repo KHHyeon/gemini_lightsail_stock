@@ -8,7 +8,10 @@ from src.data.crawler import news_crawler, research_crawler, stock_info_crawler
 from src.strategy import ai_logic as ai_strategy, screener as quant_screener
 from src.execution.order import OrderManager, OrderRequest
 from src.utils import helpers as market_hours
-from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive
+from src.storage import state_store
+# tests/temp_test_*.py 가 ``orchestrator.load_json_from_gdrive`` 를 monkeypatch
+# 하므로 logger import 는 하위 호환 보호용으로 유지한다 (실 사용 0).
+from src.utils.logger import load_json_from_gdrive, save_json_to_gdrive  # noqa: F401
 
 class MarketOrchestrator:
     def __init__(self, kis, app, config):
@@ -168,7 +171,7 @@ class MarketOrchestrator:
                 
                 # 자동 매수 등록 (예: 100만원 예산, 10일 분할)
                 if "[매수추천]" in rating or "[매수]" in rating:
-                    split_orders = load_json_from_gdrive("split_orders.json") or {}
+                    split_orders = state_store.get_split_orders()
                     oid = f"auto_{s['ticker']}_{datetime.now().strftime('%m%d%H%M')}"
                     if not any(v['ticker'] == s['ticker'] for v in split_orders.values()):
                         split_orders[oid] = {
@@ -177,7 +180,7 @@ class MarketOrchestrator:
                             "mode_type": "NORMAL", "score": s.get("score", 0),
                             "strategy_tag": track_tag
                         }
-                        save_json_to_gdrive(split_orders, "split_orders.json")
+                        state_store.save_split_orders(split_orders)
                         msg.append(f"  ㄴ [자동등록] {track_tag} 전략으로 분할매수 시작.")
 
             self.send_slack("\n".join(msg))
@@ -198,7 +201,7 @@ class MarketOrchestrator:
             return
         if intro:
             self.send_slack(intro)
-        portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+        portfolio = state_store.get_portfolio()
         if not portfolio:
             return
         news_dict = {
@@ -242,7 +245,7 @@ class MarketOrchestrator:
 
     def alert_manual_stocks(self):
         if not market_hours.is_market_open(): return
-        portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+        portfolio = state_store.get_portfolio()
         if not portfolio: return
         
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
@@ -275,10 +278,10 @@ class MarketOrchestrator:
           (사용자가 매수 의사를 명시한 종목에 대해 시스템이 임의 매도를 결정하지 않는다.)
         """
         if not market_hours.is_market_open(): return
-        portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+        portfolio = state_store.get_portfolio()
         if not portfolio: return
         
-        split_orders = load_json_from_gdrive("split_orders.json") or {}
+        split_orders = state_store.get_split_orders()
         split_orders_updated = False
         
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
@@ -345,8 +348,8 @@ class MarketOrchestrator:
                 time.sleep(3)
         
         for k in keys_to_delete: del portfolio[k]
-        if keys_to_delete or portfolio_updated: save_json_to_gdrive(portfolio, "paper_portfolio.json")
-        if split_orders_updated: save_json_to_gdrive(split_orders, "split_orders.json")
+        if keys_to_delete or portfolio_updated: state_store.save_portfolio(portfolio)
+        if split_orders_updated: state_store.save_split_orders(split_orders)
         if messages: self.send_slack("[3중 철통 방어막 및 AI 팩트 진단 결과]\n" + "\n\n".join(messages))
 
     def execute_daily_split_buys(self, check_news=False):
@@ -370,7 +373,7 @@ class MarketOrchestrator:
             self.send_slack(f"[Macro Shutdown 발동]\n{shutdown_reason}\n오늘의 신규 분할 매수를 전면 중단(Skip)합니다.")
             return
 
-        split_orders = load_json_from_gdrive("split_orders.json") or {}
+        split_orders = state_store.get_split_orders()
         if not split_orders: return
         
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
@@ -423,7 +426,7 @@ class MarketOrchestrator:
                 messages.append(f"  └── [알림] {name} 10회 분할 매수 스케줄 최종 종료.")
                 
         for k in keys_to_delete: del split_orders[k]
-        if messages or keys_to_delete: save_json_to_gdrive(split_orders, "split_orders.json")
+        if messages or keys_to_delete: state_store.save_split_orders(split_orders)
         if messages: self.send_slack("[자동 분할 매수 데몬]\n" + "\n".join(messages))
 
     def scan_and_register_intraday_stocks(self, token):
@@ -443,7 +446,7 @@ class MarketOrchestrator:
             self.send_slack("- 조건(70점)을 통과한 당일 주도주가 없습니다.")
             return
 
-        split_orders = load_json_from_gdrive("split_orders.json") or {}
+        split_orders = state_store.get_split_orders()
         split_orders_updated = False
         messages = []
 
@@ -452,7 +455,7 @@ class MarketOrchestrator:
             
             # 이미 매수 진행 중이거나 보유 중인 종목 제외
             if ticker in split_orders: continue
-            portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+            portfolio = state_store.get_portfolio()
             if ticker in portfolio and portfolio[ticker].get("quantity", 0) > 0: continue
 
             # AI 정밀 검증
@@ -477,7 +480,7 @@ class MarketOrchestrator:
                 messages.append(f"- {name}({ticker}) [스코어: {s['score']}점] 자동 매수 편입 완료.\n  ㄴ 사유: {rating}")
         
         if split_orders_updated:
-            save_json_to_gdrive(split_orders, "split_orders.json")
+            state_store.save_split_orders(split_orders)
         
         if messages:
             self.send_slack("[정오 보초: 신규 주도주 발굴 결과]\n" + "\n".join(messages))
@@ -560,7 +563,7 @@ class MarketOrchestrator:
             return {"state": "SKIP", "reason": "scalp_not_running"}
         token = token_manager.get_access_token(self.config["APP_KEY"], self.config["SECRET_KEY"])
         self.kis.set_token(token)
-        portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+        portfolio = state_store.get_portfolio()
         scalp_positions = [
             (t, info) for t, info in portfolio.items()
             if info.get("mode_type") == "SCALP" and int(info.get("quantity", 0) or 0) > 0

@@ -8,7 +8,7 @@ load_dotenv()
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
-from src.utils.logger import load_json_from_gdrive
+from src.storage import state_store
 
 class ThemeBacktester:
     def __init__(self, tickers, start_date, end_date, initial_capital=10000000):
@@ -123,8 +123,8 @@ class ThemeBacktester:
         print(f"* 총 계좌 수익률: {total_return:+.2f}%")
 
 if __name__ == "__main__":
-    print("Log: [System] 구글 드라이브에서 현재 보유 종목을 불러옵니다...")
-    portfolio = load_json_from_gdrive("paper_portfolio.json") or {}
+    print("Log: [System] 현재 보유 종목을 불러옵니다...")
+    portfolio = state_store.get_portfolio()
     
     current_tickers = [ticker for ticker, info in portfolio.items() if info.get("quantity", 0) > 0]
     
