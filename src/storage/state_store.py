@@ -151,3 +151,54 @@ def reset_app_data() -> None:
     for _name, filename, kind in _RESET_DOMAIN_LIST:
         empty_value = [] if kind is list else {}
         _backend.write_json(filename, empty_value)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Chronicle (C/D + backfill state) re-export
+#
+# chronicle_repo 의 공개 API 16개를 본 모듈에서 그대로 노출한다.
+# 호출자(``chronicle_writer`` / ``backfill`` / ``context_retriever``) 는
+# ``from src.storage import state_store`` 만 import 하고 ``state_store.chronicle_*``
+# 를 사용한다. chronicle_repo 를 직접 import 하지 않는다 (Repository 패턴).
+#
+# 백엔드 분기는 chronicle_repo 모듈 로드 시 1회 결정 (state_store 와 동일 규약).
+# 상세: Doc/features/data_persistence/02_data_persistence_api_spec.md §7
+# ---------------------------------------------------------------------------
+from src.storage.chronicle_repo import (  # noqa: E402  (모듈 본문 마지막 re-export 의도)
+    chronicle_index_list,
+    chronicle_index_append,
+    chronicle_index_replace_all,
+    chronicle_index_count,
+    chronicle_find_entry_by_date,
+    chronicle_delete_entry,
+    chronicle_get_report,
+    chronicle_save_report,
+    chronicle_report_exists,
+    chronicle_report_exists_by_date,
+    chronicle_list_sections,
+    chronicle_find_sections_by_key,
+    chronicle_list_md_files,
+    chronicle_search_fulltext,
+    chronicle_fts_available,
+    chronicle_get_backfill_state,
+    chronicle_save_backfill_state,
+)
+
+
+__all__ = [
+    # A/B 도메인 (Phase 1/2)
+    "get_portfolio", "save_portfolio",
+    "get_split_orders", "save_split_orders",
+    "get_theme_context", "save_theme_context",
+    "get_scalp_session", "save_scalp_session",
+    "list_trades", "replace_trades",
+    "reset_app_data",
+    # C/D 도메인 (Phase 3, chronicle_repo re-export)
+    "chronicle_index_list", "chronicle_index_append", "chronicle_index_replace_all",
+    "chronicle_index_count", "chronicle_find_entry_by_date", "chronicle_delete_entry",
+    "chronicle_get_report", "chronicle_save_report",
+    "chronicle_report_exists", "chronicle_report_exists_by_date",
+    "chronicle_list_sections", "chronicle_find_sections_by_key", "chronicle_list_md_files",
+    "chronicle_search_fulltext", "chronicle_fts_available",
+    "chronicle_get_backfill_state", "chronicle_save_backfill_state",
+]

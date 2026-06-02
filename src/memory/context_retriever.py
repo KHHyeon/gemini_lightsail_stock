@@ -19,6 +19,7 @@ import re
 from datetime import date as _date
 
 from src.memory import drive_client
+from src.storage import state_store
 from src.utils.macro_triggers import (
     REGIME_ENUM_SET,
     REGIME_NEIGHBOR_MAP,
@@ -29,7 +30,7 @@ from src.utils.macro_triggers import (
 )
 from src.utils.timekit import now_kst
 
-MASTER_INDEX_REL = drive_client.MASTER_INDEX_REL
+MASTER_INDEX_REL = drive_client.MASTER_INDEX_REL  # noqa: F811 (테스트/외부 모듈 호환 보존)
 STOPWORDS = {"및", "등", "의", "이", "가", "을", "를", "에", "에서", "으로", "the", "and", "of"}
 
 # v3.4 가중치 (DETAIL CHRONICLES §4.3.2)
@@ -340,10 +341,11 @@ def search_similar_guidelines(
     Returns:
         list[dict]: 점수 상위 항목들. 각 항목은 검색 결과 표시용 평탄 dict.
     """
-    if not drive_client.is_ready():
-        return []
+    # Drive 모드일 때만 ready 가드 (SQLite 모드는 항상 준비됨).
+    # state_store.chronicle_index_list() 가 백엔드별로 알아서 처리하지만,
+    # Drive 모드에서 인증 미설정 시 빈 list 를 반환하므로 그대로 진행해도 안전하다.
     try:
-        index = drive_client.read_master_index()
+        entry_list = state_store.chronicle_index_list()
     except Exception:
         return []
 
@@ -357,7 +359,7 @@ def search_similar_guidelines(
         }
 
     ranked = []
-    for entry in index.get("entries") or []:
+    for entry in entry_list:
         if not isinstance(entry, dict):
             continue
         sc = _score_entry(entry, query_dict)

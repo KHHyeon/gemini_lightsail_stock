@@ -17,6 +17,7 @@ import uuid
 from datetime import timedelta
 
 from src.memory import chronicle_common, drive_client
+from src.storage import state_store
 from src.strategy import ai_logic as ai_strategy
 from src.utils.macro_triggers import (
     _safe_float,
@@ -24,6 +25,7 @@ from src.utils.macro_triggers import (
 )
 from src.utils.timekit import KST, kst_iso_now, today_kst
 
+# Drive 시절의 경로 상수는 호환을 위해 유지 (외부 도구/마이그레이션 스크립트에서 import 가능).
 MASTER_INDEX_REL = drive_client.MASTER_INDEX_REL
 BACKFILL_STATE_REL = f"{drive_client.CHRONICLES_ROOT}/_system/backfill_state.json"
 
@@ -36,6 +38,18 @@ VIX_TICKER = "^VIX"
 
 def _today_kst_date():
     return today_kst()
+
+
+def _is_sqlite_backend() -> bool:
+    """현재 chronicle_repo 가 SQLite 모드인지 판정.
+
+    diagnose / purge_leftover / reset / reindex 의 의미가 백엔드에 따라 일부
+    달라지므로 분기에 사용한다. 본 함수는 환경변수만 보고 판단하며
+    chronicle_repo 모듈 import 사이클을 피하기 위해 직접 os.getenv 한다.
+    """
+    import os as _os
+
+    return _os.getenv("STATE_STORE_BACKEND", "drive").strip().lower() == "sqlite"
 
 
 def _fetch_index_history(lookback_days):
@@ -153,14 +167,14 @@ def format_scan_report(events, lookback_days):
 
 def _load_state():
     try:
-        return drive_client.read_json_relative(BACKFILL_STATE_REL) or {}
+        return state_store.chronicle_get_backfill_state() or {}
     except Exception:
         return {}
 
 
 def _save_state(state):
     state["updated_at"] = kst_iso_now()
-    drive_client.write_json_relative(BACKFILL_STATE_REL, state)
+    state_store.chronicle_save_backfill_state(state)
 
 
 def save_scan_state(events, lookback_days):
@@ -235,10 +249,10 @@ def _collect_news_for(event):
 
 
 def _write_chronicle_for_event(event):
-    """1개 이벤트 데이를 처리하여 Drive 저장 + master_index 색인. 성공 시 summary 반환."""
+    """1개 이벤트 데이를 처리하여 본문 저장 + master_index 색인. 성공 시 summary 반환."""
     date_str = event["date"]
     rel_path = chronicle_common.report_rel_path(date_str)
-    if drive_client.file_exists_relative(rel_path):
+    if state_store.chronicle_report_exists_by_date(date_str):
         return False, "이미 동일 일자의 크로니클이 존재합니다 (스킵)"
 
     us_news, kr_news = _collect_news_for(event)
@@ -253,7 +267,6 @@ def _write_chronicle_for_event(event):
         f"작성일: {kst_iso_now()} (사후 소급)\n\n"
     )
     full_md = header + report_body
-    drive_client.write_text_relative(rel_path, full_md, mime_type="text/markdown")
 
     action_preview = chronicle_common.parse_action_preview(report_body)
     phrases_list = chronicle_common.build_keyphrases(
@@ -272,19 +285,21 @@ def _write_chronicle_for_event(event):
         phrases_list, market_state_dict
     )
 
-    drive_client.append_index_entry(
-        {
-            "id": str(uuid.uuid4())[:8],
-            "date": date_str,
-            "trigger": event["trigger"],
-            "market_state": market_state_dict,
-            "context_tags_list": context_tags_list,
-            "action_preview": action_preview,
-            "phrases_list": phrases_list,
-            "embedding_vector": None,
-            "report_rel_path": rel_path,
-            "source": "backfill",
-        }
+    entry_dict = {
+        "id": str(uuid.uuid4())[:8],
+        "date": date_str,
+        "trigger": event["trigger"],
+        "market_state": market_state_dict,
+        "context_tags_list": context_tags_list,
+        "action_preview": action_preview,
+        "phrases_list": phrases_list,
+        "embedding_vector": None,
+        "report_rel_path": rel_path,
+        "source": "backfill",
+    }
+
+    state_store.chronicle_index_append(
+        entry_dict, header_md=header, body_md=report_body, full_md=full_md,
     )
     return True, action_preview
 
@@ -404,6 +419,11 @@ REPORTS_ROOT_REL = f"{drive_client.CHRONICLES_ROOT}/reports"
 
 
 def _list_folder_items(rel_folder):
+    """[Drive 모드 전용] Drive 폴더 직접 조회 헬퍼.
+
+    SQLite 모드에서는 본 헬퍼 대신 ``state_store.chronicle_list_md_files()``
+    를 사용한다. 본 함수는 Drive 한정 운영에서만 호출된다 (호환 보존).
+    """
     try:
         return drive_client.list_files_under(rel_folder)
     except Exception as exc:
@@ -412,7 +432,11 @@ def _list_folder_items(rel_folder):
 
 
 def _collect_md_files_recursive(rel_folder):
-    """rel_folder 하위의 모든 .md 파일을 재귀 수집 (Drive folder mimeType 기반)."""
+    """[Drive 모드 전용] rel_folder 하위의 모든 .md 파일을 재귀 수집.
+
+    SQLite 모드에서는 ``state_store.chronicle_list_md_files()`` 가
+    chronicle_reports 테이블의 통일 포맷을 반환한다 (호환 인터페이스).
+    """
     results = []
     for item in _list_folder_items(rel_folder):
         name = item.get("name", "")
@@ -435,7 +459,7 @@ TDAY_HEADER_MARKER = "Market Chronicle "
 
 
 def _classify_md(rel_path):
-    """rel_path 의 헤더를 읽어 종류를 분류한다.
+    """[Drive 모드 전용] rel_path 의 헤더를 읽어 종류를 분류한다.
 
     Returns:
         ("backfill" | "tday" | "unknown" | "unreadable", head_top_str)
@@ -474,46 +498,60 @@ def diagnose_reports(notify_fn=None):
     """
     _emit = chronicle_common.make_emitter(notify_fn)
 
-    if not drive_client.is_drive_enabled():
-        _emit("[Backfill Diagnose] Drive 가 비활성 상태입니다.")
-        return {}
-    if not drive_client.is_ready():
-        ok, msg = drive_client.init_drive_or_pause(notify_fn)
-        if not ok:
-            _emit(f"[Backfill Diagnose] Drive 초기화 실패: {msg}")
+    backend_is_sqlite = _is_sqlite_backend()
+    if not backend_is_sqlite:
+        # Drive 모드에서만 ready 가드 적용. SQLite 모드는 항상 준비됨.
+        if not drive_client.is_drive_enabled():
+            _emit("[Backfill Diagnose] Drive 가 비활성 상태입니다.")
             return {}
+        if not drive_client.is_ready():
+            ok, msg = drive_client.init_drive_or_pause(notify_fn)
+            if not ok:
+                _emit(f"[Backfill Diagnose] Drive 초기화 실패: {msg}")
+                return {}
 
     try:
-        index = drive_client.read_master_index()
+        entries = state_store.chronicle_index_list()
     except Exception:
-        index = {"version": drive_client.MASTER_INDEX_EXPECTED_VERSION, "entries": []}
-    entries = [e for e in index.get("entries", []) if isinstance(e, dict)]
+        entries = []
     registered_paths = {e.get("report_rel_path") for e in entries if e.get("report_rel_path")}
     index_backfill = sum(1 for e in entries if e.get("source") == "backfill")
     index_tday = sum(1 for e in entries if e.get("source") != "backfill")
 
-    md_files = _collect_md_files_recursive(REPORTS_ROOT_REL)
-    md_indexed = 0
-    md_unindexed = 0
-    md_backfill_marker = 0
-    md_tday_marker = 0
-    leftover_targets = 0
-    for f in md_files:
-        rel = f["rel_path"]
-        if rel in registered_paths:
-            md_indexed += 1
-        else:
-            md_unindexed += 1
-        kind, _ = _classify_md(rel)
-        if kind == "backfill":
-            md_backfill_marker += 1
-            if rel not in registered_paths:
-                leftover_targets += 1
-        elif kind == "tday":
-            md_tday_marker += 1
+    if backend_is_sqlite:
+        # SQLite 모드: FK CASCADE 로 인덱스 미등록 .md 가 존재할 수 없다.
+        # chronicle_reports 와 chronicle_entries 가 1:1 이므로 leftover 항상 0.
+        md_list = state_store.chronicle_list_md_files()
+        md_total = len(md_list)
+        md_indexed = md_total  # 1:1
+        md_unindexed = 0
+        md_backfill_marker = index_backfill
+        md_tday_marker = index_tday
+        leftover_targets = 0
+    else:
+        md_files = _collect_md_files_recursive(REPORTS_ROOT_REL)
+        md_total = len(md_files)
+        md_indexed = 0
+        md_unindexed = 0
+        md_backfill_marker = 0
+        md_tday_marker = 0
+        leftover_targets = 0
+        for f in md_files:
+            rel = f["rel_path"]
+            if rel in registered_paths:
+                md_indexed += 1
+            else:
+                md_unindexed += 1
+            kind, _ = _classify_md(rel)
+            if kind == "backfill":
+                md_backfill_marker += 1
+                if rel not in registered_paths:
+                    leftover_targets += 1
+            elif kind == "tday":
+                md_tday_marker += 1
 
     _emit("[Backfill Diagnose] === reports 트리 vs master_index 정합 보고 ===")
-    _emit(f"  reports/*.md 총 {len(md_files)}건 (재귀 스캔)")
+    _emit(f"  reports/*.md 총 {md_total}건 (재귀 스캔)")
     _emit(f"    - 인덱스 등록: {md_indexed}건 / 인덱스 미등록: {md_unindexed}건")
     _emit(f"    - 백필 헤더 표식: {md_backfill_marker}건 / T-Day 헤더 표식: {md_tday_marker}건")
     _emit(f"  master_index 엔트리 총 {len(entries)}건 (백필 {index_backfill} / T-Day {index_tday})")
@@ -524,7 +562,7 @@ def diagnose_reports(notify_fn=None):
     )
 
     return {
-        "md_total": len(md_files),
+        "md_total": md_total,
         "md_indexed": md_indexed,
         "md_unindexed": md_unindexed,
         "md_backfill_marker": md_backfill_marker,
@@ -553,6 +591,16 @@ def purge_leftover_backfill_reports(notify_fn=None, dry_run=False):
     """
     _emit = chronicle_common.make_emitter(notify_fn)
 
+    if _is_sqlite_backend():
+        # SQLite 모드는 FK CASCADE 로 leftover 발생이 구조적으로 불가능.
+        md_list = state_store.chronicle_list_md_files()
+        _emit(
+            f"[Backfill Leftover] SQLite 모드: chronicle_reports 와 chronicle_entries 가 "
+            f"1:1 FK 관계이므로 leftover 가 존재할 수 없습니다 (.md={len(md_list)}건). "
+            f"정리할 항목 없음."
+        )
+        return {"scanned": len(md_list), "leftover_targets": 0, "deleted": 0}
+
     if not drive_client.is_drive_enabled():
         _emit("[Backfill Leftover] Drive 가 비활성 상태입니다.")
         return {"scanned": 0, "leftover_targets": 0, "deleted": 0}
@@ -563,12 +611,12 @@ def purge_leftover_backfill_reports(notify_fn=None, dry_run=False):
             return {"scanned": 0, "leftover_targets": 0, "deleted": 0}
 
     try:
-        index = drive_client.read_master_index()
+        entries = state_store.chronicle_index_list()
     except Exception:
-        index = {"version": drive_client.MASTER_INDEX_EXPECTED_VERSION, "entries": []}
+        entries = []
     registered_paths = {
         (e or {}).get("report_rel_path")
-        for e in index.get("entries", [])
+        for e in entries
         if isinstance(e, dict) and e.get("report_rel_path")
     }
 
@@ -632,33 +680,44 @@ def reset_backfill(delete_reports=False, notify_fn=None):
     """
     _emit = chronicle_common.make_emitter(notify_fn)
 
-    if not drive_client.is_drive_enabled():
-        _emit("[Backfill Reset] Drive 가 비활성 상태입니다.")
-        return {"removed_entries": 0, "deleted_reports": 0}
-
-    if not drive_client.is_ready():
-        ok, msg = drive_client.init_drive_or_pause(notify_fn)
-        if not ok:
-            _emit(f"[Backfill Reset] Drive 초기화 실패: {msg}")
+    backend_is_sqlite = _is_sqlite_backend()
+    if not backend_is_sqlite:
+        if not drive_client.is_drive_enabled():
+            _emit("[Backfill Reset] Drive 가 비활성 상태입니다.")
             return {"removed_entries": 0, "deleted_reports": 0}
+        if not drive_client.is_ready():
+            ok, msg = drive_client.init_drive_or_pause(notify_fn)
+            if not ok:
+                _emit(f"[Backfill Reset] Drive 초기화 실패: {msg}")
+                return {"removed_entries": 0, "deleted_reports": 0}
 
-    index = drive_client.read_master_index()
-    entries = index.get("entries", []) or []
+    try:
+        entries = state_store.chronicle_index_list()
+    except Exception:
+        entries = []
     backfill_entries = [e for e in entries if (e.get("source") == "backfill")]
     kept_entries = [e for e in entries if (e.get("source") != "backfill")]
 
     deleted_reports = 0
-    if delete_reports:
+    if backend_is_sqlite:
+        # SQLite 모드: chronicle_delete_entry(entry_id) 로 FK CASCADE 동작 (본문/섹션/FTS 동기 삭제).
         for e in backfill_entries:
-            rel = e.get("report_rel_path")
-            if rel and drive_client.delete_file_relative(rel):
-                deleted_reports += 1
+            entry_id = e.get("id")
+            if not entry_id:
+                continue
+            if state_store.chronicle_delete_entry(entry_id, delete_report=delete_reports):
+                if delete_reports:
+                    deleted_reports += 1
+    else:
+        # Drive 모드: .md 별도 삭제 후 master_index 전체 교체.
+        if delete_reports:
+            for e in backfill_entries:
+                rel = e.get("report_rel_path")
+                if rel and drive_client.delete_file_relative(rel):
+                    deleted_reports += 1
+        state_store.chronicle_index_replace_all(kept_entries)
 
-    index["entries"] = kept_entries
-    drive_client.write_master_index(index)
-
-    drive_client.write_json_relative(
-        BACKFILL_STATE_REL,
+    state_store.chronicle_save_backfill_state(
         {
             "lookback_days": 0,
             "scanned_at": None,
@@ -667,7 +726,7 @@ def reset_backfill(delete_reports=False, notify_fn=None):
             "processed": [],
             "skipped": [],
             "reset_at": kst_iso_now(),
-        },
+        }
     )
 
     _emit(
@@ -696,17 +755,21 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
 
     _emit = chronicle_common.make_emitter(notify_fn)
 
-    if not drive_client.is_drive_enabled():
-        _emit("[Backfill Reindex] Drive 가 비활성 상태입니다.")
-        return {"updated": 0, "skipped": 0, "failed": 0}
-    if not drive_client.is_ready():
-        ok, msg = drive_client.init_drive_or_pause(notify_fn)
-        if not ok:
-            _emit(f"[Backfill Reindex] Drive 초기화 실패: {msg}")
+    backend_is_sqlite = _is_sqlite_backend()
+    if not backend_is_sqlite:
+        if not drive_client.is_drive_enabled():
+            _emit("[Backfill Reindex] Drive 가 비활성 상태입니다.")
             return {"updated": 0, "skipped": 0, "failed": 0}
+        if not drive_client.is_ready():
+            ok, msg = drive_client.init_drive_or_pause(notify_fn)
+            if not ok:
+                _emit(f"[Backfill Reindex] Drive 초기화 실패: {msg}")
+                return {"updated": 0, "skipped": 0, "failed": 0}
 
-    index = drive_client.read_master_index()
-    entries = index.get("entries", []) or []
+    try:
+        entries = state_store.chronicle_index_list()
+    except Exception:
+        entries = []
 
     targets = []
     for idx, entry in enumerate(entries):
@@ -730,6 +793,7 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
     for n, (idx, entry) in enumerate(targets, 1):
         date_str = entry.get("date", "?")
         rel = entry.get("report_rel_path")
+        entry_id = entry.get("id")
         _emit(f"[Backfill Reindex] ({n}/{len(targets)}) {date_str} 처리 중...")
 
         if not rel:
@@ -737,8 +801,13 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
             _emit(f"[Backfill Reindex] {date_str} 스킵: report_rel_path 없음")
             continue
 
+        body = ""
         try:
-            body = drive_client.read_text_relative(rel) or ""
+            if backend_is_sqlite and entry_id:
+                report = state_store.chronicle_get_report(entry_id)
+                body = (report or {}).get("body_md") or (report or {}).get("full_md") or ""
+            else:
+                body = drive_client.read_text_relative(rel) or ""
         except Exception as exc:
             failed += 1
             _emit(f"[Backfill Reindex] {date_str} 본문 읽기 실패: {exc}")
@@ -782,7 +851,7 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
             action_preview = chronicle_common.parse_action_preview(body)
 
         new_entry = {
-            "id": entry.get("id"),
+            "id": entry_id,
             "date": date_str,
             "trigger": entry.get("trigger", ""),
             "market_state": market_state_dict,
@@ -798,8 +867,8 @@ def reindex_keyphrases(notify_fn=None, delay_sec=DEFAULT_DELAY_SECONDS, only_bac
             new_entry["migrated_at"] = entry["migrated_at"]
 
         entries[idx] = new_entry
-        index["entries"] = entries
-        drive_client.write_master_index(index)
+        # 각 entry 단위 즉시 갱신 (Drive/SQLite 양쪽 모두 idempotent 보장).
+        state_store.chronicle_index_replace_all(entries)
 
         updated += 1
         _emit(f"[Backfill Reindex] {date_str} 갱신 완료 (구문 {len(phrases_list)}개)")

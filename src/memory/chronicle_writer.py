@@ -3,6 +3,7 @@
 import uuid
 
 from src.memory import chronicle_common, drive_client
+from src.storage import state_store
 from src.strategy import ai_logic as ai_strategy
 from src.utils import market_calendar
 from src.utils.macro_triggers import evaluate_chronicle_trigger
@@ -89,7 +90,7 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
 
     today = now.strftime("%Y-%m-%d")
     rel_path = chronicle_common.report_rel_path(today)
-    if drive_client.file_exists_relative(rel_path):
+    if state_store.chronicle_report_exists_by_date(today):
         return False, f"오늘({today}) 크로니클이 이미 존재합니다."
 
     prompt = _build_chronicle_prompt(macro, us_news, kr_news, reason)
@@ -99,13 +100,6 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
 
     header = f"# Market Chronicle {today}\n\n트리거: {reason}\n\n"
     full_md = header + report_body
-
-    try:
-        drive_client.write_text_relative(rel_path, full_md, mime_type="text/markdown")
-    except drive_client.DrivePausedError as e:
-        if notify_fn:
-            notify_fn(f"[Chronicles Pause] {e.reason}\n조치: {e.action_required}")
-        return False, str(e)
 
     action_preview = chronicle_common.parse_action_preview(report_body)
     phrases_list = chronicle_common.build_keyphrases(
@@ -127,20 +121,27 @@ def write_chronicle_for_today(macro, us_news, kr_news, notify_fn=None):
         phrases_list, market_state_dict
     )
 
-    drive_client.append_index_entry(
-        {
-            "id": str(uuid.uuid4())[:8],
-            "date": today,
-            "trigger": reason,
-            "market_state": market_state_dict,
-            "context_tags_list": context_tags_list,
-            "action_preview": action_preview,
-            "phrases_list": phrases_list,
-            "embedding_vector": None,
-            "report_rel_path": rel_path,
-            "source": "chronicle",
-        }
-    )
+    entry_dict = {
+        "id": str(uuid.uuid4())[:8],
+        "date": today,
+        "trigger": reason,
+        "market_state": market_state_dict,
+        "context_tags_list": context_tags_list,
+        "action_preview": action_preview,
+        "phrases_list": phrases_list,
+        "embedding_vector": None,
+        "report_rel_path": rel_path,
+        "source": "chronicle",
+    }
+
+    try:
+        state_store.chronicle_index_append(
+            entry_dict, header_md=header, body_md=report_body, full_md=full_md,
+        )
+    except drive_client.DrivePausedError as e:
+        if notify_fn:
+            notify_fn(f"[Chronicles Pause] {e.reason}\n조치: {e.action_required}")
+        return False, str(e)
 
     if notify_fn:
         notify_fn(

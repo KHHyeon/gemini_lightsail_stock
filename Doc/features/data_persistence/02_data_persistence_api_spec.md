@@ -171,7 +171,7 @@ state_store.save_portfolio(portfolio)
 |---|---|---|---|
 | 전체 조회 | `chronicle_index_list() -> list[dict]` | v2 entries 리스트 (호환 dict 형식) | 빈 인덱스면 `[]` |
 | 추가 | `chronicle_index_append(entry_dict: dict, *, full_md: str, header_md: str, body_md: str) -> None` | — | 엔트리 + 본문 + 섹션 + FTS 를 1 트랜잭션으로 atomic 저장. 호출부 단순화 |
-| 일괄 교체 | `chronicle_index_replace_all(entries: list[dict]) -> None` | — | `backfill.reset` / 마이그레이션 후 잔여 정리 용도 |
+| 일괄 교체 | `chronicle_index_replace_all(entries: list[dict]) -> None` | — | UPSERT 패턴: 사라진 entry 만 FK CASCADE 삭제, 나머지는 인덱스 row 만 갱신(본문/섹션/FTS 보존). 본문까지 정리하려면 `chronicle_delete_entry` 명시 사용 |
 | 카운트 | `chronicle_index_count(*, source: Optional[str] = None) -> int` | int | `source='backfill'` 등 필터 |
 | 일자 조회 | `chronicle_find_entry_by_date(chronicle_date: str) -> Optional[dict]` | dict 또는 None | 중복 작성 가드 |
 | 삭제 | `chronicle_delete_entry(entry_id: str, *, delete_report: bool = True) -> bool` | True/False | FK CASCADE 로 reports/sections/search 동기 삭제 |

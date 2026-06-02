@@ -419,7 +419,7 @@ VALUES (2, CURRENT_TIMESTAMP, 'Phase 3: chronicle C/D + FTS5 + sections + backfi
 ### 11.4 chronicle_repo 의 read/write 동작
 - `chronicle_index_list()` → `SELECT * FROM chronicle_entries ORDER BY chronicle_date DESC` → v2 dict 복원 (json.loads context_tags_json/phrases_json).
 - `chronicle_index_append(entry_dict, full_md=..., header_md=..., body_md=...)` → BEGIN → INSERT chronicle_entries → INSERT chronicle_reports → 파싱한 섹션 N INSERT (chronicle_report_sections + chronicle_search) → COMMIT.
-- `chronicle_index_replace_all(entries_list)` → BEGIN → DELETE chronicle_entries (CASCADE) → bulk INSERT → COMMIT. **본문은 보존되지 않으므로 호출부 주의** (현재 backfill.reset 은 entries 만 갱신).
+- `chronicle_index_replace_all(entries_list)` → BEGIN → 새 set 에서 사라진 entry_id 만 명시 DELETE (FK CASCADE) → 나머지는 INSERT OR REPLACE 로 인덱스 row 만 UPSERT → COMMIT. **본문/섹션/FTS 는 보존된다** (reindex 안전). 본문까지 정리하려면 호출부가 `chronicle_delete_entry(entry_id, delete_report=True)` 를 명시.
 - `chronicle_search_fulltext(query, limit=10)` → `SELECT entry_id, chronicle_date, section_key, snippet(chronicle_search, 3, '<<', '>>', '...', 16) FROM chronicle_search WHERE body_md MATCH ? LIMIT ?`.
 - `chronicle_get_backfill_state() / chronicle_save_backfill_state(state_dict)` → 단일 row payload_json read/write (Phase 2 의 scalp_session 패턴과 동일).
 
@@ -435,25 +435,31 @@ def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
     ...
 ```
 
-`section_key` 매핑 룰 (대소문자/공백/괄호 무시):
+`section_key` 매핑 룰 (대소문자/공백/괄호/구두점 무시 — `_normalize_heading_key` 정규화):
 | 헤딩 패턴 (정규화) | section_key |
 |---|---|
-| "intradayflow" 또는 "장중흐름" 포함 | intraday_flow |
-| "사건과원인" 포함 | event_and_cause |
-| "미래행동지침" 또는 "행동지침" 포함 | action_guideline |
-| "한줄요약" 포함 | one_line_summary |
+| "intradayflow" / "장중흐름" 포함 | intraday_flow |
+| "eventandcause" / "사건과원인" 포함 | event_and_cause |
+| "actionguideline" / "미래행동지침" / "행동지침" / "최종행동" 포함 | action_guideline |
+| "onelinesummary" / "한줄요약" 포함 | one_line_summary |
 | 그 외 | unknown |
 
-### 11.6 호출자 마이그레이션 매트릭스 (Phase 3 PR 적용 범위)
-| 파일 | 변경 호출 수 | 비고 |
+**구현 실측 (2026-06-02)**: 한국어 본문 4 섹션 모두 100% 정확 매핑 확인. 영문 헤딩(`Intraday Flow / Action Guideline / ...`)도 호환 매칭 (옵션). 매핑 실패 시 `section_key=unknown` 으로 본문 보존 (P3E1).
+
+### 11.6 호출자 마이그레이션 매트릭스 (Phase 3 PR 적용 범위, 실측 갱신)
+| 파일 | 변경 호출/효과 | 비고 |
 |---|---|---|
-| `src/memory/chronicle_writer.py` | 3 (file_exists / write_text / append_index) → `report_exists_by_date / chronicle_index_append (atomic)` | 트랜잭션 격상 |
-| `src/memory/backfill.py` | 16 (read/write_json_relative / file_exists / write_text / read_text / read_master_index / write_master_index / append_index_entry / list_files_under / delete_file_relative / delete_file_by_id) | 가장 큰 변경 |
-| `src/memory/context_retriever.py` | 1 (read_master_index → chronicle_index_list) | 점수화 로직 무변경 |
+| `src/memory/chronicle_writer.py` | `file_exists_relative + write_text_relative + append_index_entry` (3 호출) → `chronicle_report_exists_by_date + chronicle_index_append(full_md=...)` (2 호출) | **트랜잭션 격상**: SQLite 모드에서 인덱스/본문/섹션/FTS 단일 트랜잭션 |
+| `src/memory/backfill.py` | `_load_state / _save_state / _write_chronicle_for_event / diagnose_reports / purge_leftover_backfill_reports / reset_backfill / reindex_keyphrases` 등 7 함수의 chronicle 호출 12 곳을 `state_store.chronicle_*` 로 전환 + SQLite 모드 분기 신설 (`_is_sqlite_backend()` 헬퍼) | Drive 모드 동작 100% 보존, SQLite 모드는 FK CASCADE 활용 |
+| `src/memory/context_retriever.py` | `drive_client.is_ready() + read_master_index()` → `state_store.chronicle_index_list()` (1 호출) | 점수화 로직 무변경 |
+| `src/storage/state_store.py` | C/D 도메인 16개 함수 re-export 추가 | `__all__` 명시 |
+| `src/storage/chronicle_repo.py` (신설) | Drive/SQLite 양 백엔드 + 16 공개 API | Repository 패턴 |
+| `src/storage/chronicle_sqlite_backend.py` (신설) | `_SQLiteChronicleBackend` (5 테이블 + FTS5) + `parse_full_md` 헬퍼 | UPSERT 패턴 (PK 충돌 시 FK CASCADE 미트리거) |
+| `src/storage/migrations/v002_chronicle.py` (신설) | 4 테이블 + 6 인덱스 + (선택) FTS5 가상 테이블 | FTS5 가용성 자동 감지 |
 | `src/memory/lifecycle.py` | 0 (Phase 3 비대상, Phase 5 에서 통째 정리) | — |
 | `scripts/migrate_master_index_v2.py` | 0 (Drive 모드 호환을 위해 유지) | — |
 
-총 20 호출 + 3 import = 23 라인 변경 (Phase 1 의 38 라인보다 적음).
+**실측 합계**: 신설 3 파일 + 수정 4 파일 + Drive 모드 분기 헬퍼 5 곳에 `[Drive 모드 전용]` docstring 추가.
 
 ### 11.7 폴백/에러 정책 (Phase 3, §9.7 보강)
 - E1. **.md 헤딩 매칭 실패** → 본문은 손실 없이 `section_key=unknown` 으로 1 섹션 보존. (P3E1)
@@ -462,12 +468,21 @@ def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
 - E4. **FK CASCADE 사고**: `chronicle_delete_entry(entry_id, delete_report=False)` 옵션 제공. 호출부 옵션 명시.
 - E5. **SQLite IO 실패**: Phase 2 §9.7 와 동일 정책. 예외 전파 → 상위에서 B-Type Pause.
 
-### 11.8 Phase 3 검증 체크리스트
-- [ ] `python -m py_compile src/storage/chronicle_repo.py src/storage/migrations/v002_chronicle.py` OK
-- [ ] `python -c "from src.storage import state_store; state_store.chronicle_index_list()"` 심볼 노출
-- [ ] 호출자 3 파일 lint 0건 (`chronicle_writer / backfill / context_retriever`)
-- [ ] `tests/smoke_chronicle_repo.py` (Phase 3 신설): Drive/SQLite 양 모드 라운드트립 + FTS5 검색 + 섹션 정합
-- [ ] grep 로 `from src.memory import drive_client` 호출 중 `read_master_index / append_index_entry / write_master_index / read_text_relative / write_text_relative / file_exists_relative / list_files_under / delete_file_relative / read_json_relative / write_json_relative` 는 `chronicle_repo` 호출로 치환됐는지 확인 (lifecycle.py + migrate_master_index_v2.py 제외)
+### 11.8 Phase 3 검증 체크리스트 (Step 2 실측 결과)
+- [x] **py_compile**: `v002_chronicle / chronicle_sqlite_backend / chronicle_repo / state_store / chronicle_writer / context_retriever / backfill` 7 파일 PASS
+- [x] **ReadLints**: 7 파일 모두 0건
+- [x] **심볼 노출**: `state_store` 의 chronicle_* 16개 + A/B 도메인 11개 = **20 심볼 모두 callable** (state_store `__all__` 검증)
+- [x] **Drive 모드 import**: `STATE_STORE_BACKEND` 미설정 시 `_DriveBackend / _DriveChronicleBackend` 로드 OK, FTS 가용성=False
+- [x] **SQLite 모드 라운드트립** (Windows 로컬, 임시 DB):
+    - append 1건 → `chronicle_index_count()=1` / `report_exists=True`
+    - 섹션 분류 4/4 정확 (intraday_flow / event_and_cause / action_guideline / one_line_summary)
+    - `chronicle_search_fulltext('panic')` → 1 hit (영문 토크나이저 정상)
+    - `chronicle_index_replace_all(entries)` → **본문 보존 240자 (UPSERT 패턴)**, 섹션 4→4 유지
+    - `chronicle_index_replace_all([])` → FK CASCADE 동작, report 동기 삭제
+    - `chronicle_delete_entry(id, delete_report=True)` → True 반환, count=0, report 미존재
+- [x] **잔존 호출 검증** (`drive_client.read_master_index / append_index_entry / write_master_index / read/write_text_relative / file_exists / list_files / delete_file_*`): `chronicle_repo._DriveChronicleBackend` 내부 + `backfill.py` 의 Drive 모드 분기 + `lifecycle.py` (Phase 5 비대상) + `migrate_master_index_v2.py` (Drive 호환 유지) 외 0건
+- [ ] **smoke 통합 테스트** (`tests/smoke_chronicle_repo.py`): Step 3 (마이그레이션 스크립트) 와 함께 신설 — Step 2 단독에서는 본 §11.8 의 라운드트립 인라인 테스트로 대체
+- [ ] **실 서버 동작**: Step 3 마이그레이션 스크립트 실행 후 `chronicle_entries / chronicle_reports / chronicle_report_sections / chronicle_search` row 수 일치 확인 (서버 별 agent)
 
 ### 11.9 마이그레이션 스크립트 동작 (Step 3 신설)
 ```
@@ -502,11 +517,18 @@ def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
 - chronicle_repo 도 동일하게 import 시점에 `STATE_STORE_BACKEND` 를 읽는다.
 - `main.py` 의 `load_dotenv()` 가 **모든 `from src.*` 보다 먼저** 호출되어야 한다 (Phase 2 PR 에서 이미 정정됨, 추가 변경 불필요).
 
-## 12. Phase 3 Post-Update 동기화 (Step 2/3 적용 후 갱신)
-- 본 §11.6 매트릭스의 실제 변경 라인 수 확인.
-- `src/storage/chronicle_repo.py` 의 공개 시그니처가 §02 API Spec §7.1 과 일치하는지 확인.
-- `tests/smoke_chronicle_repo.py` 결과 (Drive/SQLite 라운드트립) 를 §11.8 에 PASS 로 기록.
-- 실 서버에서 `scripts/migrate_chronicles_to_sqlite.py` 실행 후 entries / .md / sections / FTS row 카운트 기록.
+## 12. Phase 3 Post-Update 동기화
+
+### 12.1 Step 2 (코드 구현) 완료 후 갱신 — 2026-06-02 작성
+- ✅ **§11.6 매트릭스**: 실제 변경 파일/호출 수로 갱신. 신설 3 + 수정 4 + Drive 모드 헬퍼 5.
+- ✅ **§02 API Spec 정합**: `chronicle_repo.py` 의 공개 16개 함수 시그니처 == §02 §7.1 정의. `chronicle_index_replace_all` 의미 보강 (UPSERT 패턴, 본문 보존).
+- ✅ **§11.5 section_key 매핑**: 한국어 + 영문 키워드 모두 지원하도록 구현/문서 동기화.
+- ✅ **§11.8 체크리스트**: Step 2 단독 PASS 항목 6개 기록. Step 3 와 함께 검증할 잔여 2개 명시.
+- ✅ **버그 수정 기록**: `INSERT OR REPLACE` → `INSERT ON CONFLICT DO UPDATE` 전환으로 PK 충돌 시 FK CASCADE 자식 row 손실 방지. `_INSERT_ENTRY_UPSERT_SQL` 상수화.
+- ⏳ **Step 3 대상**: `scripts/migrate_chronicles_to_sqlite.py` 신설 + 실 서버 entries/.md/sections/FTS row 수 일치 확인 + `tests/smoke_chronicle_repo.py` 통합 테스트.
+
+### 12.2 Step 3 (마이그레이션 스크립트) 완료 후 갱신 — 작업 시 추가 예정
+- (Step 3 PR 머지 후 본 섹션 갱신)
 
 ## 11. M6 운영 안정성 운반대 (Runbook, Phase 2 Step 5)
 ### 11.1 목적/대상/주기
@@ -643,6 +665,28 @@ Drive 측 데이터는 이관 후에도 그대로 보존되므로 (`Phase 5` 정
 #### 11.8.3 Windows 환경 smoke 결과 (검증 자체는 Lightsail 에서 수행)
 - Windows 에서 `--json --day 1` 실행 시: `C01~C04` 정확히 `FAIL`, `C05~C08/C15/C20` 정확히 `WARN`, `C16` 만 `PASS`, exit code `2`. **점검 함수의 예외 안전성과 종합 판정 로직이 사양 §11.4 와 정확히 일치함을 확인.**
 - 운영 Lightsail Ubuntu 에서 실행 시: systemd/journalctl/DB 가 모두 존재하므로 점검 도구가 의도된 결과를 자동 산출한다.
+
+#### 11.8.3.1 Lightsail 실서버 Day 1 실측 (2026-06-02, append-only)
+| 회차 | 시각 (UTC) | overall | PASS | WARN | FAIL | C05 status | 비고 |
+|---|---|---|---|---|---|---|---|
+| 1 | 07:33:16 | WARN | 8 | 3 | 0 | WARN | `state_store.py` 부팅 print 미배포 (commit `74934a3` 직전) |
+| 2 | 07:39:51 | WARN | 8 | 3 | 0 | WARN | `git pull` 후 `s-restart` 수행. 그러나 `Already up to date.` — `74934a3` 가 아직 origin 미반영 |
+| 3 | 07:59:16 | WARN | **9** | 2 | 0 | **PASS** | `74934a3` push + 운영 서버 재배포 후. C05 매칭 라인: `python[103947]: [STATE_STORE] backend=sqlite db_path=data/sqlite/autostock.db` (부팅 후 16초) |
+
+회차 3 의 잔여 WARN 2건:
+- **C08 (오케스트레이터 사이클)**: 16:59 KST = 장 마감(15:30) +1h29m 시점이라 1시간 윈도우에서 사이클 0건. 사양 의도대로 `"장 외 시간일 수 있음"` 안내 부착. 다음 거래일 장중 점검 시 PASS 예상.
+- **C20 (OAuth/Pause)**: regex 매칭 4건 (회차 1/2 는 3건). 재시작 과정의 토큰 재로드 라인이 1건 추가된 것으로 추정. 자동 단정 불가 → WARN 유지 (사양 §11.3 의도 그대로).
+
+실시간 쓰기 누적 증거 (보조 통계):
+| 시각 (UTC) | WAL bytes | `scalp_session.max_updated_at` | 점검 시각 대비 갱신 |
+|---|---|---|---|
+| 07:33:16 | 8,272 | 07:33:09 | 7초 전 |
+| 07:39:51 | 12,392 | 07:39:43 | 8초 전 |
+| 07:59:16 | 16,512 | 07:59:07 | 9초 전 |
+
+→ 매 점검 직전 `scalp_session` 이 갱신되고 WAL 이 점증하므로, **봇이 SQLite 에 실시간 쓰기 중**임이 확정. portfolio/theme_context 의 `updated_at` 이 06:57:27 정체인 것은 장 마감 후 거래 없음의 정상 신호.
+
+판정: **Day 1 = PASS** (회귀 신호 0건. 잔여 WARN 2건은 모두 환경/시점 의존).
 
 #### 11.8.4 향후 보강 후보 (Step 5 진행 중 발견 시 추가)
 - C17/C18/C19 의 Drive 메타데이터 조회 API 가 `drive_client` 에 명시 노출되지 않은 경우, `_drive_modified_time` 의 메서드 검색 목록(`get_file_metadata`/`get_app_file_metadata`/`stat_app_file`/`describe_app_file`)에 실제 함수명을 추가해야 한다.
