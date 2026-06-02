@@ -231,15 +231,34 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 - E4. **스키마 누락 row** (예: scalp_session 빈 테이블): `get_scalp_session()` → None 반환 (Phase 1 의미 보존).
 - E5. **`STATE_STORE_BACKEND` 알 수 없는 값**: stderr 경고 1회 + Drive fallback. 의도적 misconfiguration 방어.
 
-### 9.8 Phase 2 회귀 검증 체크리스트 (Step 2 PR 시 갱신 예정)
-- [ ] `STATE_STORE_BACKEND` 미설정 → 백엔드 = `_DriveBackend` 확인.
-- [ ] `STATE_STORE_BACKEND=sqlite` + 빈 DB → 자동 스키마 생성 + 정상 read/write.
-- [ ] dry-run 이관 → INSERT 미실행 + 카운트만 출력.
-- [ ] 실제 이관 → Drive 와 row count 일치.
-- [ ] 봇 기동(sqlite 모드) → orchestrator/risk_monitor/slack 모든 흐름 무오류.
-- [ ] `STATE_STORE_BACKEND` 를 drive 로 되돌려도 동일 동작.
+### 9.8 Phase 2 Step 2 회귀 검증 결과 (`tests/smoke_state_store_sqlite.py`)
+- [x] `STATE_STORE_BACKEND` 미설정 → 백엔드 = `_DriveBackend` 확인. (smoke step 1/4 PASS)
+- [x] 알 수 없는 백엔드 값(`postgres`) → stderr 경고 + `_DriveBackend` 폴백. (smoke step 2/4 PASS)
+- [x] `STATE_STORE_BACKEND=sqlite` + 빈 DB → 자동 스키마 생성 + 5 도메인 read/write 라운드트립 + scalp_session UPSERT + `reset_app_data`. (smoke step 3/4 PASS)
+- [x] `schema_version` v1 row 가 1개 기록됨. (smoke step 4/4 PASS)
+- [ ] dry-run 이관 → INSERT 미실행 + 카운트만 출력. (Step 3 진행 시 검증)
+- [ ] 실제 이관 → Drive 와 row count 일치. (Step 3)
+- [ ] 봇 기동(sqlite 모드) → orchestrator/risk_monitor/slack 모든 흐름 무오류. (Step 3 이후 운영 검증)
 
-## 10. Post-Update 동기화 (Phase 2 적용 후, Step 2/3 진행 시 갱신)
-- `_SQLiteBackend` 의 실제 시그니처/PRAGMA 와 §02 API Spec 일치 여부.
-- 마이그레이션 러너의 실제 동작이 §9.5 와 일치 여부.
-- 이관 스크립트의 실제 출력 포맷이 §9.6 와 일치 여부.
+## 10. Post-Update 동기화 (Phase 2 Step 2 적용 후, commit 동시 갱신)
+### 10.1 실제 시그니처 (Step 2 신설 코드)
+- `src/storage/state_store.py`:
+  - `_resolve_backend() -> _DriveBackend | _SQLiteBackend` — 환경변수 기반 1회 결정.
+  - 기본 DB 경로: `_DEFAULT_DB_PATH = "data/sqlite/autostock.db"`.
+- `src/storage/sqlite_backend.py:_SQLiteBackend`:
+  - `__init__(db_path: str, notify_fn: Optional[Callable[[str], None]] = None)`.
+  - `read_json(filename: str, default: Any) -> Any` / `write_json(filename: str, data: Any) -> None`.
+  - `close() -> None` (테스트 정리용. 운영 중 호출 불필요).
+  - PRAGMA: `foreign_keys=ON`, `journal_mode=WAL`, `synchronous=NORMAL`.
+  - `isolation_level=None`(autocommit) + 수동 `BEGIN`/`COMMIT`/`ROLLBACK` 트랜잭션 제어.
+- `src/storage/migrations/runner.py`:
+  - `apply_pending(conn: sqlite3.Connection, notify_fn: Optional[Callable[[str], None]] = None) -> List[int]`.
+  - 파일 패턴: `v(\d{3})_[a-z0-9_]+\.py`. 버전 오름차순 적용.
+  - `with conn:` 컨텍스트로 트랜잭션 자동 관리.
+- `src/storage/migrations/v001_initial.py`:
+  - `VERSION = 1`, `DESCRIPTION = "A/B 도메인 5 테이블 + schema_version 메타 (Phase 2 v1)"`.
+
+### 10.2 알려진 한계 (Step 3 또는 후속 단계에서 다룸)
+- `_SQLiteBackend` 의 connection 은 모듈 단일 인스턴스. 다중 프로세스 환경에서는 추가 검토 필요(현재 봇은 단일 프로세스).
+- `trades` 의 `replace_trades` 는 전체 교체 시맨틱. `append_trade(...)` 는 Phase 2.5 검토.
+- `logger.record_trade` 의 self-call 은 Phase 2.5 별도 PR.

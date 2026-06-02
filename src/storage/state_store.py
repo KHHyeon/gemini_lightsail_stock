@@ -4,13 +4,18 @@
 호출자는 본 모듈만 사용한다. 백엔드(Drive/SQLite/PG) 종류와 파일명·테이블명은
 캡슐화되어 호출자에 노출되지 않는다.
 
-Phase 1 (현재): 모든 도메인은 ``_DriveBackend`` 로 위임. 동작은 기존과 100% 동일.
-Phase 2 예정: 환경변수 ``STATE_STORE_BACKEND=sqlite`` 로 백엔드 교체. 호출자 영향 0.
+백엔드 선택은 환경변수 ``STATE_STORE_BACKEND`` 로 모듈 로드 시 1회 결정한다.
+  - 기본값/미설정: ``_DriveBackend`` (Phase 1 동작 그대로).
+  - ``sqlite``: ``_SQLiteBackend`` (Phase 2). DB 경로는 ``STATE_STORE_DB_PATH`` (기본 ``data/sqlite/autostock.db``).
+  - 알 수 없는 값: stderr 경고 1회 + Drive fallback.
 
-상세: Doc/features/data_persistence/02_data_persistence_api_spec.md
+상세: Doc/features/data_persistence/02_data_persistence_api_spec.md,
+      Doc/features/data_persistence/03_data_persistence_state_logic.md §9
 """
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any
 
 
@@ -50,7 +55,28 @@ class _DriveBackend:
         logger.save_json_to_gdrive(data, filename)
 
 
-_backend = _DriveBackend()
+_DEFAULT_DB_PATH = "data/sqlite/autostock.db"
+
+
+def _resolve_backend():
+    """환경변수에 따라 백엔드 인스턴스를 1회 결정한다."""
+    backend_name = os.getenv("STATE_STORE_BACKEND", "drive").strip().lower()
+    if backend_name == "sqlite":
+        db_path = os.getenv("STATE_STORE_DB_PATH", _DEFAULT_DB_PATH).strip() or _DEFAULT_DB_PATH
+        from src.storage.sqlite_backend import _SQLiteBackend
+
+        return _SQLiteBackend(db_path=db_path)
+    if backend_name not in ("drive", ""):
+        # 알 수 없는 값은 Drive 로 폴백하고 stderr 경고 1회.
+        print(
+            f"[state_store] 알 수 없는 STATE_STORE_BACKEND='{backend_name}' "
+            f"-> Drive 백엔드로 폴백",
+            file=sys.stderr,
+        )
+    return _DriveBackend()
+
+
+_backend = _resolve_backend()
 
 
 # ---------------------------------------------------------------------------
