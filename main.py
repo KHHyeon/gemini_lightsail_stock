@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
-import os, time, threading, schedule
+# .env 의 값을 import 시점에 결정하는 모듈(예: src.storage.state_store 의
+# STATE_STORE_BACKEND 환경변수 분기)이 있으므로, load_dotenv() 는 다른 import
+# 보다 반드시 먼저 호출해야 한다.
 from dotenv import load_dotenv
+load_dotenv()
+
+import os, time, threading, schedule
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
@@ -9,8 +14,6 @@ from src.execution.orchestrator import MarketOrchestrator
 from src.execution import risk_monitor as risk_manager
 from src.utils import slack_interface
 from src.utils.timekit import KST
-
-load_dotenv()
 APP_KEY = os.getenv("APP_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 ACC_NO = os.getenv("ACCOUNT_NO")

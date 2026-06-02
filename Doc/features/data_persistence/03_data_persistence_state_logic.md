@@ -231,14 +231,22 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 - E4. **스키마 누락 row** (예: scalp_session 빈 테이블): `get_scalp_session()` → None 반환 (Phase 1 의미 보존).
 - E5. **`STATE_STORE_BACKEND` 알 수 없는 값**: stderr 경고 1회 + Drive fallback. 의도적 misconfiguration 방어.
 
-### 9.8 Phase 2 Step 2 회귀 검증 결과 (`tests/smoke_state_store_sqlite.py`)
-- [x] `STATE_STORE_BACKEND` 미설정 → 백엔드 = `_DriveBackend` 확인. (smoke step 1/4 PASS)
-- [x] 알 수 없는 백엔드 값(`postgres`) → stderr 경고 + `_DriveBackend` 폴백. (smoke step 2/4 PASS)
-- [x] `STATE_STORE_BACKEND=sqlite` + 빈 DB → 자동 스키마 생성 + 5 도메인 read/write 라운드트립 + scalp_session UPSERT + `reset_app_data`. (smoke step 3/4 PASS)
-- [x] `schema_version` v1 row 가 1개 기록됨. (smoke step 4/4 PASS)
-- [ ] dry-run 이관 → INSERT 미실행 + 카운트만 출력. (Step 3 진행 시 검증)
-- [ ] 실제 이관 → Drive 와 row count 일치. (Step 3)
-- [ ] 봇 기동(sqlite 모드) → orchestrator/risk_monitor/slack 모든 흐름 무오류. (Step 3 이후 운영 검증)
+### 9.8 Phase 2 Step 2 회귀 검증 결과
+#### 9.8.1 `tests/smoke_state_store_sqlite.py` (셸 env 주입)
+- [x] `STATE_STORE_BACKEND` 미설정 → 백엔드 = `_DriveBackend` 확인. (1/4 PASS)
+- [x] 알 수 없는 백엔드 값(`postgres`) → stderr 경고 + `_DriveBackend` 폴백. (2/4 PASS)
+- [x] `STATE_STORE_BACKEND=sqlite` + 빈 DB → 자동 스키마 생성 + 5 도메인 read/write 라운드트립 + scalp_session UPSERT + `reset_app_data`. (3/4 PASS)
+- [x] `schema_version` v1 row 가 1개 기록됨. (4/4 PASS)
+
+#### 9.8.2 `tests/smoke_state_store_env.py` (.env 경유 + 영속성)
+- [x] `.env` 의 `STATE_STORE_BACKEND=sqlite` 가 별도 프로세스에서 `_SQLiteBackend` 로 라우팅 + DB 파일 자동 생성. (1/3 PASS)
+- [x] `.env` 의 `STATE_STORE_BACKEND=drive` 일 때 `_DriveBackend` 보존 + DB 파일 미생성. (2/3 PASS)
+- [x] 한 프로세스에서 write → 새 프로세스에서 read → 동일 데이터 반환 (영속성). (3/3 PASS)
+
+#### 9.8.3 Step 3 이후 검증 대상
+- [ ] dry-run 이관 → INSERT 미실행 + 카운트만 출력.
+- [ ] 실제 이관 → Drive 와 row count 일치.
+- [ ] 봇 기동(sqlite 모드) → orchestrator/risk_monitor/slack 모든 흐름 무오류.
 
 ## 10. Post-Update 동기화 (Phase 2 Step 2 적용 후, commit 동시 갱신)
 ### 10.1 실제 시그니처 (Step 2 신설 코드)
@@ -262,3 +270,17 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 - `_SQLiteBackend` 의 connection 은 모듈 단일 인스턴스. 다중 프로세스 환경에서는 추가 검토 필요(현재 봇은 단일 프로세스).
 - `trades` 의 `replace_trades` 는 전체 교체 시맨틱. `append_trade(...)` 는 Phase 2.5 검토.
 - `logger.record_trade` 의 self-call 은 Phase 2.5 별도 PR.
+
+### 10.3 부트스트랩 순서 (중요)
+- `state_store.py` 는 **import 시점**에 `os.getenv("STATE_STORE_BACKEND")` 를 읽어 백엔드를 결정한다.
+- 따라서 `main.py` 의 `load_dotenv()` 는 **다른 모든 `from src.* import ...` 보다 먼저** 호출되어야 한다. 그렇지 않으면 `.env` 의 `STATE_STORE_BACKEND` 가 무시되고 기본값 `drive` 로 폴백된다.
+- 본 Step 2 PR 에서 `main.py` 의 import 순서를 다음과 같이 정정했다:
+  ```python
+  from dotenv import load_dotenv
+  load_dotenv()                                    # ← src.* import 보다 먼저
+  import os, time, threading, schedule
+  from slack_bolt import App
+  ...
+  from src.execution.orchestrator import MarketOrchestrator
+  ```
+- 별도 진단/테스트 스크립트에서도 동일 원칙. 검증은 `tests/smoke_state_store_env.py` 참조.
