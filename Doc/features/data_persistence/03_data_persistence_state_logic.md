@@ -48,18 +48,18 @@ sqlite3 (stdlib)
 | scalp_session | Drive | `app_data/scalp_session.json` |
 | trades | Drive | `app_data/paper_trades.json` |
 
-## 4. 호출자 마이그레이션 매트릭스 (Phase 1 PR 적용 범위)
+## 4. 호출자 마이그레이션 매트릭스 (Phase 1 PR 적용 범위, 실측)
 | 파일 | 변경 호출 수 |
 |---|---|
-| `backtester.py` | 1 (read portfolio) |
-| `src/utils/slack_interface.py` | 9 (read portfolio×3, read split×2, write split×1, read trades×1, reset×1, import 라인 갱신) |
-| `src/execution/orchestrator.py` | 14 (read portfolio×4, read split×4, write portfolio×1, write split×4, import 라인 갱신) |
-| `src/execution/risk_monitor.py` | 4 (read portfolio×1, read split×1, write portfolio×1, write split×1) |
-| `src/strategy/ai_logic.py` | 2 (read/write theme_context) |
-| `src/memory/scalp_session_store.py` | 3 (read scalp_session, write scalp_session, read portfolio) |
+| `backtester.py` | 2 (import 갱신 + read portfolio×1) |
+| `src/utils/slack_interface.py` | 9 (import 갱신 + read portfolio×3 + read split×2 + write split×1 + read trades×1 + reset_app_data×1) |
+| `src/execution/orchestrator.py` | 15 (import 갱신 + read portfolio×5 + read split×4 + write portfolio×1 + write split×4) |
+| `src/execution/risk_monitor.py` | 5 (import 갱신 + read portfolio×1 + read split×1 + write portfolio×1 + write split×1) |
+| `src/strategy/ai_logic.py` | 3 (local import 갱신 + read theme×1 + write theme×1) |
+| `src/memory/scalp_session_store.py` | 4 (import 갱신 + read scalp_session + write scalp_session + read portfolio) |
 | `src/utils/logger.py` | 0 (self-call 유지) |
 
-총 33 호출 변경 (이전 추정 26 보다 많음: 동일 함수 다회 호출 카운트 포함).
+총 38 라인 변경 (import 6 + 호출 32).
 
 ## 5. 호환성 보장 흐름
 - Phase 1 적용 후에도 다음 흐름이 정상 작동해야 한다:
