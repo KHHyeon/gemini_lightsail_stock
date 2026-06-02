@@ -243,10 +243,19 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 - [x] `.env` 의 `STATE_STORE_BACKEND=drive` 일 때 `_DriveBackend` 보존 + DB 파일 미생성. (2/3 PASS)
 - [x] 한 프로세스에서 write → 새 프로세스에서 read → 동일 데이터 반환 (영속성). (3/3 PASS)
 
-#### 9.8.3 Step 3 이후 검증 대상
-- [ ] dry-run 이관 → INSERT 미실행 + 카운트만 출력.
-- [ ] 실제 이관 → Drive 와 row count 일치.
-- [ ] 봇 기동(sqlite 모드) → orchestrator/risk_monitor/slack 모든 흐름 무오류.
+#### 9.8.3 Step 3 (이관 스크립트) 회귀 검증 (`scripts/migrate_drive_to_sqlite.py`, mock 기반 로컬 시뮬레이션)
+- [x] `--help` 정상 출력 + argparse 인자(--db-path/--dry-run/--no-slack) 인식.
+- [x] `--dry-run` → Drive 로드 + SQLite 스키마 부트스트랩 + 카운트만 출력 + exit 0. INSERT 미실행 확인.
+- [x] 실제 모드(`--no-slack`) → 5 도메인 INSERT + 카운트 일치 + exit 0.
+- [x] mock 데이터(`portfolio=2`, `split_orders=1`, `theme_context=0`, `scalp_session=1`, `trades=3`) 가 SQLite 에 정확히 반영됨.
+- [x] `scalp_session` 의 single-row 카운트 시맨틱이 정확 (dict 의 key 수가 아닌 row 존재 여부로 1/0).
+- [x] dry-run 결과의 stdout 중복 출력 제거 (Step 5/5 라벨로 1회만 출력).
+
+#### 9.8.4 실 서버 검증 (운영자 수행 예정, Step 3 PR 적용 후)
+- [ ] 운영 Drive 의 5 도메인이 실제로 로드되는지 (`--dry-run`) 확인.
+- [ ] 실제 INSERT 수행 후 Drive 와 SQLite row count 일치.
+- [ ] `.env` 에 `STATE_STORE_BACKEND=sqlite` 추가 후 봇 기동.
+- [ ] orchestrator/risk_monitor/slack 모든 흐름 무오류 (스모크 확인 1회).
 
 ## 10. Post-Update 동기화 (Phase 2 Step 2 적용 후, commit 동시 갱신)
 ### 10.1 실제 시그니처 (Step 2 신설 코드)
@@ -271,7 +280,13 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 - `trades` 의 `replace_trades` 는 전체 교체 시맨틱. `append_trade(...)` 는 Phase 2.5 검토.
 - `logger.record_trade` 의 self-call 은 Phase 2.5 별도 PR.
 
-### 10.3 부트스트랩 순서 (중요)
+### 10.3 이관 스크립트의 실제 동작 (Step 3 신설)
+- 파일: `scripts/migrate_drive_to_sqlite.py`.
+- `STATE_STORE_BACKEND` 환경변수의 영향을 받지 않는다 (Drive 측은 `logger.load_json_from_gdrive` 직접 호출, SQLite 측은 `_SQLiteBackend` 직접 인스턴스화).
+- 도메인 매트릭스에 카운트 방식(`keyed`/`list`/`single`) 정보가 포함되어, `scalp_session` 같은 single-row 도메인도 정확히 비교 가능.
+- 슬랙 전송은 `_send_slack(text, notify_fn)` 단일 함수로 일원화 — `notify_fn` 가 없거나 토큰/채널 미설정 시 무동작 (stdout 출력은 별도로 `print_flush` 가 수행).
+
+### 10.4 부트스트랩 순서 (중요)
 - `state_store.py` 는 **import 시점**에 `os.getenv("STATE_STORE_BACKEND")` 를 읽어 백엔드를 결정한다.
 - 따라서 `main.py` 의 `load_dotenv()` 는 **다른 모든 `from src.* import ...` 보다 먼저** 호출되어야 한다. 그렇지 않으면 `.env` 의 `STATE_STORE_BACKEND` 가 무시되고 기본값 `drive` 로 폴백된다.
 - 본 Step 2 PR 에서 `main.py` 의 import 순서를 다음과 같이 정정했다:
