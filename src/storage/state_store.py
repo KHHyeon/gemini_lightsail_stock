@@ -65,6 +65,8 @@ def _resolve_backend():
         db_path = os.getenv("STATE_STORE_DB_PATH", _DEFAULT_DB_PATH).strip() or _DEFAULT_DB_PATH
         from src.storage.sqlite_backend import _SQLiteBackend
 
+        # 부팅 신호 (Doc/features/data_persistence/03_*.md §11.3 C05 점검 대상).
+        print(f"[STATE_STORE] backend=sqlite db_path={db_path}", flush=True)
         return _SQLiteBackend(db_path=db_path)
     if backend_name not in ("drive", ""):
         # 알 수 없는 값은 Drive 로 폴백하고 stderr 경고 1회.
@@ -73,6 +75,8 @@ def _resolve_backend():
             f"-> Drive 백엔드로 폴백",
             file=sys.stderr,
         )
+    # 부팅 신호 (C05 동등 메시지 — Drive 백엔드 시).
+    print("[STATE_STORE] backend=drive", flush=True)
     return _DriveBackend()
 
 
