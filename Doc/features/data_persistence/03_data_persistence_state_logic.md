@@ -299,3 +299,352 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
   from src.execution.orchestrator import MarketOrchestrator
   ```
 - 별도 진단/테스트 스크립트에서도 동일 원칙. 검증은 `tests/smoke_state_store_env.py` 참조.
+
+## 11. Phase 3 — Chronicle SQLite 전환 동작 흐름
+
+### 11.1 모듈 의존 그래프 (Phase 3, sqlite 백엔드 선택 시)
+```
+호출자 (chronicle_writer / backfill / context_retriever)
+       |
+       v
+src.storage.state_store  (Phase 1/2 re-export)
+       |
+       v
+src.storage.chronicle_repo  (Phase 3 신설, import 시점 분기)
+       |
+       +--- (STATE_STORE_BACKEND=drive) ---> _DriveChronicleBackend
+       |                                            |
+       |                                            v
+       |                                     src.memory.drive_client.*
+       |
+       +--- (STATE_STORE_BACKEND=sqlite) --> _SQLiteChronicleBackend
+                                                    |
+                                                    v
+                                             sqlite3 (stdlib, FTS5 포함)
+                                                    |
+                                                    v
+                                             data/sqlite/autostock.db
+                                             (schema v2 적용)
+```
+
+### 11.2 데이터 도메인별 백엔드 매핑 (Phase 3, sqlite 모드)
+| 도메인 | 백엔드 | 저장 위치 |
+|---|---|---|
+| C. chronicle_entries | SQLite | `chronicle_entries` (1 row/entry) |
+| D. chronicle_reports | SQLite | `chronicle_reports` (1 row/.md) |
+| D-2. chronicle_report_sections | SQLite | `chronicle_report_sections` (1 row/섹션) |
+| D-3. chronicle_search (FTS5) | SQLite | `chronicle_search` (1 row/섹션, body_md MATCH) |
+| chronicle_backfill_state | SQLite | `chronicle_backfill_state` (단일 row) |
+| Drive 임시 폴더 TTL | Drive | `MarketChronicles/temp/tech/*` (lifecycle.py, Phase 5 까지 유지) |
+| OAuth 토큰 | Drive | `gdrive_oauth_token.json` (인증 인프라, Phase 5 까지 유지) |
+
+### 11.3 SQLite 스키마 v2 (Phase 3, v002_chronicle.py)
+```sql
+-- C 도메인: Chronicle 인덱스
+CREATE TABLE IF NOT EXISTS chronicle_entries (
+    entry_id        TEXT    PRIMARY KEY,
+    chronicle_date  TEXT    NOT NULL,
+    source          TEXT    NOT NULL,
+    trigger_reason  TEXT    NOT NULL,
+    regime          TEXT    NOT NULL,
+    regime_label    TEXT,
+    main_actor      TEXT,
+    sentiment       TEXT,
+    action_preview  TEXT    NOT NULL,
+    context_tags_json  TEXT NOT NULL,
+    phrases_json       TEXT,
+    embedding_vector   BLOB,
+    report_rel_path TEXT    NOT NULL,
+    written_at      TEXT    NOT NULL,
+    reindexed_at    TEXT,
+    migrated_at     TEXT,
+    schema_version  INTEGER NOT NULL DEFAULT 2,
+    extra_json      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_chr_entries_date    ON chronicle_entries(chronicle_date DESC);
+CREATE INDEX IF NOT EXISTS idx_chr_entries_regime  ON chronicle_entries(regime);
+CREATE INDEX IF NOT EXISTS idx_chr_entries_source  ON chronicle_entries(source);
+
+-- D 도메인: Chronicle 본문
+CREATE TABLE IF NOT EXISTS chronicle_reports (
+    entry_id        TEXT    PRIMARY KEY,
+    chronicle_date  TEXT    NOT NULL,
+    header_md       TEXT    NOT NULL,
+    body_md         TEXT    NOT NULL,
+    full_md         TEXT    NOT NULL,
+    written_at      TEXT    NOT NULL,
+    schema_version  INTEGER NOT NULL DEFAULT 2,
+    FOREIGN KEY (entry_id) REFERENCES chronicle_entries(entry_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chr_reports_date ON chronicle_reports(chronicle_date DESC);
+
+-- D-2: 본문 5섹션 정규화
+CREATE TABLE IF NOT EXISTS chronicle_report_sections (
+    entry_id        TEXT    NOT NULL,
+    section_index   INTEGER NOT NULL,
+    section_key     TEXT    NOT NULL,
+    section_title   TEXT    NOT NULL,
+    body_md         TEXT    NOT NULL,
+    PRIMARY KEY (entry_id, section_index),
+    FOREIGN KEY (entry_id) REFERENCES chronicle_entries(entry_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chr_sections_key ON chronicle_report_sections(section_key);
+
+-- D-3: 풀텍스트 검색
+CREATE VIRTUAL TABLE IF NOT EXISTS chronicle_search USING fts5(
+    entry_id        UNINDEXED,
+    chronicle_date  UNINDEXED,
+    section_key     UNINDEXED,
+    body_md,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- 운영 상태
+CREATE TABLE IF NOT EXISTS chronicle_backfill_state (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    payload_json    TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
+);
+
+INSERT INTO schema_version(version, applied_at, description)
+VALUES (2, CURRENT_TIMESTAMP, 'Phase 3: chronicle C/D + FTS5 + sections + backfill_state');
+```
+
+설계 의도:
+- **검색 키 외부화**: C 의 regime/regime_label/main_actor/sentiment 가 모두 컬럼화. context_retriever 의 8단계 점수화가 JSON parse 없이 동작 가능 (성능 ↑).
+- **JSON 보존**: phrases_list/context_tags_list 는 list 형식의 자유도가 필요 + 검색 키 외부화 비용 대비 효율 낮아 JSON 유지.
+- **CASCADE**: 인덱스 삭제 시 reports/sections/search 동기 정리. backfill.reset 안전성 향상.
+- **FTS5 unicode61 + 한국어**: `remove_diacritics 2` 옵션으로 한글·라틴 동시 처리. (시험 후 한국어 토크나이저 별도 도입 검토 — Phase 3.5)
+
+### 11.4 chronicle_repo 의 read/write 동작
+- `chronicle_index_list()` → `SELECT * FROM chronicle_entries ORDER BY chronicle_date DESC` → v2 dict 복원 (json.loads context_tags_json/phrases_json).
+- `chronicle_index_append(entry_dict, full_md=..., header_md=..., body_md=...)` → BEGIN → INSERT chronicle_entries → INSERT chronicle_reports → 파싱한 섹션 N INSERT (chronicle_report_sections + chronicle_search) → COMMIT.
+- `chronicle_index_replace_all(entries_list)` → BEGIN → DELETE chronicle_entries (CASCADE) → bulk INSERT → COMMIT. **본문은 보존되지 않으므로 호출부 주의** (현재 backfill.reset 은 entries 만 갱신).
+- `chronicle_search_fulltext(query, limit=10)` → `SELECT entry_id, chronicle_date, section_key, snippet(chronicle_search, 3, '<<', '>>', '...', 16) FROM chronicle_search WHERE body_md MATCH ? LIMIT ?`.
+- `chronicle_get_backfill_state() / chronicle_save_backfill_state(state_dict)` → 단일 row payload_json read/write (Phase 2 의 scalp_session 패턴과 동일).
+
+### 11.5 .md 본문 파싱 로직 (P3F5)
+```python
+def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
+    """Returns (header_md, body_md, sections_list)."""
+    # 1. 헤더 분리: "# Market Chronicle ..." 또는 "# Market Chronicle (Backfill) ..."
+    #    첫 빈 줄까지를 header_md, 나머지를 body_md.
+    # 2. body_md 를 "^## " 로 분할.
+    # 3. 각 섹션의 첫 줄을 헤딩으로 추출.
+    # 4. 헤딩 텍스트로 section_key 매핑.
+    ...
+```
+
+`section_key` 매핑 룰 (대소문자/공백/괄호 무시):
+| 헤딩 패턴 (정규화) | section_key |
+|---|---|
+| "intradayflow" 또는 "장중흐름" 포함 | intraday_flow |
+| "사건과원인" 포함 | event_and_cause |
+| "미래행동지침" 또는 "행동지침" 포함 | action_guideline |
+| "한줄요약" 포함 | one_line_summary |
+| 그 외 | unknown |
+
+### 11.6 호출자 마이그레이션 매트릭스 (Phase 3 PR 적용 범위)
+| 파일 | 변경 호출 수 | 비고 |
+|---|---|---|
+| `src/memory/chronicle_writer.py` | 3 (file_exists / write_text / append_index) → `report_exists_by_date / chronicle_index_append (atomic)` | 트랜잭션 격상 |
+| `src/memory/backfill.py` | 16 (read/write_json_relative / file_exists / write_text / read_text / read_master_index / write_master_index / append_index_entry / list_files_under / delete_file_relative / delete_file_by_id) | 가장 큰 변경 |
+| `src/memory/context_retriever.py` | 1 (read_master_index → chronicle_index_list) | 점수화 로직 무변경 |
+| `src/memory/lifecycle.py` | 0 (Phase 3 비대상, Phase 5 에서 통째 정리) | — |
+| `scripts/migrate_master_index_v2.py` | 0 (Drive 모드 호환을 위해 유지) | — |
+
+총 20 호출 + 3 import = 23 라인 변경 (Phase 1 의 38 라인보다 적음).
+
+### 11.7 폴백/에러 정책 (Phase 3, §9.7 보강)
+- E1. **.md 헤딩 매칭 실패** → 본문은 손실 없이 `section_key=unknown` 으로 1 섹션 보존. (P3E1)
+- E2. **FTS5 빌드 미지원** → 시작 시점 1회 stderr 경고. `chronicle_search_fulltext` 는 정규식 폴백 (`re.search` on `chronicle_reports.body_md`). 정확도는 떨어지지만 봇 운영 정상. (P3E2)
+- E3. **.md 본문 누락** (Drive `report_rel_path` 가리키는 파일 부재): 마이그레이션 스크립트가 `skipped` 격리 + 슬랙 보고. 인덱스는 그대로 진행. (P3E3)
+- E4. **FK CASCADE 사고**: `chronicle_delete_entry(entry_id, delete_report=False)` 옵션 제공. 호출부 옵션 명시.
+- E5. **SQLite IO 실패**: Phase 2 §9.7 와 동일 정책. 예외 전파 → 상위에서 B-Type Pause.
+
+### 11.8 Phase 3 검증 체크리스트
+- [ ] `python -m py_compile src/storage/chronicle_repo.py src/storage/migrations/v002_chronicle.py` OK
+- [ ] `python -c "from src.storage import state_store; state_store.chronicle_index_list()"` 심볼 노출
+- [ ] 호출자 3 파일 lint 0건 (`chronicle_writer / backfill / context_retriever`)
+- [ ] `tests/smoke_chronicle_repo.py` (Phase 3 신설): Drive/SQLite 양 모드 라운드트립 + FTS5 검색 + 섹션 정합
+- [ ] grep 로 `from src.memory import drive_client` 호출 중 `read_master_index / append_index_entry / write_master_index / read_text_relative / write_text_relative / file_exists_relative / list_files_under / delete_file_relative / read_json_relative / write_json_relative` 는 `chronicle_repo` 호출로 치환됐는지 확인 (lifecycle.py + migrate_master_index_v2.py 제외)
+
+### 11.9 마이그레이션 스크립트 동작 (Step 3 신설)
+```
+[Step 1/8] Drive 로드
+  - master_index.json (v2 가드)
+  - reports/**/*.md 재귀 (이미 entries 가 가리키는 파일만)
+  - _system/backfill_state.json (선택)
+
+[Step 2/8] SQLite 스키마 부트스트랩
+  - apply_pending → [1, 2] (v001 + v002)
+
+[Step 3/8] dry-run? → 카운트만 비교 후 종료
+
+[Step 4/8] chronicle_entries DELETE + bulk INSERT
+
+[Step 5/8] 각 entry 의 .md 본문 다운로드 + 파싱
+  - chronicle_reports INSERT
+  - chronicle_report_sections N INSERT
+  - chronicle_search N INSERT
+
+[Step 6/8] chronicle_backfill_state DELETE + INSERT (단일 row)
+
+[Step 7/8] 카운트 비교
+  - Drive entries vs SQLite chronicle_entries
+  - Drive .md 갯수 vs SQLite chronicle_reports
+  - SQLite chronicle_report_sections / chronicle_search row 수
+
+[Step 8/8] 결과 출력 + 슬랙 보고
+```
+
+### 11.10 부트스트랩 순서 (Phase 2 §10.4 계승)
+- chronicle_repo 도 동일하게 import 시점에 `STATE_STORE_BACKEND` 를 읽는다.
+- `main.py` 의 `load_dotenv()` 가 **모든 `from src.*` 보다 먼저** 호출되어야 한다 (Phase 2 PR 에서 이미 정정됨, 추가 변경 불필요).
+
+## 12. Phase 3 Post-Update 동기화 (Step 2/3 적용 후 갱신)
+- 본 §11.6 매트릭스의 실제 변경 라인 수 확인.
+- `src/storage/chronicle_repo.py` 의 공개 시그니처가 §02 API Spec §7.1 과 일치하는지 확인.
+- `tests/smoke_chronicle_repo.py` 결과 (Drive/SQLite 라운드트립) 를 §11.8 에 PASS 로 기록.
+- 실 서버에서 `scripts/migrate_chronicles_to_sqlite.py` 실행 후 entries / .md / sections / FTS row 카운트 기록.
+
+## 11. M6 운영 안정성 운반대 (Runbook, Phase 2 Step 5)
+### 11.1 목적/대상/주기
+- **목적**: SQLite 백엔드로 전환된 봇이 운영 환경에서 정상 동작하는지 **1~3일간 검증**한다.
+- **대상**: Lightsail Ubuntu (`/home/ubuntu/my_bot`, systemd unit `stockbots.service`).
+- **주기**: 별도 agent 가 **1일 1회 순회**하여 결과를 슬랙 또는 stdout 으로 보고. cron 대신 agent 가 호출하는 이유는 결과 해석 및 후속 조치(롤백 판단)까지 자동화하기 위함.
+
+### 11.2 자동 점검 도구 (`scripts/m6_stability_check.py`)
+별도 agent 가 ssh 로 접속해 단일 명령 `python3 scripts/m6_stability_check.py` 로 호출한다. 모든 점검이 직렬화된 결과 객체(`{check_id, category, status, detail}`)로 반환되어 agent 가 파싱·해석 가능.
+
+| 옵션 | 기능 |
+|---|---|
+| (없음) | 사람이 읽기 좋은 텍스트 출력 + 종합 PASS/FAIL/WARN |
+| `--json` | JSON 직렬화 출력 (별도 agent 파싱용) |
+| `--slack` | 결과를 슬랙 채널에 1회 게시 (요약 + 비-PASS 상세) |
+| `--day {1,2,3}` | 일자별 집중 점검 셀렉터 (생략 시 전체) |
+| `--db-path PATH` | DB 파일 경로 override (기본: `STATE_STORE_DB_PATH` → `data/sqlite/autostock.db`) |
+| `--service NAME` | systemd unit 이름 override (기본: `stockbots.service`) |
+
+#### 점검 상태(Status) 4단계
+- `PASS`: 자동으로 정상 확인됨.
+- `WARN`: 자동으로 단정 불가 (예: 슬랙 명령 응답 - 사람 확인 필요) 또는 경계값.
+- `FAIL`: 회귀 신호. 롤백 트리거 후보.
+- `SKIP`: 해당 일자(또는 환경)에서 해당 점검이 적용 대상 아님.
+
+### 11.3 점검 매트릭스
+| ID | 카테고리 | 점검 항목 | 자동화 방식 | 정상 기준 | 권장 일자 |
+|---|---|---|---|---|---|
+| C01 | boot | 서비스 active | `systemctl is-active stockbots.service` | `active` | 1~3 |
+| C02 | boot | 메인 프로세스 PID 살아있음 | `systemctl show -p MainPID` → `/proc/{pid}` 확인 | PID > 0 & 디렉터리 존재 | 1~3 |
+| C03 | boot | DB 파일 존재 + 크기 > 0 | `os.stat(db_path)` | size > 0 | 1~3 |
+| C04 | boot | WAL 파일 존재 | `os.path.exists(db_path + "-wal")` | True | 1~3 |
+| C05 | boot | 부팅 로그 `STATE_STORE backend=sqlite` (또는 동등) | `journalctl -u <svc> --since "10 min ago" \| rg ...` | 매칭 1+ | 1 |
+| C06 | runtime | `sqlite3.OperationalError` / `STATE_STORE` 에러 없음 | `journalctl -u <svc> --since "1 hour ago" \| rg -i "OperationalError\|STATE_STORE.*ERROR"` | 매칭 0 | 1~3 |
+| C07 | runtime | `[Drive Read Fallback]` 이 떠도 Chronicle 만 | 위 명령어 + `rg "Drive Read Fallback"` 의 도메인 분류 | operational 도메인 (paper_*/split_orders/theme_context/scalp_session) 0건 | 1~3 |
+| C08 | runtime | 오케스트레이터 정기 사이클 통과 | `journalctl ... \| rg "orchestrator\|이상종목\|시간대"` | 최근 1시간 내 1+ | 1~3 |
+| C09 | trading | 09:00 자동 시장 진입 로그 | `journalctl --since "today 08:55" \| rg "Market.*Open\|장 시작\|09:00"` | 거래일 한정 1+ | 2~3 |
+| C10 | trading | portfolio 갱신 시각 | SQLite `SELECT MAX(updated_at) FROM portfolio` | 최근 24h 이내(거래일) | 2~3 |
+| C11 | trading | split_orders 갱신 (해당 시) | 동일 패턴 | 24h 또는 0 row | 2~3 |
+| C12 | trading | trades append (최근 5건 ts) | `SELECT ts FROM trades ORDER BY id DESC LIMIT 5` | 거래 발생 시 최근 24h 이내 | 2~3 |
+| C13 | trading | theme_context / scalp_session 갱신 | 동일 패턴 | 24h 또는 0 row | 2~3 |
+| C14 | backup | PRAGMA integrity_check | `conn.execute("PRAGMA integrity_check")` | `[('ok',)]` | 2~3 |
+| C15 | backup | WAL 파일 < 10MB | `os.stat(db_path + "-wal").st_size` | < 10 \* 1024 \* 1024 | 1~3 |
+| C16 | backup | 디스크 여유 공간 | `shutil.disk_usage('/')` | free > 1 GiB | 1~3 |
+| C17 | regression | master_index.json Drive 갱신 (Chronicle 정상 R/W) | `drive_client.get_file_modified_time('master_index.json')` | 최근 24h 이내(보고일 기준) | 3 |
+| C18 | regression | paper_portfolio.json Drive 더 이상 갱신 X | 동일 + mtime 비교 | mtime < SQLite 활성화 시각 | 3 |
+| C19 | regression | paper_trades.json Drive 더 이상 갱신 X | 동일 | 동일 | 3 |
+| C20 | regression | OAuth 만료 시 Pause 트리거 정상 | 슬랙 알림 패턴 매칭 (수동 시나리오) | WARN(자동 단정 불가) | 1~3 |
+
+### 11.4 종합 판정 정책
+- 모든 점검 결과 중 `FAIL` 이 1건이라도 있으면 **종합 결과 = FAIL** (롤백 권고).
+- `FAIL` 없이 `WARN` 만 있으면 **종합 결과 = WARN** (다음 회차에 재점검).
+- `FAIL`/`WARN` 모두 없으면 **종합 결과 = PASS**.
+- exit code: `0`=PASS, `1`=WARN, `2`=FAIL. 별도 agent 가 exit code 만으로도 1차 판단 가능.
+
+### 11.5 보조 통계 출력 (informational)
+점검 결과와 별도로 항상 출력되는 운영 통계 (별도 agent 가 추세 분석에 사용):
+- `schema_version` 적용 이력 (version, applied_at, description).
+- 5 도메인 row 수.
+- portfolio / split_orders / theme_context / scalp_session 의 `MAX(updated_at)`.
+- trades 최근 5건 (`ts`, `ticker`).
+- WAL 파일 크기.
+- DB 파일 크기.
+- 디스크 사용량.
+
+### 11.6 롤백 트리거
+다음 중 1개라도 만족 시 운영자는 즉시 `.env` 의 `STATE_STORE_BACKEND=sqlite` 줄을 주석 처리(또는 `=drive`) 후 `s-restart`:
+- C06 (OperationalError / STATE_STORE 에러) 가 24h 내 3회 이상.
+- C07 (Drive Read Fallback 의 operational 도메인 누출) 가 1회라도 발생.
+- C14 (integrity_check) 결과가 `ok` 가 아님.
+- C10/C12 가 정상 거래 발생일에도 24h 이상 정체.
+
+Drive 측 데이터는 이관 후에도 그대로 보존되므로 (`Phase 5` 정리 전까지), 롤백 시 데이터 손실 없음.
+
+### 11.7 별도 agent 운영 시나리오
+1. agent 가 ssh 로 `/home/ubuntu/my_bot` 접속.
+2. `python3 scripts/m6_stability_check.py --json --day {1|2|3}` 호출.
+3. JSON 결과를 파싱하여 `FAIL`/`WARN` 항목과 보조 통계를 슬랙 또는 사용자에게 보고.
+4. exit code 가 `2` 면 §11.6 롤백 트리거 적용 여부를 사람에게 확인 요청 (B-Type 게이트키핑).
+5. 3일 무결성 통과(Day 3 PASS) 시 본 §11 의 Step 5 구현율을 `100%` 로 마킹하고, README 의 v1.1 라인을 동기화.
+
+### 11.8 Post-Update 동기화 (Step 5 도구 신설 후, 2026-06-02)
+실제 구현 시그니처를 사양과 일치시키기 위한 기록.
+
+#### 11.8.1 부팅 로그 추가
+- `src/storage/state_store.py:_resolve_backend()` 에 부팅 신호 print 1줄 추가.
+  - SQLite: `[STATE_STORE] backend=sqlite db_path=<path>`
+  - Drive: `[STATE_STORE] backend=drive`
+- systemd 가 stdout 을 journalctl 로 캡처하므로 C05 점검이 자동 매칭 가능해진다.
+
+#### 11.8.2 `scripts/m6_stability_check.py` 시그니처
+- 진입점: `main(argv: Optional[List[str]] = None) -> int`.
+- argparse 옵션: `--db-path`, `--service`, `--day`, `--json`, `--slack` (§11.2 표와 일치).
+- 핵심 자료구조:
+  - `RunContext` (dataclass) — `db_path`, `wal_path`, `service_name`, `day_filter`, `now_utc`, `sqlite_activation_ts`.
+  - `CheckResult` (dataclass) — `check_id`, `category`, `day_scope`, `label`, `status`, `detail`, `elapsed_ms`.
+- 점검 매트릭스 `_CHECK_LIST`: 20 항목 (C01~C20) 을 §11.3 표 순서 그대로 등록.
+- 점검 함수 시그니처 규약:
+  - `runner_kind='ctx'`: `runner(ctx) -> (status, detail)`
+  - `runner_kind='conn'`: `runner(conn, ctx) -> (status, detail)`
+  - 모든 점검 함수는 예외 안전 (예외 발생 시 호출부에서 `_STATUS_FAIL` 로 흡수).
+- 점검 함수 → ID 매핑 (실측):
+  - `_c01_service_active` (`systemctl is-active`)
+  - `_c02_main_pid_alive` (`systemctl show -p MainPID` + `/proc/<pid>`)
+  - `_c03_db_file_present`, `_c04_wal_file_present` (os.path.exists + getsize)
+  - `_c05_boot_log_backend` (`journalctl --since 10 min ago|1 hour ago|today`)
+  - `_c06_runtime_error_absent` (`journalctl --since 1 hour ago` + regex `sqlite3.OperationalError|STATE_STORE.*ERROR`)
+  - `_c07_drive_fallback_scope` (`journalctl --since 24 hour ago` + `_OPERATIONAL_FILENAME_LIST` 누출 검사)
+  - `_c08_orchestrator_cycle` (regex `orchestrator|이상종목|시간대|정기 사이클|MarketOrchestrator`)
+  - `_c09_market_open_log` (`journalctl --since "today 08:55"` + regex `Market.*Open|장 시작|09:00|시장 진입`)
+  - `_c10_portfolio_freshness`, `_c11_split_orders_freshness` (`_check_updated_freshness`, `fresh_hours=24`)
+  - `_c12_trades_recent` (`SELECT ts FROM trades ORDER BY id DESC LIMIT 1`, 임계 72h)
+  - `_c13_theme_scalp_freshness` (theme_context+scalp_session OR 시맨틱)
+  - `_c14_integrity_check` (`PRAGMA integrity_check`)
+  - `_c15_wal_size_bound` (10 MiB), `_c16_disk_free` (`shutil.disk_usage('/')` >= 1 GiB)
+  - `_c17_chronicle_drive_rw`, `_c18_drive_portfolio_stale`, `_c19_drive_trades_stale` — Drive `modifiedTime` 동적 조회(`drive_client` 의 메타데이터 API 존재 시).
+  - `_c20_oauth_pause_pattern` (`invalid_grant|OAuth|Pause` 패턴, WARN 한정).
+- 출력 함수 3종:
+  - `_render_text` (기본), `_render_json` (`--json`), `_render_slack` (`--slack` 보고용 별도 간결 포맷).
+- 종합 판정 `_aggregate_status` + `_exit_code_for`:
+  - `FAIL>=1` → overall FAIL → exit 2
+  - `WARN>=1` (FAIL=0) → overall WARN → exit 1
+  - 그 외 → overall PASS → exit 0
+  - 도구 자체 예외 → exit 3 (사양 §11.2 종료 코드)
+- 보조 통계 `_collect_stats`:
+  - `schema_version` 적용 이력
+  - 5 도메인 `rows` + `max_updated_at` (trades 제외, trades 는 `recent_trades` 별도 출력)
+  - `recent_trades` (최근 5건 `ts`,`ticker`)
+  - DB/WAL 파일 크기, `/` 파티션 여유/총량(GiB)
+- SQLite 활성화 시각 `_resolve_sqlite_activation_ts`:
+  - 우선: `schema_version.applied_at` (v1) → 다음: DB 파일 mtime.
+  - C18/C19 의 "활성화 이후 Drive 갱신 발생" 판정 기준 시각.
+
+#### 11.8.3 Windows 환경 smoke 결과 (검증 자체는 Lightsail 에서 수행)
+- Windows 에서 `--json --day 1` 실행 시: `C01~C04` 정확히 `FAIL`, `C05~C08/C15/C20` 정확히 `WARN`, `C16` 만 `PASS`, exit code `2`. **점검 함수의 예외 안전성과 종합 판정 로직이 사양 §11.4 와 정확히 일치함을 확인.**
+- 운영 Lightsail Ubuntu 에서 실행 시: systemd/journalctl/DB 가 모두 존재하므로 점검 도구가 의도된 결과를 자동 산출한다.
+
+#### 11.8.4 향후 보강 후보 (Step 5 진행 중 발견 시 추가)
+- C17/C18/C19 의 Drive 메타데이터 조회 API 가 `drive_client` 에 명시 노출되지 않은 경우, `_drive_modified_time` 의 메서드 검색 목록(`get_file_metadata`/`get_app_file_metadata`/`stat_app_file`/`describe_app_file`)에 실제 함수명을 추가해야 한다.
+- Day 1 PASS 후 안정성이 확인되면 `--slack` 옵션을 cron 1일 1회로 등록해 사람·agent 이중 보고 체계로 격상.
+

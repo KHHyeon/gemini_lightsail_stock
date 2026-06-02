@@ -3,6 +3,9 @@
 ## 모듈
 - `src/storage/state_store.py` — 공개 도메인 API. 호출자는 본 모듈만 import 한다.
 - `src/storage/__init__.py` — 빈 패키지.
+- `src/storage/sqlite_backend.py` — A/B 도메인 SQLite 백엔드 (Phase 2).
+- `src/storage/chronicle_repo.py` — C/D 도메인 Repository (Phase 3, 본 단계 신설).
+- `src/storage/migrations/` — 버전별 마이그레이션 스크립트 (`v001_initial.py`, `v002_chronicle.py`).
 
 ## 1. 공개 함수 시그니처 (Phase 1)
 
@@ -158,3 +161,119 @@ state_store.save_portfolio(portfolio)
 - 본 PR 이후에도 `src/utils/logger.py` 의 `load_json_from_gdrive` / `save_json_to_gdrive` 는 그대로 유지된다.
 - 테스트 monkeypatch (`orch_mod.load_json_from_gdrive = ...`) 호환을 위해 **`orchestrator.py` 의 logger 함수 import 는 유지**한다 (사용 위치 0 이라도 보존).
 - `logger.record_trade` 의 self-call 도 변경하지 않는다.
+
+## 7. Phase 3 — Chronicle Repository API
+
+### 7.1 chronicle_repo 공개 함수 시그니처
+
+#### C. Chronicle 인덱스
+| 함수 | 시그니처 | 반환 | 비고 |
+|---|---|---|---|
+| 전체 조회 | `chronicle_index_list() -> list[dict]` | v2 entries 리스트 (호환 dict 형식) | 빈 인덱스면 `[]` |
+| 추가 | `chronicle_index_append(entry_dict: dict, *, full_md: str, header_md: str, body_md: str) -> None` | — | 엔트리 + 본문 + 섹션 + FTS 를 1 트랜잭션으로 atomic 저장. 호출부 단순화 |
+| 일괄 교체 | `chronicle_index_replace_all(entries: list[dict]) -> None` | — | `backfill.reset` / 마이그레이션 후 잔여 정리 용도 |
+| 카운트 | `chronicle_index_count(*, source: Optional[str] = None) -> int` | int | `source='backfill'` 등 필터 |
+| 일자 조회 | `chronicle_find_entry_by_date(chronicle_date: str) -> Optional[dict]` | dict 또는 None | 중복 작성 가드 |
+| 삭제 | `chronicle_delete_entry(entry_id: str, *, delete_report: bool = True) -> bool` | True/False | FK CASCADE 로 reports/sections/search 동기 삭제 |
+
+#### D. Chronicle 본문
+| 함수 | 시그니처 | 반환 | 비고 |
+|---|---|---|---|
+| 본문 조회 | `chronicle_get_report(entry_id: str) -> Optional[dict]` | `{header_md, body_md, full_md, chronicle_date, written_at}` 또는 None | — |
+| 본문 존재 (일자) | `chronicle_report_exists_by_date(chronicle_date: str) -> bool` | True/False | `file_exists_relative` 대체 |
+| 본문 존재 (entry_id) | `chronicle_report_exists(entry_id: str) -> bool` | True/False | — |
+| 섹션 조회 | `chronicle_list_sections(entry_id: str) -> list[dict]` | `[{section_index, section_key, section_title, body_md}, ...]` | 작성 순서 유지 |
+| 섹션 검색 | `chronicle_find_sections_by_key(section_key: str, *, limit=10) -> list[dict]` | — | "최근 action_guideline 10개" 같은 쿼리 |
+| MD 파일 목록 (호환) | `chronicle_list_md_files() -> list[dict]` | `[{entry_id, chronicle_date, full_md_size}, ...]` | `backfill.diagnose_reports / purge_leftover_*` 호환용 |
+
+#### FTS5 풀텍스트 검색
+| 함수 | 시그니처 | 반환 | 비고 |
+|---|---|---|---|
+| 검색 | `chronicle_search_fulltext(query: str, *, limit=10, section_key: Optional[str] = None) -> list[dict]` | `[{entry_id, chronicle_date, section_key, snippet}, ...]` | sqlite FTS5 `MATCH` + `snippet()` 활용 |
+| 가용성 | `chronicle_fts_available() -> bool` | True/False | FTS5 빌드 없을 시 False (정규식 폴백 동작) |
+
+#### Backfill 상태
+| 함수 | 시그니처 | 반환 | 비고 |
+|---|---|---|---|
+| 조회 | `chronicle_get_backfill_state() -> dict` | 비어있으면 `{}` | `backfill._load_state` 대체 |
+| 저장 | `chronicle_save_backfill_state(state: dict) -> None` | — | `backfill._save_state` 대체 |
+
+### 7.2 state_store 의 re-export 패턴
+```python
+# src/storage/state_store.py 끝부분 (Phase 3 추가)
+from src.storage.chronicle_repo import (
+    chronicle_index_list, chronicle_index_append, chronicle_index_replace_all,
+    chronicle_index_count, chronicle_find_entry_by_date, chronicle_delete_entry,
+    chronicle_get_report, chronicle_report_exists_by_date, chronicle_report_exists,
+    chronicle_list_sections, chronicle_find_sections_by_key, chronicle_list_md_files,
+    chronicle_search_fulltext, chronicle_fts_available,
+    chronicle_get_backfill_state, chronicle_save_backfill_state,
+)
+```
+
+호출자는 `from src.storage import state_store` 하나만 import 하면 A/B/C/D 모두 사용 가능.
+
+### 7.3 백엔드 분기 (chronicle_repo 내부)
+```python
+# src/storage/chronicle_repo.py 상단
+import os
+_BACKEND_NAME = os.getenv("STATE_STORE_BACKEND", "drive").strip().lower()
+_DB_PATH = os.getenv("STATE_STORE_DB_PATH", "data/sqlite/autostock.db")
+
+if _BACKEND_NAME == "sqlite":
+    from src.storage.chronicle_repo_sqlite import _SQLiteChronicleBackend
+    _backend = _SQLiteChronicleBackend(db_path=_DB_PATH)
+else:
+    from src.storage.chronicle_repo_drive import _DriveChronicleBackend
+    _backend = _DriveChronicleBackend()
+```
+
+분기 정책은 Phase 2 의 `state_store._resolve_backend()` 와 동일 (unknown 값 → Drive fallback + stderr 경고 1회).
+
+### 7.4 v002 마이그레이션 스크립트 (스키마)
+```python
+# src/storage/migrations/v002_chronicle.py
+VERSION = 2
+DESCRIPTION = "Phase 3: chronicle C/D + FTS5 + sections + backfill_state"
+
+def up(conn: sqlite3.Connection) -> None:
+    """chronicle_entries / chronicle_reports / chronicle_report_sections /
+    chronicle_search (FTS5) / chronicle_backfill_state 5 테이블 생성."""
+```
+
+`apply_pending` 이 자동 발견·적용. v001 적용된 DB 에 add-on 으로만 동작.
+
+### 7.5 이관 스크립트 `scripts/migrate_chronicles_to_sqlite.py`
+```
+$ python scripts/migrate_chronicles_to_sqlite.py [--db-path PATH] [--dry-run] [--no-slack] [--reports-only] [--entries-limit N]
+```
+
+옵션:
+- `--db-path`: 기본 `data/sqlite/autostock.db`.
+- `--dry-run`: 카운트 비교만. INSERT 미실행.
+- `--no-slack`: 슬랙 보고 생략 (로컬 검증).
+- `--reports-only`: chronicle_entries 가 이미 존재할 때 .md 본문/섹션/FTS 만 보강 (인덱스 INSERT 스킵).
+- `--entries-limit N`: 처리 entry 수 상한 (테스트).
+
+흐름:
+1. Drive 의 `master_index.json` 로드 + v2 가드.
+2. SQLite connect + `apply_pending` (v001 + v002).
+3. dry-run 이 아니면: `chronicle_entries` DELETE + bulk INSERT.
+4. 각 entry 의 `report_rel_path` 의 .md 본문을 Drive 에서 다운로드.
+5. 헤더/본문 분리 → 섹션 분할 → `chronicle_reports` + `chronicle_report_sections` + `chronicle_search` 동기 INSERT.
+6. `backfill_state.json` → `chronicle_backfill_state` 단일 row.
+7. 카운트 비교: Drive entries vs SQLite chronicle_entries, Drive .md 수 vs SQLite chronicle_reports, 섹션 수, FTS row 수.
+8. 결과 출력 + 슬랙 보고.
+
+종료 코드:
+- 0: 정상 (또는 dry-run).
+- 1: Drive 로드 실패 / master_index 미존재.
+- 2: SQLite 마이그레이션 실패.
+- 3: 카운트 불일치 (dry-run 제외).
+- 4: .md 본문 50% 이상 누락 (안전 정지).
+
+## 8. Phase 3 예외 정책 (Phase 2 §4 보강)
+- chronicle_repo 의 백엔드 예외는 그대로 전파한다.
+- Drive 모드: `drive_client._handle_oauth_expiry_if_needed` 가 invalid_grant 시 자동 Pause 진입 (Phase 1/2 와 동일).
+- SQLite 모드: `sqlite3.OperationalError` / FTS5 구문 오류 등은 상위로 전파.
+- 본문 헤딩 매칭 실패는 예외가 아니라 `section_key=unknown` 으로 보존 (P3F5 / P3E1 정책).

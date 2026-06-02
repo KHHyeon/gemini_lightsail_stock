@@ -2,12 +2,17 @@
 
 ## 구현율
 - v1.0 (Phase 1, 2026-06-02): 도메인 API(`state_store`) 추상화 레이어 신설. 백엔드는 Drive 그대로 위임 — **사양 정의 + 구현 100%**.
-- v1.1 (Phase 2, 진행 중): A/B 도메인 SQLite 백엔드 + 마이그레이션 러너 + 1회성 이관 스크립트.
+- v1.1 (Phase 2, 2026-06-02): A/B 도메인 SQLite 백엔드 + 마이그레이션 러너 + 1회성 이관 스크립트.
   - Step 1 (문서 사양 확정): **100%** (commit `e8e218f`).
   - Step 2 (백엔드+러너 구현): **100%** (commit `c0aaef5` + `1d73773` 보정).
-  - Step 3 (이관 스크립트+검증): **100%** (본 PR).
-  - 실 서버에 SQLite 활성화 적용 단계 (`.env` 변경) 만 운영자 수동 대기.
-- v1.2~v1.4 (Phase 3~5, 예정): Market Chronicles DB 전환(C/D 도메인), 백업 cron, Drive/OAuth 인프라 제거.
+  - Step 3 (이관 스크립트+검증): **100%** (이관 1회 성공, A/B 5 도메인 카운트 일치).
+  - Step 4 (실 서버 활성화 — `.env` 의 `STATE_STORE_BACKEND=sqlite` 적용 + `s-restart`): **100%** (2026-06-02 15:58 KST, `Bolt app is running!` 정상 기동 확인).
+  - Step 5 (M6 운영 안정성 검증 — 1~3일 모니터링): **진행 중** — 별도 agent 가 `scripts/m6_stability_check.py` 를 1일 단위로 순회. 사양: `./03_data_persistence_state_logic.md §11`.
+- v1.2 (Phase 3, 본 단계): Market Chronicles **C/D 도메인 SQLite 전환** + **FTS5 풀텍스트** + **섹션 정규화**.
+  - Step 1 (문서 사양 확정): **진행 중** (본 PR).
+  - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): 예정.
+  - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + 검증): 예정.
+- v1.3~v1.4 (Phase 4~5, 예정): 백업 cron(GitHub Private Repo / S3 / Lightsail Snapshot), Drive/OAuth 인프라 제거 + 문서 정리.
 
 ## 기능 요약
 본 봇의 영속화 책임을 **단일 도메인 API (`src/storage/state_store.py`)** 로 일원화한다.
@@ -20,14 +25,15 @@
 - **스키마 진화**: master_index v1→v2(v3.4) 같은 변화가 호출자 코드에 노출되지 않게 격리.
 - **테스트 용이성**: 메모리 백엔드 주입으로 단위 테스트 단순화.
 
-## 도메인 분류 (Phase 1 적용 대상)
-| 도메인 | 데이터 | 메서드 |
-|---|---|---|
-| A. 운영 상태 | portfolio / split_orders / theme_context / scalp_session | `get_*` / `save_*` |
-| B. 거래 이력 | trades (append-only) | `list_trades` / `replace_trades` |
-| 일괄 초기화 | A+B 4개 reset | `reset_app_data` |
-
-Market Chronicles 인덱스/본문(C/D 도메인) 은 Phase 3 에서 별도 진행.
+## 도메인 분류
+| 도메인 | 데이터 | 메서드 | 적용 Phase |
+|---|---|---|---|
+| A. 운영 상태 | portfolio / split_orders / theme_context / scalp_session | `get_*` / `save_*` | Phase 1/2 |
+| B. 거래 이력 | trades (append-only) | `list_trades` / `replace_trades` | Phase 1/2 |
+| 일괄 초기화 | A+B 4개 reset | `reset_app_data` | Phase 1/2 |
+| C. Chronicle 인덱스 | master_index.entries (v2) | `chronicle_repo.list_entries / append_entry / replace_entries / ...` | **Phase 3** |
+| D. Chronicle 본문 | reports/.md (5섹션 정규화 + FTS5) | `chronicle_repo.save_report / get_report / list_sections / search_fulltext` | **Phase 3** |
+| 운영 상태 (Chronicle) | backfill_state (단일 row) | `chronicle_repo.get_backfill_state / save_backfill_state` | **Phase 3** |
 
 ## 문서 인덱스
 - `./01_data_persistence_requirements.md`: 요구사항·제약·도메인 책임
@@ -41,11 +47,17 @@ Market Chronicles 인덱스/본문(C/D 도메인) 은 Phase 3 에서 별도 진�
 
 ## Phase 로드맵 (참고)
 1. **Phase 1 (완료, commit `1652b24` + `dad168e`)**: `state_store` 도메인 API + Drive 위임 백엔드. 호출자 6 파일 교체 (32 호출 + 6 import). **봇 동작 100% 동일**.
-2. **Phase 2 (진행 중)**: SQLite 백엔드 + `data/sqlite/autostock.db` + 마이그레이션 러너 + 수동 이관 스크립트. A/B 도메인만.
+2. **Phase 2 (완료)**: SQLite 백엔드 + `data/sqlite/autostock.db` + 마이그레이션 러너 + 수동 이관 스크립트. A/B 도메인만.
    - 환경변수 `STATE_STORE_BACKEND` (기본 `drive`, `sqlite` 명시 시 전환).
    - 환경변수 `STATE_STORE_DB_PATH` (기본 `data/sqlite/autostock.db`).
    - 이관 후 Drive 데이터는 그대로 보존 (Phase 5 에서 일괄 정리).
    - `logger.record_trade` 의 self-call 은 Phase 2.5 에서 별도 처리.
-3. **Phase 3 (예정)**: Market Chronicles C/D 도메인을 SQLite + FTS5 + `chronicle_report_sections` 정규화로 전환.
+3. **Phase 3 (본 단계)**: Market Chronicles C/D 도메인을 SQLite + FTS5 + `chronicle_report_sections` 정규화로 전환.
+   - 신규 모듈 `src/storage/chronicle_repo.py` 도입. `state_store` 는 chronicle 메서드를 re-export.
+   - SQLite 스키마 v2: `chronicle_entries` / `chronicle_reports` / `chronicle_report_sections` / `chronicle_search`(FTS5) / `chronicle_backfill_state`.
+   - `embedding_vector BLOB` 컬럼은 사전 예약 (v3.5 활성).
+   - 호출부 전환: `chronicle_writer` / `backfill` / `context_retriever` (3 파일, 20 호출).
+   - `lifecycle.py` (Drive 임시 파일 TTL 청소) 와 `migrate_master_index_v2.py` 는 Phase 3 비대상 (Phase 5 에서 통째 정리/제거).
+   - 동일 환경변수 `STATE_STORE_BACKEND=sqlite` 로 A/B + C/D 모두 활성. Phase 2 와 같은 백엔드 분기 정책 계승.
 4. **Phase 4 (예정)**: 백업 cron (GitHub Private Repo 또는 S3) + Lightsail Snapshot 2차 안전망.
 5. **Phase 5 (예정)**: Drive/OAuth 인프라 통째로 제거 + 문서 정리.

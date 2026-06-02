@@ -135,3 +135,22 @@ E4. OAuth 토큰 만료/취소 (invalid_grant, B-Type)
   - 진입점: `read_json_relative` / `write_json_relative` (L1), `logger.{load,save}_json_from_gdrive` 의 fallback (L2 안전망).
   - 재개: `python scripts/drive_oauth_setup.py --no-browser` 로 재발급 후 슬랙 `완료` 입력 시 `try_resume_after_user_ack` 가 재검증.
   - 사전 회피: Google Cloud Console 의 OAuth 동의 화면을 Production 으로 승격하여 7일 refresh_token 만료를 제거 권장.
+
+6) 저장소 백엔드 분기 (v3.5 / Phase 3)
+
+  Market Chronicles 의 모든 R/W 는 `src.storage.chronicle_repo` 를 단일 진입점으로 사용한다.
+  chronicle_repo 는 import 시점에 환경변수 `STATE_STORE_BACKEND` (기본 `drive`) 를 읽어 다음 두 백엔드 중 하나를 선택한다.
+
+  - **Drive 모드** (`STATE_STORE_BACKEND=drive` 또는 미설정):
+    - `_DriveChronicleBackend` 가 `src.memory.drive_client.*` 를 호출.
+    - master_index.json + reports/.md + backfill_state.json 모두 Google Drive 에 저장.
+    - 기존 v3.4 동작과 100% 동일 (회귀 보장).
+
+  - **SQLite 모드** (`STATE_STORE_BACKEND=sqlite`):
+    - `_SQLiteChronicleBackend` 가 `data/sqlite/autostock.db` 의 chronicle_entries / chronicle_reports / chronicle_report_sections / chronicle_search(FTS5) / chronicle_backfill_state 5 테이블을 사용.
+    - .md 본문은 헤딩 단위로 5 섹션 정규화되어 저장. FTS5 풀텍스트 인덱싱 동시 수행.
+    - context_retriever 의 8단계 점수화 로직은 변경하지 않는다 (위험 격리).
+    - 검색 효율 강화는 별도 API `chronicle_search_fulltext(query, ...)` 로 노출 (v3.5+ 활용).
+
+  본 분기는 chronicle_writer / backfill / context_retriever 의 호출부에 노출되지 않는다 (Repository 패턴).
+  자세한 스키마·매핑·마이그레이션 절차는 `Doc/features/data_persistence/03_data_persistence_state_logic.md §11` 참조.
