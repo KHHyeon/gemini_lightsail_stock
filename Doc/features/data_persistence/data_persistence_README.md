@@ -7,7 +7,7 @@
   - Step 2 (백엔드+러너 구현): **100%** (commit `c0aaef5` + `1d73773` 보정).
   - Step 3 (이관 스크립트+검증): **100%** (이관 1회 성공, A/B 5 도메인 카운트 일치).
   - Step 4 (실 서버 활성화 — `.env` 의 `STATE_STORE_BACKEND=sqlite` 적용 + `s-restart`): **100%** (2026-06-02 15:58 KST, `Bolt app is running!` 정상 기동 확인).
-  - Step 5 (M6 운영 안정성 검증 — 1~3일 모니터링): **Day 1 PASS (2026-06-02)** — 별도 agent 가 `scripts/m6_stability_check.py` 를 1일 단위로 순회. Day 1 3회차 실측 (회귀 FAIL 0건, C05 매칭 확정) 기록은 `./03_data_persistence_state_logic.md §11.8.3.1` 참조. Day 2/3 진행 예정.
+  - Step 5 (M6 운영 안정성 검증 — 1~3일 모니터링): **Day 1~3 PASS (2026-06-02 ~ 06-05)** — 별도 agent 가 `scripts/m6_stability_check.py` 를 1일 단위로 순회. Day 1 기록은 `./03_data_persistence_state_logic.md §11.8.3.1`, Day 2/3 기록은 `§11.8.3.2` 참조. **Phase 2 SQLite 백엔드 안정성 검증 완료**(68h 무중단 + `PRAGMA integrity_check=ok` + 슬랙 응답성 + 도메인 write + Drive 폴백 누출 0건). 표면화된 점검 도구 보강 3건(S1 C08 윈도우/regex, S2 C09 since ISO, S3 C17~C19 헬퍼)은 `§11.8.4` 확정 명세로 함께 정리.
 - v1.2 (Phase 3, 본 단계): Market Chronicles **C/D 도메인 SQLite 전환** + **FTS5 풀텍스트** + **섹션 정규화**.
   - Step 1 (문서 사양 확정): **100%** (commit `e608ad8`).
   - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): **100%** (commit `935203f` — 신설 3 파일 + 수정 4 파일 + 라운드트립 검증 PASS).

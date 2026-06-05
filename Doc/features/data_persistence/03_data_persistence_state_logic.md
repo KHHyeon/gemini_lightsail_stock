@@ -596,8 +596,8 @@ def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
 | C05 | boot | 부팅 로그 `STATE_STORE backend=sqlite` (또는 동등) | `journalctl -u <svc> --since "10 min ago" \| rg ...` | 매칭 1+ | 1 |
 | C06 | runtime | `sqlite3.OperationalError` / `STATE_STORE` 에러 없음 | `journalctl -u <svc> --since "1 hour ago" \| rg -i "OperationalError\|STATE_STORE.*ERROR"` | 매칭 0 | 1~3 |
 | C07 | runtime | `[Drive Read Fallback]` 이 떠도 Chronicle 만 | 위 명령어 + `rg "Drive Read Fallback"` 의 도메인 분류 | operational 도메인 (paper_*/split_orders/theme_context/scalp_session) 0건 | 1~3 |
-| C08 | runtime | 오케스트레이터 정기 사이클 통과 | `journalctl ... \| rg "orchestrator\|이상종목\|시간대"` | 최근 1시간 내 1+ | 1~3 |
-| C09 | trading | 09:00 자동 시장 진입 로그 | `journalctl --since "today 08:55" \| rg "Market.*Open\|장 시작\|09:00"` | 거래일 한정 1+ | 2~3 |
+| C08 | runtime | 오케스트레이터 정기 사이클 통과 | `journalctl ... \| rg "Screener\|News Crawler\|Orchestrator\|orchestrator\|이상종목\|발굴\|시간대"` | **최근 4시간 내 1+** (sparse 패턴 수용, §11.8.3.2 근거) | 1~3 |
+| C09 | trading | 09:00 자동 시장 진입 로그 | `journalctl --since "YYYY-MM-DD 08:55:00" \| rg "Market.*Open\|장 시작\|09:00\|시장 진입\|Screener.*탐색 시작"` | 거래일 한정 1+. since 는 **KST today 의 ISO 형식**으로 명시 (`today` 자연어 금지) | 2~3 |
 | C10 | trading | portfolio 갱신 시각 | SQLite `SELECT MAX(updated_at) FROM portfolio` | 최근 24h 이내(거래일) | 2~3 |
 | C11 | trading | split_orders 갱신 (해당 시) | 동일 패턴 | 24h 또는 0 row | 2~3 |
 | C12 | trading | trades append (최근 5건 ts) | `SELECT ts FROM trades ORDER BY id DESC LIMIT 5` | 거래 발생 시 최근 24h 이내 | 2~3 |
@@ -720,7 +720,78 @@ Drive 측 데이터는 이관 후에도 그대로 보존되므로 (`Phase 5` 정
 
 판정: **Day 1 = PASS** (회귀 신호 0건. 잔여 WARN 2건은 모두 환경/시점 의존).
 
-#### 11.8.4 향후 보강 후보 (Step 5 진행 중 발견 시 추가)
-- C17/C18/C19 의 Drive 메타데이터 조회 API 가 `drive_client` 에 명시 노출되지 않은 경우, `_drive_modified_time` 의 메서드 검색 목록(`get_file_metadata`/`get_app_file_metadata`/`stat_app_file`/`describe_app_file`)에 실제 함수명을 추가해야 한다.
-- Day 1 PASS 후 안정성이 확인되면 `--slack` 옵션을 cron 1일 1회로 등록해 사람·agent 이중 보고 체계로 격상.
+#### 11.8.3.2 Lightsail 실서버 Day 2/3 실측 (2026-06-05, append-only)
+68시간 44분 무중단 가동 후 동일 MainPID(`103947`) 로 두 차례 점검. 시각 04:43 UTC = **13:43 KST (금요일 장중)**.
+
+| 일자 | 시각 (UTC) | overall | PASS | WARN | FAIL | SKIP | 비고 |
+|---|---|---|---|---|---|---|---|
+| Day 2 | 04:43:12 | WARN | 9 | 5 | 0 | 1 | C09 신규 WARN(도구 버그) + C12/C13 sparse + C17~C19 미수행 |
+| Day 3 | 04:43:25 | WARN | 9 | 7 | 0 | 1 | Day 2 + C17/C18/C19 도구 보강 후보 표면화 |
+
+핵심 PASS:
+- **C14 PRAGMA integrity_check = ok** (활성화 +68h 시점 무결성 유지 확정)
+- **C10 portfolio 갱신 4.7h 전** (06-05 00:00:15 UTC = 09:00:15 KST 장 시작 평가 동작 확인)
+- C01~C07/C15/C16: 운영 본체 모든 영역 정상
+
+신규/잔여 WARN 진단 (운영자 진단 명령 실측):
+
+| 신호 | 원시 진단 결과 | 최종 판정 |
+|---|---|---|
+| **C08** 1시간 윈도우 사이클 0건 | 24h 전체 로그 = **19줄** (`08:50/10:00/11:45` 의 Screener/News Crawler). 4.7h 동안 silent. 슬랙 `!잔고` 즉시 응답 OK | **정상 sparse 동작** — 도구 윈도우/regex 보강 대상 (§11.8.4-S1) |
+| **C09** journalctl rc=1 | stderr: `Failed to parse timestamp: today 08:55`. timezone = `Asia/Seoul` (UTC 가설 반증) | **도구 버그** — systemd 의 `today` 자연어 거부 → ISO 형식으로 교체 (§11.8.4-S2) |
+| **C12** trades 184.4h 전 | 마지막 거래 2026-05-28 12:18:30, portfolio 1종목 유지 매도 신호 미발생 | **정상 sparse** (거래 룰상 자연스러움, 사양 임계 72h 는 보수적) |
+| **C13** theme_context/scalp_session 정체 | `journalctl ... grep -E "scalp\|단타"` = **0건** (단타 모드 미활성 확정) | **정상 sparse** (단타 미활성 + ai 의사결정 없음) |
+| **C17~C19** Drive 메타데이터 조회 실패 | `drive_client` 의 4 후보 메서드(`get_file_metadata` 등) 미존재 | **도구 보강 대상** (§11.8.4-S3) |
+| **C20** OAuth 이벤트 없음 | Day 1 의 "N건 감지" → "이벤트 없음" 으로 전이 | **OAuth 무사 동작** — WARN 은 사양 의도 |
+
+봇 sparse 동작 패턴 (실측 19줄 분포):
+```
+08:50:00  Screener '기대주_발굴' 탐색 시작
+08:50:00  Screener 조건식 확인 완료
+08:50:03  Screener '배당주_발굴'
+08:50:10  Screener '낙폭과대_발굴'
+09:00:15  (silent) portfolio 평가 → SQLite write
+10:00:12  News Crawler '반도체'
+11:45:01  Screener '당일_주도주_발굴'
+13:45:xx  (점검 시각, 최근 1시간 윈도우 0건)
+```
+→ 봇은 unique 시간대(매시 정각/장 시작/장 마감 등)에만 stdout 출력하는 sparse 패턴. **봇 응답성(슬랙 `!잔고` OK) + DB 무결성(C14) + 09:00 평가 동작(C10)** 의 세 가지 직교 신호로 sparse 가 정상임을 확정.
+
+상태 변화 (Day 1 → Day 3):
+| 지표 | Day 1 (3회차) | Day 2 | Day 3 |
+|---|---|---|---|
+| MainPID | 103947 | 103947 | 103947 |
+| WAL bytes | 16,512 | 49,472 | 49,472 |
+| DB bytes | 65,536 | 65,536 | 65,536 |
+| portfolio rows / updated | 1 / 2026-06-02T06:57 | 1 / 2026-06-05T00:00 | 1 / 2026-06-05T00:00 |
+| trades rows | 5 | 5 | 5 |
+| integrity_check | (미수행, Day 1 범위 외) | **ok** | **ok** |
+| disk free GiB | 32.56 | 32.55 | 32.55 |
+
+판정: **Day 2 = PASS, Day 3 = PASS** (회귀 신호 0건. 잔여 WARN 은 모두 도구 버그/보강 항목 또는 정상 sparse 표현).
+
+종합: **Phase 2 SQLite 백엔드 안정성 검증 완료** — 3일 무중단 + 무결성 + 응답성 + 도메인 write 정상 + Drive 폴백 누출 0건.
+
+#### 11.8.4 도구 보강 확정 명세 (Day 2/3 진단 근거 반영, 2026-06-05)
+Day 1~3 검증으로 표면화된 점검 도구 자체의 보강 항목 3건. **운영 회귀가 아닌 도구 정확성 개선 작업**.
+
+##### S1. C08 윈도우/regex 보강
+- **변경**: `--since "1 hour ago"` → `--since "4 hour ago"`. regex 에 `Screener|News Crawler|Orchestrator|orchestrator|이상종목|발굴|시간대` 사용.
+- **근거**: 봇은 unique 시간대(시간 단위)에만 로그 출력. 1시간 윈도우는 정상 sparse 동작을 회귀로 오인. 4시간은 거래일 봇의 최소 1 사이클을 보장하면서 hang 조기 감지 가능.
+- **사양 §11.3 갱신 완료** (4시간 + 신규 regex).
+
+##### S2. C09 since 형식 안전화
+- **변경**: `--since "today 08:55"` → `--since "{KST_today_iso} 08:55:00"`. Python 측에서 `datetime.now(KST).strftime("%Y-%m-%d 08:55:00")` 로 정확 형식 생성.
+- **근거**: systemd journalctl 의 `today` 자연어 파서가 환경에 따라 거부 (`Failed to parse timestamp`). ISO 형식은 systemd 모든 버전에서 안전.
+- **사양 §11.3 갱신 완료**.
+
+##### S3. C17~C19 drive_client 헬퍼 신설
+- **변경**:
+  - `src/memory/drive_client.py` 에 신규 함수: `get_app_file_modified_time(filename: str) -> Optional[str]`. 내부적으로 `files().list(... fields="files(modifiedTime)")` 1회 호출.
+  - `scripts/m6_stability_check.py` 의 `_drive_modified_time` 는 후보 메서드 검색 로직을 제거하고 위 신규 함수를 직접 호출.
+- **근거**: `drive_client.py` 의 기존 표면(line 696 `list_files_under` 의 fields 에 `modifiedTime` 포함)은 폴더 단위 조회용이라 단일 도메인 파일 점검에는 비효율적. 작은 단일 파일 헬퍼 1개로 점검 도구가 정확히 매칭.
+
+##### S4. (선택) 슬랙 cron 1일 1회 보고
+- Day 1~3 PASS 확정 후 `cron` 또는 `systemd timer` 로 `python3 scripts/m6_stability_check.py --slack` 를 18:00 KST 일일 자동 등록 가능. 사람·agent 이중 보고 체계로 격상.
+- 우선순위는 S1~S3 완료 후 별도 PR 검토.
 

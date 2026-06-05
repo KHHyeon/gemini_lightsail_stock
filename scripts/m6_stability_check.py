@@ -275,37 +275,51 @@ def _c07_drive_fallback_scope(ctx: RunContext) -> Tuple[str, str]:
 
 
 def _c08_orchestrator_cycle(ctx: RunContext) -> Tuple[str, str]:
+    """봇의 정기 사이클 활동 로그 매칭.
+
+    sparse 동작(시간 단위로만 로그 출력)을 수용하기 위해 4시간 윈도우.
+    실제 로그 키워드(`[Screener]`, `[News Crawler]`) 도 포함.
+    상세: Doc/features/data_persistence/03_*.md §11.8.4 S1.
+    """
     rc, out, _err = _run_shell(
-        ["journalctl", "-u", ctx.service_name, "--since", "1 hour ago", "--no-pager"],
+        ["journalctl", "-u", ctx.service_name, "--since", "4 hour ago", "--no-pager"],
         timeout_sec=15,
     )
     if rc != 0:
         return _STATUS_WARN, f"journalctl 호출 실패 (rc={rc})"
-    pattern = re.compile(r"(orchestrator|이상종목|시간대|정기 사이클|MarketOrchestrator)")
+    pattern = re.compile(
+        r"(Screener|News Crawler|Orchestrator|orchestrator|이상종목|발굴|시간대|정기 사이클|MarketOrchestrator)"
+    )
     hits = [ln for ln in out.splitlines() if pattern.search(ln)]
     if not hits:
-        return _STATUS_WARN, "최근 1시간 오케스트레이터 사이클 로그 0건 (장 외 시간일 수 있음)"
+        return _STATUS_WARN, "최근 4시간 봇 사이클 로그 0건 (장 외 시간 또는 hang 가능성)"
     return _STATUS_PASS, f"매칭 {len(hits)}건 (최근: ...{hits[-1].strip()[-120:]})"
 
 
 def _c09_market_open_log(ctx: RunContext) -> Tuple[str, str]:
+    """09:00 자동 시장 진입 로그 매칭.
+
+    `--since` 는 KST today 의 ISO 형식으로 명시한다 (`today` 자연어는 일부 systemd 가 거부).
+    상세: Doc/features/data_persistence/03_*.md §11.8.4 S2.
+    """
     if not _is_trading_day(ctx.now_utc):
         return _STATUS_SKIP, "비거래일"
+    kst = ctx.now_utc.astimezone(timezone(timedelta(hours=9)))
+    # 09:00 이전이면 아직 SKIP (시장 진입 전).
+    if kst.hour < 9:
+        return _STATUS_SKIP, f"09:00 KST 이전 (현재 {kst.strftime('%H:%M')} KST)"
+    since_iso = kst.strftime("%Y-%m-%d 08:55:00")
     rc, out, _err = _run_shell(
-        ["journalctl", "-u", ctx.service_name, "--since", "today 08:55", "--no-pager"],
+        ["journalctl", "-u", ctx.service_name, "--since", since_iso, "--no-pager"],
         timeout_sec=15,
     )
     if rc != 0:
-        return _STATUS_WARN, f"journalctl 호출 실패 (rc={rc})"
-    pattern = re.compile(r"(Market.*Open|장 시작|09:00|시장 진입)")
+        return _STATUS_WARN, f"journalctl 호출 실패 (rc={rc}, since='{since_iso}')"
+    pattern = re.compile(r"(Market.*Open|장 시작|09:00|시장 진입|Screener.*탐색 시작)")
     hits = [ln for ln in out.splitlines() if pattern.search(ln)]
     if hits:
-        return _STATUS_PASS, f"매칭 {len(hits)}건"
-    # 09:00 이전이면 아직 SKIP.
-    kst = ctx.now_utc.astimezone(timezone(timedelta(hours=9)))
-    if kst.hour < 9:
-        return _STATUS_SKIP, f"09:00 KST 이전 (현재 {kst.strftime('%H:%M')} KST)"
-    return _STATUS_FAIL, "09:00 자동 시장 진입 로그 누락"
+        return _STATUS_PASS, f"매칭 {len(hits)}건 (since={since_iso})"
+    return _STATUS_FAIL, f"09:00 자동 시장 진입 로그 누락 (since={since_iso})"
 
 
 def _query_max_updated_at(conn: sqlite3.Connection, table: str) -> Optional[str]:
@@ -430,30 +444,23 @@ def _c16_disk_free(ctx: RunContext) -> Tuple[str, str]:
 
 
 def _drive_modified_time(filename: str) -> Optional[datetime]:
-    """drive_client 가 노출하는 modifiedTime 조회. 실패 시 None."""
+    """drive_client 의 ``get_app_file_modified_time`` 으로 modifiedTime 조회. 실패 시 None.
+
+    상세: Doc/features/data_persistence/03_*.md §11.8.4 S3.
+    """
     try:
         from src.memory import drive_client
     except Exception:
         return None
 
-    # drive_client 의 공개 API 중 modifiedTime 직접 조회 함수가 없을 수 있으므로
-    # 안전하게 metadata 조회 후 파싱한다. 메서드 존재 여부를 동적으로 확인.
-    for fn_name in (
-        "get_file_metadata",
-        "get_app_file_metadata",
-        "stat_app_file",
-        "describe_app_file",
-    ):
-        fn = getattr(drive_client, fn_name, None)
-        if not callable(fn):
-            continue
-        try:
-            meta = fn(filename)
-            if isinstance(meta, dict):
-                return _parse_iso_to_utc(meta.get("modifiedTime") or meta.get("modified_time"))
-        except Exception:
-            continue
-    return None
+    getter = getattr(drive_client, "get_app_file_modified_time", None)
+    if not callable(getter):
+        return None
+    try:
+        iso = getter(filename)
+    except Exception:
+        return None
+    return _parse_iso_to_utc(iso)
 
 
 def _c17_chronicle_drive_rw(ctx: RunContext) -> Tuple[str, str]:

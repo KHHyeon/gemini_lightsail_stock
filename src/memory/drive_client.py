@@ -681,6 +681,37 @@ def write_app_json(filename, data):
     write_json_relative(rel, data)
 
 
+def get_app_file_modified_time(filename):
+    """app_data/<filename> 의 Google Drive modifiedTime(ISO 문자열) 반환.
+
+    파일이 없거나 조회 실패 시 ``None``.
+    M6 운영 안정성 점검 도구(scripts/m6_stability_check.py C17~C19)가 사용한다.
+    Doc/features/data_persistence/03_data_persistence_state_logic.md §11.8.4 S3 근거.
+    """
+    rel = f"{APP_DATA_PREFIX}/{filename}"
+    try:
+        _check_pause_guard()
+        svc, _root_id, parent_id, fname = _folder_id_for_relative(rel)
+        q = (
+            f"'{parent_id}' in parents and name='{_escape_query_value(fname)}' "
+            "and trashed=false"
+        )
+        res = svc.files().list(
+            q=q,
+            fields="files(id,name,modifiedTime)",
+            pageSize=1,
+            **_shared_drive_kwargs(),
+        ).execute()
+        files = res.get("files", [])
+        if not files:
+            return None
+        return files[0].get("modifiedTime")
+    except Exception as e:
+        # OAuth 만료는 일관 처리하되, 본 함수는 점검 도구용이므로 회귀로 오인되지 않게 None 반환.
+        _handle_oauth_expiry_if_needed(e)
+        return None
+
+
 def list_files_under(relative_folder_prefix):
     _check_pause_guard()
     svc = _get_service()
