@@ -605,8 +605,8 @@ def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
 | C14 | backup | PRAGMA integrity_check | `conn.execute("PRAGMA integrity_check")` | `[('ok',)]` | 2~3 |
 | C15 | backup | WAL 파일 < 10MB | `os.stat(db_path + "-wal").st_size` | < 10 \* 1024 \* 1024 | 1~3 |
 | C16 | backup | 디스크 여유 공간 | `shutil.disk_usage('/')` | free > 1 GiB | 1~3 |
-| C17 | regression | master_index.json Drive 갱신 (Chronicle 정상 R/W) | `drive_client.get_file_modified_time('master_index.json')` | 최근 24h 이내(보고일 기준) | 3 |
-| C18 | regression | paper_portfolio.json Drive 더 이상 갱신 X | 동일 + mtime 비교 | mtime < SQLite 활성화 시각 | 3 |
+| C17 | regression | master_index.json Drive 갱신 (Chronicle 정상 R/W) | `drive_client.get_relative_file_modified_time('MarketChronicles/index/master_index.json')` | 최근 24h 이내(보고일 기준) | 3 |
+| C18 | regression | paper_portfolio.json Drive 더 이상 갱신 X | `drive_client.get_app_file_modified_time(...)` + mtime 비교 | mtime <= SQLite cutover 시각(+24h 유예창) | 3 |
 | C19 | regression | paper_trades.json Drive 더 이상 갱신 X | 동일 | 동일 | 3 |
 | C20 | regression | OAuth 만료 시 Pause 트리거 정상 | 슬랙 알림 패턴 매칭 (수동 시나리오) | WARN(자동 단정 불가) | 1~3 |
 
@@ -655,7 +655,7 @@ Drive 측 데이터는 이관 후에도 그대로 보존되므로 (`Phase 5` 정
 - 진입점: `main(argv: Optional[List[str]] = None) -> int`.
 - argparse 옵션: `--db-path`, `--service`, `--day`, `--json`, `--slack` (§11.2 표와 일치).
 - 핵심 자료구조:
-  - `RunContext` (dataclass) — `db_path`, `wal_path`, `service_name`, `day_filter`, `now_utc`, `sqlite_activation_ts`.
+  - `RunContext` (dataclass) — `db_path`, `wal_path`, `service_name`, `day_filter`, `now_utc`, `sqlite_activation_ts`, `sqlite_cutover_ts`.
   - `CheckResult` (dataclass) — `check_id`, `category`, `day_scope`, `label`, `status`, `detail`, `elapsed_ms`.
 - 점검 매트릭스 `_CHECK_LIST`: 20 항목 (C01~C20) 을 §11.3 표 순서 그대로 등록.
 - 점검 함수 시그니처 규약:
@@ -692,7 +692,8 @@ Drive 측 데이터는 이관 후에도 그대로 보존되므로 (`Phase 5` 정
   - DB/WAL 파일 크기, `/` 파티션 여유/총량(GiB)
 - SQLite 활성화 시각 `_resolve_sqlite_activation_ts`:
   - 우선: `schema_version.applied_at` (v1) → 다음: DB 파일 mtime.
-  - C18/C19 의 "활성화 이후 Drive 갱신 발생" 판정 기준 시각.
+  - `sqlite_cutover_ts`(신규)는 journalctl 의 `[STATE_STORE] backend=sqlite` 최초 부팅 로그 시각을 우선 사용.
+  - C18/C19 의 Drive 정체 판정은 `sqlite_cutover_ts`(+24h 유예창) 기준으로 수행.
 
 #### 11.8.3 Windows 환경 smoke 결과 (검증 자체는 Lightsail 에서 수행)
 - Windows 에서 `--json --day 1` 실행 시: `C01~C04` 정확히 `FAIL`, `C05~C08/C15/C20` 정확히 `WARN`, `C16` 만 `PASS`, exit code `2`. **점검 함수의 예외 안전성과 종합 판정 로직이 사양 §11.4 와 정확히 일치함을 확인.**
@@ -787,11 +788,22 @@ Day 1~3 검증으로 표면화된 점검 도구 자체의 보강 항목 3건. **
 
 ##### S3. C17~C19 drive_client 헬퍼 신설
 - **변경**:
-  - `src/memory/drive_client.py` 에 신규 함수: `get_app_file_modified_time(filename: str) -> Optional[str]`. 내부적으로 `files().list(... fields="files(modifiedTime)")` 1회 호출.
-  - `scripts/m6_stability_check.py` 의 `_drive_modified_time` 는 후보 메서드 검색 로직을 제거하고 위 신규 함수를 직접 호출.
+  - `src/memory/drive_client.py` 에 신규 함수:
+    - `get_relative_file_modified_time(rel_path: str) -> Optional[str>`
+    - `get_app_file_modified_time(filename: str) -> Optional[str]` (wrapper)
+  - `scripts/m6_stability_check.py` 는 C17에서 `MarketChronicles/index/master_index.json` 상대경로 조회를 사용하고, C18/C19는 app_data wrapper를 사용.
 - **근거**: `drive_client.py` 의 기존 표면(line 696 `list_files_under` 의 fields 에 `modifiedTime` 포함)은 폴더 단위 조회용이라 단일 도메인 파일 점검에는 비효율적. 작은 단일 파일 헬퍼 1개로 점검 도구가 정확히 매칭.
 
-##### S4. (선택) 슬랙 cron 1일 1회 보고
+##### S4. C18 기준시각 보정 (활성화 vs cutover)
+- **변경**:
+  - C18/C19 비교 기준시각을 `schema_version(v1).applied_at` 단일값에서 `sqlite_cutover_ts` 로 승격.
+  - `sqlite_cutover_ts` 는 journalctl 의 `[STATE_STORE] backend=sqlite` 최초 부팅 로그 시각(UTC)으로 추정.
+  - cutover 직후 잔여 write 오탐 방지를 위해 `+24h` 유예창 허용.
+- **근거**:
+  - `schema_version.applied_at` 는 "스키마 생성 시각"이며 실제 Drive 쓰기 완전 중단(cutover) 시각과 다를 수 있다.
+  - Day3 실측에서 `paper_portfolio.json` 이 cutover 전/직후 이력으로 남아 C18 오탐 FAIL 발생.
+
+##### S5. (선택) 슬랙 cron 1일 1회 보고
 - Day 1~3 PASS 확정 후 `cron` 또는 `systemd timer` 로 `python3 scripts/m6_stability_check.py --slack` 를 18:00 KST 일일 자동 등록 가능. 사람·agent 이중 보고 체계로 격상.
-- 우선순위는 S1~S3 완료 후 별도 PR 검토.
+- 우선순위는 S1~S4 완료 후 별도 PR 검토.
 

@@ -93,6 +93,7 @@ class RunContext:
     day_filter: Optional[int]
     now_utc: datetime
     sqlite_activation_ts: Optional[datetime] = field(default=None)
+    sqlite_cutover_ts: Optional[datetime] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -443,8 +444,8 @@ def _c16_disk_free(ctx: RunContext) -> Tuple[str, str]:
     return _STATUS_FAIL, f"/ free={free_gib:.2f} GiB < 1 GiB"
 
 
-def _drive_modified_time(filename: str) -> Optional[datetime]:
-    """drive_client 의 ``get_app_file_modified_time`` 으로 modifiedTime 조회. 실패 시 None.
+def _drive_modified_time(filename: str, *, rel_path: bool = False) -> Optional[datetime]:
+    """Drive modifiedTime 조회. 실패 시 None.
 
     상세: Doc/features/data_persistence/03_*.md §11.8.4 S3.
     """
@@ -453,7 +454,8 @@ def _drive_modified_time(filename: str) -> Optional[datetime]:
     except Exception:
         return None
 
-    getter = getattr(drive_client, "get_app_file_modified_time", None)
+    getter_name = "get_relative_file_modified_time" if rel_path else "get_app_file_modified_time"
+    getter = getattr(drive_client, getter_name, None)
     if not callable(getter):
         return None
     try:
@@ -464,7 +466,7 @@ def _drive_modified_time(filename: str) -> Optional[datetime]:
 
 
 def _c17_chronicle_drive_rw(ctx: RunContext) -> Tuple[str, str]:
-    mtime = _drive_modified_time("master_index.json")
+    mtime = _drive_modified_time("MarketChronicles/index/master_index.json", rel_path=True)
     if mtime is None:
         return _STATUS_WARN, "Drive 메타데이터 조회 API 없음/실패 (수동 확인 필요)"
     hours = _hours_since(mtime, ctx.now_utc)
@@ -487,14 +489,22 @@ def _drive_stale_check(filename: str, ctx: RunContext) -> Tuple[str, str]:
     mtime = _drive_modified_time(filename)
     if mtime is None:
         return _STATUS_WARN, f"{filename} Drive 메타데이터 조회 실패 (수동 확인 필요)"
-    activation = ctx.sqlite_activation_ts
-    if activation is None:
+    # cutover(실제 sqlite 부팅 전환 시각) 우선. 없으면 schema 기반 활성화 시각으로 폴백.
+    cutover = ctx.sqlite_cutover_ts or ctx.sqlite_activation_ts
+    if cutover is None:
         return _STATUS_WARN, f"{filename} mtime={mtime.isoformat()} (SQLite 활성화 시각 미상)"
-    if mtime <= activation:
-        return _STATUS_PASS, f"{filename} mtime={mtime.isoformat()} <= 활성화시각 (정상 정체)"
-    delta_h = (mtime - activation).total_seconds() / 3600.0
+    # cutover 직후 잔여 write 오탐 방지를 위한 유예창 24시간.
+    grace_deadline = cutover + timedelta(hours=24)
+    if mtime <= cutover:
+        return _STATUS_PASS, f"{filename} mtime={mtime.isoformat()} <= cutover 시각 (정상 정체)"
+    if mtime <= grace_deadline:
+        delta_h = (mtime - cutover).total_seconds() / 3600.0
+        return _STATUS_PASS, (
+            f"{filename} mtime={mtime.isoformat()} (cutover +{delta_h:.1f}h, 유예창 24h 내)"
+        )
+    delta_h = (mtime - cutover).total_seconds() / 3600.0
     return _STATUS_FAIL, (
-        f"{filename} mtime={mtime.isoformat()} > 활성화시각 (활성화 {delta_h:.1f}h 이후에도 갱신됨)"
+        f"{filename} mtime={mtime.isoformat()} > cutover+24h (cutover +{delta_h:.1f}h 이후 갱신)"
     )
 
 
@@ -665,6 +675,42 @@ def _resolve_sqlite_activation_ts(ctx: RunContext) -> Optional[datetime]:
         return datetime.fromtimestamp(ts, tz=timezone.utc)
     except OSError:
         return None
+
+
+def _resolve_sqlite_cutover_ts(ctx: RunContext) -> Optional[datetime]:
+    """journalctl 에서 sqlite 백엔드 최초 부팅 로그 시각(UTC) 추정.
+
+    출력 포맷은 `-o short-unix` 를 사용해 locale 영향 없이 epoch 초를 파싱한다.
+    """
+    rc, out, _err = _run_shell(
+        [
+            "journalctl",
+            "-u",
+            ctx.service_name,
+            "--since",
+            "30 day ago",
+            "--no-pager",
+            "-o",
+            "short-unix",
+        ],
+        timeout_sec=20,
+    )
+    if rc != 0 or not out:
+        return None
+    epoch_list: List[float] = []
+    for line in out.splitlines():
+        if "[STATE_STORE]" not in line or "backend=sqlite" not in line:
+            continue
+        m = re.match(r"^(\d+(?:\.\d+)?)\s", line.strip())
+        if not m:
+            continue
+        try:
+            epoch_list.append(float(m.group(1)))
+        except ValueError:
+            continue
+    if not epoch_list:
+        return None
+    return datetime.fromtimestamp(min(epoch_list), tz=timezone.utc)
 
 
 def _run_all_checks(ctx: RunContext) -> List[CheckResult]:
@@ -938,6 +984,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             now_utc=_utcnow(),
         )
         ctx.sqlite_activation_ts = _resolve_sqlite_activation_ts(ctx)
+        ctx.sqlite_cutover_ts = _resolve_sqlite_cutover_ts(ctx) or ctx.sqlite_activation_ts
 
         results = _run_all_checks(ctx)
         stats = _collect_stats(ctx)
