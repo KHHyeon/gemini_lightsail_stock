@@ -11,7 +11,7 @@
 - v1.2 (Phase 3, 본 단계): Market Chronicles **C/D 도메인 SQLite 전환** + **FTS5 풀텍스트** + **섹션 정규화**.
   - Step 1 (문서 사양 확정): **100%** (commit `e608ad8`).
   - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): **100%** (commit `935203f` — 신설 3 파일 + 수정 4 파일 + 라운드트립 검증 PASS).
-  - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + smoke + 검증): **100%** (본 PR — 이관 스크립트 8단계 + tests/smoke_chronicle_repo.py 7/7 PASS).
+  - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + smoke + 검증): **100%** (이관 스크립트 8단계 + tests/smoke_chronicle_repo.py 7/7 PASS + **실 서버 이관 1회 성공** — 2026-06-05, 40 entries / 160 sections / 160 FTS rows, skipped 0건, 카운트 100% 일치, 소요 63.34s).
 - v1.3~v1.4 (Phase 4~5, 예정): 백업 cron(GitHub Private Repo / S3 / Lightsail Snapshot), Drive/OAuth 인프라 제거 + 문서 정리.
 
 ## 기능 요약

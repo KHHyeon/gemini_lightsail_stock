@@ -547,8 +547,20 @@ def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
   - [5/7] UPSERT 본문 보존 (`md_len=290`, sections=4, replace_all 전후 동일)
   - [6/7] FK CASCADE delete_entry → 본문/섹션 동기 삭제
   - [7/7] schema_version v1 + v2 양 row 기록
-- ✅ **§11.8 체크리스트 잔여 항목**: smoke 통합 테스트 항목 완료. 실 서버 동작 확인은 별도 agent 에서 실행 후 본 §12.2 에 카운트 첨부 예정.
-- ⏳ **실 서버 1회 실행 결과**: 운영자가 `python scripts/migrate_chronicles_to_sqlite.py --dry-run` 으로 카운트 확인 → `--no-slack` 또는 정식 실행으로 이관 완료 후, 결과 카운트(entries/.md/sections/search/backfill_state) 를 본 섹션에 추기.
+- ✅ **§11.8 체크리스트 잔여 항목**: smoke 통합 테스트 항목 완료.
+- ✅ **실 서버 1회 실행 결과 (2026-06-05, LightSail `/home/ubuntu/my_bot`)**:
+  ```
+  [Step 1/8] master_index.entries : 40건 / backfill_state.json : 있음
+  [Step 2/8] SQLite 부트스트랩 OK / FTS5 가용성 : 활성
+  [Step 4/8] chronicle_entries : 40건 INSERT 완료
+  [Step 5/8] chronicle_reports : 40건 / sections : 160건 / search(FTS5) : 160건 / skipped : 0건
+  [Step 6/8] chronicle_backfill_state : 1건 (UPSERT)
+  [Step 7/8] 모든 카운트 OK (entries 40==40, reports 40==40, backfill_state 1==1)
+  [Step 8/8] 성공. 소요 63.34s
+  ```
+  - **평균 섹션 수**: 160 / 40 = 정확히 4.0 → 5종 분류 룰이 모든 entry 에 안정 적용 (모든 .md 가 4 섹션 구조 = `intraday_flow / event_and_cause / action_guideline / one_line_summary`, `unknown` 0건).
+  - **본문 누락 0건**: P3E3 격리 분기 미발동. master_index ↔ Drive reports/*.md 정합 100%.
+  - **FTS5 활성** 확인 → `chronicle_search_fulltext(...)` 가 운영 환경에서 즉시 사용 가능.
 
 ## 11. M6 운영 안정성 운반대 (Runbook, Phase 2 Step 5)
 ### 11.1 목적/대상/주기
