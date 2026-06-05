@@ -243,34 +243,38 @@ def up(conn: sqlite3.Connection) -> None:
 
 `apply_pending` 이 자동 발견·적용. v001 적용된 DB 에 add-on 으로만 동작.
 
-### 7.5 이관 스크립트 `scripts/migrate_chronicles_to_sqlite.py`
+### 7.5 이관 스크립트 `scripts/migrate_chronicles_to_sqlite.py` (Phase 3 Step 3 신설, 실측 갱신)
 ```
-$ python scripts/migrate_chronicles_to_sqlite.py [--db-path PATH] [--dry-run] [--no-slack] [--reports-only] [--entries-limit N]
+$ python scripts/migrate_chronicles_to_sqlite.py [--db-path PATH] [--dry-run] [--no-slack] [--no-reports]
 ```
 
-옵션:
-- `--db-path`: 기본 `data/sqlite/autostock.db`.
-- `--dry-run`: 카운트 비교만. INSERT 미실행.
+옵션 (실측):
+- `--db-path`: 기본 `data/sqlite/autostock.db` (`STATE_STORE_DB_PATH` env 우선).
+- `--dry-run`: Drive 로드 + 카운트만 출력. INSERT 미실행.
 - `--no-slack`: 슬랙 보고 생략 (로컬 검증).
-- `--reports-only`: chronicle_entries 가 이미 존재할 때 .md 본문/섹션/FTS 만 보강 (인덱스 INSERT 스킵).
-- `--entries-limit N`: 처리 entry 수 상한 (테스트).
+- `--no-reports`: 본문/섹션/FTS 갱신 생략. `chronicle_entries` 만 이관 (인덱스 신속 동기화 용).
 
-흐름:
-1. Drive 의 `master_index.json` 로드 + v2 가드.
-2. SQLite connect + `apply_pending` (v001 + v002).
-3. dry-run 이 아니면: `chronicle_entries` DELETE + bulk INSERT.
-4. 각 entry 의 `report_rel_path` 의 .md 본문을 Drive 에서 다운로드.
-5. 헤더/본문 분리 → 섹션 분할 → `chronicle_reports` + `chronicle_report_sections` + `chronicle_search` 동기 INSERT.
-6. `backfill_state.json` → `chronicle_backfill_state` 단일 row.
-7. 카운트 비교: Drive entries vs SQLite chronicle_entries, Drive .md 수 vs SQLite chronicle_reports, 섹션 수, FTS row 수.
-8. 결과 출력 + 슬랙 보고.
+흐름 (8 단계, 실측):
+1. **Step 1/8**: `drive_client.read_master_index(allow_auto_migrate=False)` + `_system/backfill_state.json` 로드. v1 인덱스는 `DriveSchemaMismatchError` (`migrate_master_index_v2.py` 선행 실행 안내).
+2. **Step 2/8**: `_SQLiteChronicleBackend` 직접 인스턴스화 (`STATE_STORE_BACKEND` 환경변수 무시) → `apply_pending` 가 v001 + v002 자동 적용 → FTS5 가용성 보고.
+3. **Step 3/8**: `--dry-run` 분기 → entries / backfill_state / FTS 가용성 카운트만 출력하고 종료 (8 단계로 점프).
+4. **Step 4/8**: `backend.replace_entries([])` 로 chronicle_entries 전체 비우기 (FK CASCADE → reports/sections/search 동기 정리) → entry 별 `append_entry(entry)` UPSERT (본문 없이 인덱스만 먼저 적재).
+5. **Step 5/8**: entry 별 `read_text_relative(rel_path)` 로 .md 본문 다운로드 → `backend.save_report(... full_md=...)` 호출 → `parse_full_md` 가 헤더/본문/섹션 자동 분해 → `chronicle_reports / chronicle_report_sections / chronicle_search` 동기 INSERT. 본문 누락은 `skipped_list` 격리 후 계속 진행 (P3E3). 20건마다 진행 보고.
+6. **Step 6/8**: `backend.save_backfill_state(state_dict)` (단일 row UPSERT). Drive 측 부재 시 스킵.
+7. **Step 7/8**: 카운트 비교 표 출력:
+   - `chronicle_entries`: Drive entries vs SQLite row 수 (OK/MISMATCH).
+   - `chronicle_reports`: Drive entries − skipped vs SQLite row 수 (OK/MISMATCH).
+   - `chronicle_report_sections` / `chronicle_search`: N:M 관계로 정보 출력만 (비교 대상 아님).
+   - `chronicle_backfill_state`: Drive 1 또는 0 vs SQLite row 수.
+8. **Step 8/8**: 결과 요약 + 슬랙 전송 + 종료 코드 반환.
 
-종료 코드:
-- 0: 정상 (또는 dry-run).
-- 1: Drive 로드 실패 / master_index 미존재.
-- 2: SQLite 마이그레이션 실패.
-- 3: 카운트 불일치 (dry-run 제외).
-- 4: .md 본문 50% 이상 누락 (안전 정지).
+종료 코드 (실측):
+- 0: 정상 (skipped 가 있어도 카운트 일치하면 0). dry-run 정상 종료.
+- 1: Drive 로드 실패 (인증/권한/네트워크/스키마 불일치).
+- 2: SQLite 초기화/INSERT 실패.
+- 3: 카운트 불일치 (entries 또는 reports).
+
+**Idempotency**: 시작 시 `replace_entries([])` + UPSERT 패턴으로 N회 재실행 시 동일 최종 상태 보장.
 
 ## 8. Phase 3 예외 정책 (Phase 2 §4 보강)
 - chronicle_repo 의 백엔드 예외는 그대로 전파한다.

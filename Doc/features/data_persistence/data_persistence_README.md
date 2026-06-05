@@ -10,8 +10,8 @@
   - Step 5 (M6 운영 안정성 검증 — 1~3일 모니터링): **Day 1 PASS (2026-06-02)** — 별도 agent 가 `scripts/m6_stability_check.py` 를 1일 단위로 순회. Day 1 3회차 실측 (회귀 FAIL 0건, C05 매칭 확정) 기록은 `./03_data_persistence_state_logic.md §11.8.3.1` 참조. Day 2/3 진행 예정.
 - v1.2 (Phase 3, 본 단계): Market Chronicles **C/D 도메인 SQLite 전환** + **FTS5 풀텍스트** + **섹션 정규화**.
   - Step 1 (문서 사양 확정): **100%** (commit `e608ad8`).
-  - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): **100%** (본 PR — 신설 3 파일 + 수정 4 파일 + 라운드트립 검증 PASS).
-  - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + 검증): 예정.
+  - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): **100%** (commit `935203f` — 신설 3 파일 + 수정 4 파일 + 라운드트립 검증 PASS).
+  - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + smoke + 검증): **100%** (본 PR — 이관 스크립트 8단계 + tests/smoke_chronicle_repo.py 7/7 PASS).
 - v1.3~v1.4 (Phase 4~5, 예정): 백업 cron(GitHub Private Repo / S3 / Lightsail Snapshot), Drive/OAuth 인프라 제거 + 문서 정리.
 
 ## 기능 요약

@@ -527,8 +527,28 @@ def _parse_full_md(full_md: str) -> tuple[str, str, list[dict]]:
 - ✅ **버그 수정 기록**: `INSERT OR REPLACE` → `INSERT ON CONFLICT DO UPDATE` 전환으로 PK 충돌 시 FK CASCADE 자식 row 손실 방지. `_INSERT_ENTRY_UPSERT_SQL` 상수화.
 - ⏳ **Step 3 대상**: `scripts/migrate_chronicles_to_sqlite.py` 신설 + 실 서버 entries/.md/sections/FTS row 수 일치 확인 + `tests/smoke_chronicle_repo.py` 통합 테스트.
 
-### 12.2 Step 3 (마이그레이션 스크립트) 완료 후 갱신 — 작업 시 추가 예정
-- (Step 3 PR 머지 후 본 섹션 갱신)
+### 12.2 Step 3 (마이그레이션 스크립트 + smoke) 완료 후 갱신 — 2026-06-05 작성
+- ✅ **신설 `scripts/migrate_chronicles_to_sqlite.py`** (8 단계 흐름, ~290 라인):
+  - Step 1/8: `drive_client.read_master_index(allow_auto_migrate=False)` + `_system/backfill_state.json` 로드. v1 인덱스인 경우 `DriveSchemaMismatchError` 로 즉시 종료 (자동 변환은 별도 `migrate_master_index_v2.py`).
+  - Step 2/8: `_SQLiteChronicleBackend` 직접 인스턴스화 → `apply_pending` 이 v001 + v002 자동 적용. FTS5 가용성 즉시 보고.
+  - Step 3/8: `--dry-run` 분기 → entries / backfill_state / FTS 가용성 카운트만 출력하고 종료.
+  - Step 4/8: `backend.replace_entries([])` 로 chronicle_entries 비우기 (FK CASCADE 로 reports/sections/search 동기 정리) → entry 별 `append_entry(entry)` UPSERT.
+  - Step 5/8: entry 별 `_load_drive_report_md(rel_path)` → `backend.save_report(... full_md=...)` (parse_full_md 가 헤더/본문/섹션 자동 분해 + FTS 인덱싱). 본문 누락은 `skipped_list` 로 격리하고 진행 (P3E3).
+  - Step 6/8: `backend.save_backfill_state(...)` (단일 row UPSERT). Drive 측 부재 시 스킵.
+  - Step 7/8: 카운트 비교 표 (`chronicle_entries` Drive↔SQLite / `chronicle_reports` Drive↔SQLite-with-skipped / sections+search 정보 출력 / `chronicle_backfill_state` Drive↔SQLite).
+  - Step 8/8: 슬랙 보고 + 종료 코드 (0 / 1 / 2 / 3).
+- ✅ **CLI 인터페이스**: `--db-path` / `--dry-run` / `--no-slack` / `--no-reports` 4 옵션 노출, `--help` 정상 동작.
+- ✅ **Idempotency**: 시작 시점 `replace_entries([])` + UPSERT 패턴으로 N회 재실행 시 동일 결과.
+- ✅ **신설 `tests/smoke_chronicle_repo.py`** (7 단계 검증, ~210 라인): Phase 2 `smoke_state_store_sqlite.py` 패턴 동일. 모든 단계 PASS.
+  - [1/7] 기본 백엔드 = `_DriveChronicleBackend` (Drive 모드 보존)
+  - [2/7] 알 수 없는 `STATE_STORE_BACKEND` 값 → Drive 폴백
+  - [3/7] SQLite 인덱스/본문/backfill_state 라운드트립
+  - [4/7] 섹션 5종 분류 4/4 정확 + FTS5 검색 1 hit (`'패닉셀'`)
+  - [5/7] UPSERT 본문 보존 (`md_len=290`, sections=4, replace_all 전후 동일)
+  - [6/7] FK CASCADE delete_entry → 본문/섹션 동기 삭제
+  - [7/7] schema_version v1 + v2 양 row 기록
+- ✅ **§11.8 체크리스트 잔여 항목**: smoke 통합 테스트 항목 완료. 실 서버 동작 확인은 별도 agent 에서 실행 후 본 §12.2 에 카운트 첨부 예정.
+- ⏳ **실 서버 1회 실행 결과**: 운영자가 `python scripts/migrate_chronicles_to_sqlite.py --dry-run` 으로 카운트 확인 → `--no-slack` 또는 정식 실행으로 이관 완료 후, 결과 카운트(entries/.md/sections/search/backfill_state) 를 본 섹션에 추기.
 
 ## 11. M6 운영 안정성 운반대 (Runbook, Phase 2 Step 5)
 ### 11.1 목적/대상/주기
