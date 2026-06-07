@@ -15,7 +15,7 @@
 - v1.3 (Phase 4, 본 단계): **SQLite → GitHub Private Repo 자동 백업 + 수동 복원**.
   - Step 1 (문서 사양 확정): **100%** (commit `7db5f52` — `01/02/03_data_persistence_*.md` 의 Phase 4 섹션 신설).
   - Step 2 (`backup_scheduler` + `scripts/backup_sqlite_to_github.py` + `scripts/restore_sqlite_from_github.py` 신설 + `main.py` 통합): **100%** (본 PR — 신설 4 파일 + main.py 1 블록 추가 + `tests/smoke_backup_to_github.py` 8단계 검증 신설, **로컬 smoke 15/15 PASS**, py_compile + ReadLints 0건).
-  - Step 3 (운영자 검증 — backup 브랜치 1회 초기화 + LightSail 1회 실 백업 + 1주 운영 안정 확인): **0%** (운영자 결정 대기).
+  - Step 3 (운영자 검증 — backup 브랜치 1회 초기화 + LightSail 1회 실 백업 + 1주 운영 안정 확인): **검증 도구 100% / 운영자 실행 0%**. 서버 종단(E2E) 자동 검증 스크립트 `scripts/verify_backup_e2e.py` 신설 (실 GitHub + 실 PAT 8단계, 라이브 DB 무손상, 03 §13.13). 운영자가 `.env` 13종 키 추가 후 1회 실행으로 실 백업+복원 시뮬레이션 묶음 검증 가능. 실 실행/1주 안정은 운영자 결정 대기.
 - v1.4 (Phase 5, 예정): Drive/OAuth 인프라 제거 + 문서 정리. Phase 4 완료 + SQLite 4주 안정 운영 후 진행.
 
 ## 기능 요약

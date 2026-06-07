@@ -1074,6 +1074,7 @@ data/backup_repo/                            ← BACKUP_REPO_DIR (별도 git 작
 - [ ] **실 서버 1회 백업 성공**: LightSail 에서 `python scripts/backup_sqlite_to_github.py --kind daily` 1회 실행 후 GitHub backup 브랜치에 commit 1건 + 슬랙 `[Backup OK]` 수신. (**Step 3 운영자 작업**)
 - [ ] **복원 시뮬레이션 1회**: 다른 PC 에서 `python scripts/restore_sqlite_from_github.py --latest --target-path /tmp/test.db` → integrity_check ok 확인. (**Step 3 운영자 작업**)
 - [ ] **1주 운영 안정**: 일간 백업 7회 + 주간 백업 1회 모두 성공 슬랙 수신. (**Step 3 운영자 작업**)
+- [ ] **(권장) 서버 E2E 1-shot 검증**: LightSail 에서 `python scripts/verify_backup_e2e.py` 1회 실행 → 위 실 백업 + 복원 시뮬레이션을 자동 묶음 검증 (§13.13 참조). (**Step 3 운영자 작업**)
 
 ### 13.10 Phase 4 부트스트랩 순서 (Phase 2 §10.4 / Phase 3 §11.10 계승)
 - `backup_scheduler.register_backup_jobs` 는 **봇 부팅 시 1회만 호출**되고, 이후 `schedule` 가 트리거 시각마다 자동 실행한다.
@@ -1113,4 +1114,26 @@ data/backup_repo/                            ← BACKUP_REPO_DIR (별도 git 작
   - GitHub Private Repo 의 `backup` orphan 브랜치 1회 초기화 (스크립트 자동 신설 가능, 또는 운영자가 사전에 수동 push).
   - LightSail 에서 1회 실 백업 + 슬랙 수신 + Drive backup repo 의 commit 1건 확인.
   - 1주 운영 안정 (일간 7회 + 주간 1회 모두 PASS).
+
+### 13.13 Step 3 서버 종단(E2E) 검증 스크립트 — 2026-06-07 신설
+- **목적**: `tests/smoke_backup_to_github.py` 가 `file://` 로컬 베어 저장소로만 검증하는 한계를 보완. 운영 서버(LightSail)에서 **실제 GitHub 원격 + 실제 `.env` PAT** 로 Step 3 의 6단계 수동 검증을 단일 명령으로 자동화한다.
+- **신설 파일**: `scripts/verify_backup_e2e.py` (~400 라인). `backup_sqlite_to_github` / `restore_sqlite_from_github` 의 공개 함수·헬퍼를 DRY 로 재사용.
+- **안전 정책 (P4R 계승)**:
+  - 라이브 DB(`STATE_STORE_DB_PATH`)는 **절대 변경하지 않는다**. 복원 대상은 항상 `tempfile.mkdtemp()` 하위 임시 경로.
+  - backup 작업 디렉터리도 운영 봇의 `BACKUP_REPO_DIR` 와 분리된 임시 디렉터리를 사용하여 동시 실행 중인 봇과 충돌 없음(R5 강화).
+  - PAT 는 `_redact_token` 으로 stdout/슬랙에서 마스킹.
+- **검증 8단계**:
+  1. 사전조건: `.env` 필수 키(`BACKUP_REPO_URL`/`BACKUP_GITHUB_TOKEN`) + `BACKUP_ENABLED=true` + 라이브 DB 존재 + git 설치. 미충족 시 즉시 B-Type 보고 + exit 2.
+  2. 원격 접근/PAT: `git ls-remote --heads` 로 인증·네트워크 검증 + backup 브랜치 존재 여부(미존재 시 SKIP, 5단계에서 orphan 자동 신설).
+  3. scheduler 등록: 격리된 `schedule.Scheduler()` 인스턴스에 `register_backup_jobs` 적용 → 3 jobs(글로벌 schedule 무오염). schedule 미설치 시 SKIP.
+  4. backup dry-run: VACUUM INTO + gzip + 회전 시뮬레이션(push 미실행).
+  5. backup 실 실행: 실제 commit + push(backup 브랜치). `--skip-real-backup` 로 생략 가능.
+  6. restore `--list`: 원격 backup 목록 + 최신 daily 1건 이상 확인.
+  7. restore dry-run: 임시 대상 + integrity_check=ok(라이브 DB 무손상).
+  8. restore 실 설치: 임시 대상 복원 + integrity_check + 테이블 카운트 + schema_version row 확인.
+- **CLI 옵션**: `--db-path` / `--skip-real-backup` / `--no-slack` / `--keep-temp`.
+- **종료 코드**: 0(전 단계 PASS 또는 SKIP만) / 1(1단계 이상 FAIL) / 2(사전조건 미충족, B-Type).
+- **슬랙 보고**: 성공 시 `[Backup VERIFY OK] N건 통과 / SKIP M건 / elapsed=Xs`, 실패 시 `[Backup VERIFY FAIL] ...`.
+- **로컬 검증**: py_compile PASS + ReadLints 0건. 로컬 PC(키·DB·schedule 부재)에서는 [1/8] 사전조건 FAIL → exit 2 로 graceful 종료 확인.
+- **운영 권장 사용**: `python scripts/verify_backup_e2e.py` (전체) / `python scripts/verify_backup_e2e.py --skip-real-backup --no-slack` (비파괴 사전 점검).
 

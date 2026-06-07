@@ -158,6 +158,7 @@
   4. **봇 재기동** (`s-restart`) → 부팅 stdout `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30` 매칭 확인.
   5. **복원 시뮬레이션** (다른 PC 또는 동일 PC `/tmp` 대상): `python scripts/restore_sqlite_from_github.py --latest --kind daily --target-path /tmp/test.db --no-slack` → integrity_check ok 확인.
   6. **1주 운영 안정**: 일간 백업 7회 + 주간 백업 1회 모두 슬랙 `[Backup OK]` 수신.
+- **(권장) 서버 E2E 1-shot 검증 스크립트**: `scripts/verify_backup_e2e.py` (2026-06-07 신설). 위 3~5단계(실 백업 + 복원 시뮬레이션)를 단일 명령으로 자동 묶음 검증. 라이브 DB 무손상(복원 대상=임시 경로) + backup 작업 디렉터리도 임시 격리. 실행: `python scripts/verify_backup_e2e.py` (전체) 또는 `--skip-real-backup --no-slack` (비파괴 사전 점검). 상세는 03 §13.13 참조.
 - **회귀 안전망 (Phase 1~3 무영향 보장)**: 기본값 `BACKUP_ENABLED=false` 로 운영자 명시 활성화 전까지 schedule 등록 0건. smoke 1번 단계로 이미 검증됨.
 
 ### 3.4 Phase 5 — Drive 코드 통째 정리 (⏳ 미착수, 최후 단계)
@@ -332,6 +333,11 @@ M6 안정성 모니터링 (`scripts/m6_stability_check.py`) 은 별도 agent 영
 python tests/smoke_state_store_sqlite.py
 python tests/smoke_chronicle_repo.py
 
+# Phase 4 백업/복원 검증
+python tests/smoke_backup_to_github.py                 # 로컬 file:// 베어 저장소 smoke (외부 의존성 0)
+python scripts/verify_backup_e2e.py                    # 서버 종단 검증 (실 GitHub + 실 백업 1건 + 복원 시뮬레이션)
+python scripts/verify_backup_e2e.py --skip-real-backup --no-slack   # 비파괴 사전 점검 (push/슬랙 미실행)
+
 # 마이그레이션 (운영 서버, 1회성)
 python scripts/migrate_drive_to_sqlite.py --dry-run
 python scripts/migrate_drive_to_sqlite.py --no-slack
@@ -357,5 +363,6 @@ python scripts/migrate_master_index_v2.py --dry-run
 | 2026-06-05 | Phase 3 Step 3 실 서버 이관 성공 직후 초안 작성. Phase 1~3 완료 + Phase 4/5 보류 정리. | Cursor Agent (Opus 4.7) |
 | 2026-06-07 | Phase 4 Step 1 사양 정의 완료. `Doc/features/data_persistence/*` 4 파일 갱신 (README v1.3 + §1.4/§11/§12 요구사항 + §9 API + §13 동작 흐름). 사용자 결정 5건 컨펌 후 반영 (트리거=봇 내부 schedule / 주기=일간+주간+월간 / 저장=본 repo backup orphan 브랜치 / 형식=VACUUM INTO+gzip / 보관=계층형 30일+12주+12개월). 본 HANDOVER §1/§2.0/§3.3/§6 갱신. commit `7db5f52`. | Cursor Agent (Opus 4.7) |
 | 2026-06-07 | Phase 4 Step 2 코드 구현 완료. 신설 4 파일 (`backup_scheduler.py` + `backup_sqlite_to_github.py` + `restore_sqlite_from_github.py` + `smoke_backup_to_github.py`) + 수정 2 파일 (`main.py` + `.gitignore`). 로컬 smoke **15/15 PASS, elapsed 1.1s**. py_compile + ReadLints 0건. macOS sandbox 가 git hooks 차단하지만 운영 LightSail 영향 없음. 03 §13.9 체크리스트 [x] 전환 + §13.12 Step 2 Post-Update 작성. README v1.3 Step 2 100% 마킹. 본 HANDOVER §1/§2.0a/§3.3/§6 갱신. (commit 대기) | Cursor Agent (Opus 4.7) |
+| 2026-06-07 | Phase 4 Step 3 서버 종단(E2E) 검증 스크립트 신설. `scripts/verify_backup_e2e.py` (~400 라인) — 실 GitHub 원격 + 실 PAT 로 8단계 자동 검증 (사전조건 / ls-remote / scheduler 3 jobs / backup dry-run / backup 실 push / restore --list / restore dry-run / restore 실 설치). 라이브 DB 무손상(복원 대상=임시 경로) + backup 작업 디렉터리 임시 격리. DRY 로 backup/restore 모듈 헬퍼 재사용. py_compile + ReadLints 0건, 로컬 graceful exit 2 확인. 03 §13.13 신설 + §13.9 체크리스트 1줄 추가. 본 HANDOVER §3.3/§8 갱신. (commit 대기) | Cursor Agent (Opus 4.8) |
 
 > 다음 작업이 끝날 때마다 본 §9 에 한 줄 추가 + 영향 받은 섹션 갱신. 그래야 다음 PC 의 agent 가 이질감 없이 받음.
