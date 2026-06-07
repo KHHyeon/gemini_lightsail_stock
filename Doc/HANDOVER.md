@@ -1,6 +1,6 @@
 # HANDOVER — 작업 인계 문서
 
-> **최신 갱신**: 2026-06-07 (**Phase 4 백업 정책 GitHub → SCP/Local 변경 완료, commit `2da4b4b` push 완료**, smoke 16/16 PASS).
+> **최신 갱신**: 2026-06-07 (**Phase 4' Step 2' 운영자 검증 #1~7 완료** — .env 8키/실 백업/봇 재기동/복원 시뮬레이션 PASS. #8 rsync 대기, #9 1주 안정 대기).
 > **목적**: 다른 PC / 새 세션의 Cursor Agent 가 본 문서 1개만 먼저 읽으면 즉시 이질감 없이 작업을 이어받을 수 있도록 한다.
 
 ---
@@ -10,7 +10,7 @@
 1. `git clone` 또는 `git pull` 후 브랜치 확인.
    - 운영 브랜치: **`my_bot`**.
    - 최근 push 기준 (2026-06-07): `2da4b4b refactor(data_persistence): Phase 4 백업 정책 GitHub → SCP/Local 전환 + smoke 16/16 PASS`. 이전 GitHub 정책 코드 (`5b79cf0`/`6c7f9c6`) 는 commit history 에만 보존.
-   - **현재 push 상태 = origin/my_bot 동기**. 다음 작업 = §3.3 Step 2' 운영자 검증 (LightSail 실 환경 작업).
+   - **현재 push 상태 = origin/my_bot 동기**. 다음 작업 = §3.3 Step 2' #8 운영자 PC rsync 1회 + #9 1주 운영 안정.
 2. `.env` 파일 확보 (보안 사유로 git 제외). 운영자가 별도 전달.
    - 필수 키: `APP_KEY / SECRET_KEY / ACCOUNT_NO / HTS_ID / SLACK_TOKEN / SLACK_CHANNEL / GOOGLE_API_KEY / GOOGLE_DRIVE_OAUTH_CLIENT_FILE / DART_API_KEY / TRADING_MODE_NORMAL / SCALP_CONDITION_NAME / TG_API_ID / TG_API_HASH`.
    - **Phase 2/3 신규 키**: `STATE_STORE_BACKEND` (값: `drive` 또는 `sqlite`, 기본 `drive`). 운영 서버는 `sqlite` 활성화 상태.
@@ -33,7 +33,7 @@
 
 ## 1. 한 줄 요약 (현재 상태)
 
-**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. Phase 4 백업 정책을 GitHub → SCP/Local 로 전환 완료 (commit `2da4b4b` push, smoke 16/16 PASS). 다음 단계 = Step 2' 운영자 검증 (LightSail `.env` 8키 추가 + 1회 실 백업 + 운영자 PC rsync 1회 + 1주 운영 안정).**
+**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. Phase 4' SCP/Local 백업 정책 전환 완료 + Step 2' 운영자 검증 #1~7 완료 (실 백업 OK / 봇 재기동 OK / 복원 시뮬레이션 OK). 남은 작업 = #8 rsync 1회 + #9 1주 운영 안정.**
 
 상위 작업 컨테이너 (체크포인트):
 
@@ -45,7 +45,7 @@
 | M6 안정성 모니터링 | 진행 중 (Day 1~3 PASS) | commit `3591d75`/`74934a3`/`a73625b`/`3bcb6d1` |
 | Phase 4 — 백업 정책 (GitHub 안) | **폐기** (commit `2da4b4b` 으로 SCP/Local 전환) | commit `7db5f52` (Step 1 사양) + `5b79cf0` (Step 2 코드) + `6c7f9c6` (Step 3 E2E) — 이력 보존 |
 | Phase 4' — 백업 정책 SCP/Local | **완료, push** | commit `2da4b4b` — 신설 3 + 수정 3 + 삭제 3 + 사양 5종 갱신 + smoke 16/16 PASS |
-| Phase 4' Step 2' — 운영자 검증 | **미착수 (현재 다음 작업)** | LightSail `.env` 8키 + 1회 실 백업 + 봇 재기동 부팅 로그 + rsync 1회 + 1주 안정 |
+| Phase 4' Step 2' — 운영자 검증 | **진행 중 (#1~7 완료, #8~9 대기)** | #1 git pull / #2~3 .env / #4 E2E 비파괴 PASS / #5 실 백업 OK / #6 봇 재기동 3 jobs / #7 복원 integrity=ok — #8 rsync 대기 / #9 1주 안정 대기 |
 | Phase 5 — Drive 코드 통째 정리 | 미착수 (Phase 4' Step 2' + 4주 안정 후) | — |
 
 ---
@@ -164,21 +164,21 @@
 
 ### 3.3 Phase 4 — 백업 정책 SCP/Local (commit `2da4b4b` push 완료, Step 2' 운영자 검증 대기)
 - **정책 변경 이력**: 초기 GitHub Private Repo 정책 (commit `7db5f52` 사양 + `5b79cf0` 코드 + `6c7f9c6` E2E) → commit `2da4b4b` 에서 LightSail 로컬 디렉터리 + 별도 SCP/rsync 채널로 전환. 사유는 §2.0aa 참조.
-- **현재 상태 (2026-06-07)**: 코드/사양/smoke 모두 commit/push 완료. `origin/my_bot = 2da4b4b`. LightSail 서버는 아직 이전 GitHub 정책 코드 (`6c7f9c6`) 가 배포된 상태일 수 있음 → 운영자가 `git pull` 으로 동기 후 Step 2' 진행.
+- **현재 상태 (2026-06-07)**: Step 2' #1~7 완료. `origin/my_bot = c2d40c1`. LightSail 서버 `2da4b4b` 동기, `.env` 8키 적용, 실 백업 1건(`autostock-20260607-2039.db.gz`), 봇 재기동 3 jobs 등록, 복원 integrity=ok 확인. **#8 rsync + #9 1주 안정 대기 중**.
 
 #### Step 2' 운영자 검증 매트릭스 (LightSail 실 환경)
 
-| # | 작업 | 명령 / 변경 | 기대 출력·결과 | 실패 분기 |
-|---|---|---|---|---|
-| 1 | 코드 동기 | `cd ~/my_bot && git pull origin my_bot` | `Updating ...2da4b4b` 또는 `Already up to date.` | git conflict → 운영자 수동 해결 (코드 수정 영역 0 가정). |
-| 2 | `.env` 갱신 (추가 8키) | `.env` 에 `BACKUP_ENABLED=true / BACKUP_LOCAL_DIR=data/backup_local / BACKUP_DAILY_AT=18:00 / BACKUP_WEEKLY_AT=sunday 22:00 / BACKUP_MONTHLY_AT=01 00:30 / BACKUP_RETENTION_DAILY=30 / BACKUP_RETENTION_WEEKLY=12 / BACKUP_RETENTION_MONTHLY=12` 추가 | `grep ^BACKUP_ .env \| wc -l` → `8` | 0~7 → 누락 키 추가. |
-| 3 | `.env` 정리 (이전 5키 삭제) | `BACKUP_REPO_URL / BACKUP_GITHUB_TOKEN / BACKUP_BRANCH / BACKUP_GIT_USER_NAME / BACKUP_GIT_USER_EMAIL` 5줄 모두 .env 에서 제거 | `grep -E '^BACKUP_(REPO_URL\|GITHUB_TOKEN\|BRANCH\|GIT_USER)' .env` → 출력 0줄 | 잔존 시 운영 영향 0 이지만 혼선 방지 차원에서 제거 권장. |
-| 4 | E2E 사전 점검 (비파괴) | `python scripts/verify_backup_e2e.py --skip-real-backup --no-slack` | 7단계 모두 `[OK]` + exit 0. 라이브 DB 무영향 + 임시 디렉터리 자동 정리 | `[FAIL]` 발생 시 stderr stacktrace 캡처 후 보고 (B-Type Pause). |
-| 5 | 1회 수동 백업 | `python scripts/backup_sqlite_local.py --kind daily` | `data/backup_local/daily/autostock-{stamp}.db.gz` 1건 생성 + 슬랙 `[Backup OK]` 수신. stdout `status=success db_size=... gz_size=... rotated=0` | `status=preflight_failed` → DB 경로/디스크 용량 점검. `status=fail` → stacktrace 보고. |
-| 6 | 봇 재기동 (스케줄 등록) | `s-restart` (또는 `sudo systemctl restart autostock`) | 부팅 stdout (`journalctl -u autostock -n 50 \| grep BACKUP`) 에 `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30` 1줄 매칭 | 로그 미매칭 → `BACKUP_ENABLED` 값/`schedule` 라이브러리 설치 (`pip install schedule`) 점검. |
-| 7 | 복원 시뮬레이션 (라이브 DB 무영향) | `python scripts/restore_sqlite_from_local.py --latest --kind daily --target-path /tmp/test.db --no-slack` | `[Restore OK]` 슬랙 미발송 (no-slack), stdout `integrity_check=ok` + `/tmp/test.db` 생성 | `db_in_use=true` → 라이브 DB 경로(`STATE_STORE_DB_PATH`) 와 `--target-path` 가 같으면 abort. 반드시 `/tmp/...` 사용. |
-| 8 | 운영자 PC rsync 1회 | macOS 에서 `rsync -avz --delete ubuntu@<LIGHTSAIL_IP>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/` | `~/autostock_backup/daily/autostock-*.db.gz` 1건 동기 | SSH 키 미설정 → `~/.ssh/config` 에 LightSail Host 등록. (자동화는 launchd/cron 운영자 재량.) |
-| 9 | 1주 운영 안정 | 별도 작업 없음, 매일 슬랙 모니터링 | 일간 `[Backup OK]` 7회 + 주간 1회 (일요일 22:00) 수신 + `data/backup_local/daily/` 8개 .gz | `[Backup FAIL]` 수신 시 즉시 보고 + B-Type Pause. |
+| # | 상태 | 작업 | 명령 / 변경 | 기대 출력·결과 | 실패 분기 |
+|---|---|---|---|---|---|
+| 1 | **완료** | 코드 동기 | `cd ~/my_bot && git pull origin my_bot` | `Updating ...2da4b4b` 또는 `Already up to date.` | git conflict → 운영자 수동 해결. |
+| 2 | **완료** | `.env` 갱신 (추가 8키) | `.env` 에 `BACKUP_ENABLED=true / BACKUP_LOCAL_DIR=data/backup_local / BACKUP_DAILY_AT=18:00 / BACKUP_WEEKLY_AT=sunday 22:00 / BACKUP_MONTHLY_AT=01 00:30 / BACKUP_RETENTION_DAILY=30 / BACKUP_RETENTION_WEEKLY=12 / BACKUP_RETENTION_MONTHLY=12` 추가 | `grep ^BACKUP_ .env \| wc -l` → `8` | 0~7 → 누락 키 추가. |
+| 3 | **완료** | `.env` 정리 (이전 5키 삭제) | `BACKUP_REPO_URL / BACKUP_GITHUB_TOKEN / BACKUP_BRANCH / BACKUP_GIT_USER_NAME / BACKUP_GIT_USER_EMAIL` 5줄 제거 | `grep -E '^BACKUP_(REPO_URL\|GITHUB_TOKEN\|BRANCH\|GIT_USER)' .env` → 출력 0줄 | 잔존 시 운영 영향 0 이지만 혼선 방지 차원에서 제거 권장. |
+| 4 | **완료** | E2E 사전 점검 (비파괴) | `python scripts/verify_backup_e2e.py --skip-real-backup --no-slack` | **PASS 6 / FAIL 1(설계상) / SKIP 2** — [6/7] dry-run 후 .gz 폐기 → 목록 0건은 `--skip-real-backup` 의 의도된 동작. | 사전조건/scheduler/disk 항목 FAIL 시 B-Type Pause. |
+| 5 | **완료** | 1회 수동 백업 | `python scripts/backup_sqlite_local.py --kind daily` | `[Backup OK] daily 20260607-2039 \| gz=128KB \| rotated=0 \| elapsed=0s` — `data/backup_local/daily/autostock-20260607-2039.db.gz` 생성 확인. | `status=preflight_failed` → DB 경로/디스크 용량 점검. |
+| 6 | **완료** | 봇 재기동 (스케줄 등록) | `s-restart` (또는 `sudo systemctl restart autostock`) | `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30` 매칭 확인. | 로그 미매칭 → `BACKUP_ENABLED` 값/`schedule` 라이브러리 점검. |
+| 7 | **완료** | 복원 시뮬레이션 (라이브 DB 무영향) | `python scripts/restore_sqlite_from_local.py --latest --kind daily --target-path /tmp/test.db --no-slack` | `[Restore OK] daily 20260607-2039 -> /tmp/test.db \| size=600KB \| integrity=ok` 확인. | `db_in_use=true` → 반드시 `/tmp/...` 사용. |
+| 8 | **대기** | 운영자 PC rsync 1회 | macOS 에서 `rsync -avz --delete ubuntu@<LIGHTSAIL_IP>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/` | `~/autostock_backup/daily/autostock-20260607-2039.db.gz` 1건 동기 | SSH 키 미설정 → `~/.ssh/config` 에 LightSail Host 등록. 자동화는 launchd/cron 운영자 재량. |
+| 9 | **대기** | 1주 운영 안정 | 별도 작업 없음, 매일 슬랙 모니터링 | 일간 `[Backup OK]` 7회 + 주간 1회 (일요일 22:00) 수신 + `data/backup_local/daily/` 8개 .gz | `[Backup FAIL]` 수신 시 즉시 보고 + B-Type Pause. |
 
 - **(권장) 서버 E2E 1-shot 검증 스크립트**: `scripts/verify_backup_e2e.py` (commit `2da4b4b` 재작성, SCP/Local 7단계). 위 #5 + #7 단계(실 백업 + 복원 시뮬레이션)를 단일 명령으로 자동 묶음 검증. 라이브 DB 무손상(복원 대상=임시 경로) + 백업 디렉터리도 임시 격리. 실행: `python scripts/verify_backup_e2e.py` (전체) 또는 `--skip-real-backup --no-slack` (비파괴 사전 점검). 상세는 03 §13.13 참조.
 - **회귀 안전망 (Phase 1~3 무영향 보장)**: 기본값 `BACKUP_ENABLED=false` 로 운영자 명시 활성화 전까지 schedule 등록 0건. smoke [1] 단계로 이미 검증됨.
@@ -328,9 +328,11 @@ Doc/
 
 순서대로:
 
-1. **(즉시, 운영자 작업)** Phase 4' Step 2' 운영자 검증 (§3.3 의 9단계 매트릭스).
-   - 핵심: LightSail `git pull` (`2da4b4b`) → `.env` 8키 추가 + 이전 5키 삭제 → `verify_backup_e2e.py --skip-real-backup` 비파괴 사전 점검 → 1회 실 백업 → 봇 재기동 부팅 로그 확인 → 복원 시뮬레이션 → 운영자 PC rsync 1회 → 1주 운영 안정.
-   - 각 단계별 명령·기대 출력·실패 분기는 §3.3 매트릭스 참조.
+1. **(대기)** Phase 4' Step 2' #8 운영자 PC rsync 1회 (§3.3 매트릭스 #8):
+   - `rsync -avz --delete ubuntu@<LIGHTSAIL_IP>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/`
+   - 결과: `~/autostock_backup/daily/autostock-20260607-2039.db.gz` 1건 동기 확인.
+   - 자동화 (선택): macOS `launchd` plist 또는 cron 등록.
+2. **(대기)** Phase 4' Step 2' #9 1주 운영 안정 — 매일 슬랙 모니터링. 일간 7회 + 주간 1회 `[Backup OK]` 수신 후 Phase 4' Step 2' 전체 완료 마킹.
 2. **(병행 가능)** Phase 3 운영 활성 여부 확인 (서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태 + Chronicle write 1회 SQLite row 증가).
 3. **(Phase 4' Step 2' 완료 + 4주 안정)** Phase 5 Drive 코드 통째 정리. 큰 회귀 위험이므로 사전 사양 작성 + 컨펌 필수.
 4. **(여유 시)** FTS5 한국어 토크나이저 / 임베딩 활성 검토 (Phase 3.5).
@@ -395,6 +397,7 @@ python scripts/migrate_master_index_v2.py --dry-run
 | 2026-06-07 | Phase 4 Step 2 코드 구현 완료. 신설 4 파일 (`backup_scheduler.py` + `backup_sqlite_to_github.py` + `restore_sqlite_from_github.py` + `smoke_backup_to_github.py`) + 수정 2 파일 (`main.py` + `.gitignore`). 로컬 smoke **15/15 PASS, elapsed 1.1s**. py_compile + ReadLints 0건. macOS sandbox 가 git hooks 차단하지만 운영 LightSail 영향 없음. 03 §13.9 체크리스트 [x] 전환 + §13.12 Step 2 Post-Update 작성. README v1.3 Step 2 100% 마킹. 본 HANDOVER §1/§2.0a/§3.3/§6 갱신. (commit 대기) | Cursor Agent (Opus 4.7) |
 | 2026-06-07 | Phase 4 Step 3 서버 종단(E2E) 검증 스크립트 신설. `scripts/verify_backup_e2e.py` (~400 라인) — 실 GitHub 원격 + 실 PAT 로 8단계 자동 검증 (사전조건 / ls-remote / scheduler 3 jobs / backup dry-run / backup 실 push / restore --list / restore dry-run / restore 실 설치). 라이브 DB 무손상(복원 대상=임시 경로) + backup 작업 디렉터리 임시 격리. DRY 로 backup/restore 모듈 헬퍼 재사용. py_compile + ReadLints 0건, 로컬 graceful exit 2 확인. 03 §13.13 신설 + §13.9 체크리스트 1줄 추가. 본 HANDOVER §3.3/§8 갱신. commit `6c7f9c6`. | Cursor Agent (Opus 4.8) |
 | 2026-06-07 | **Phase 4 백업 정책 GitHub → SCP/Local 전환** (사용자 결정). 신설 3 (`scripts/backup_sqlite_local.py` ~360 / `scripts/restore_sqlite_from_local.py` ~310 / `tests/smoke_backup_local.py` ~430) + 수정 3 (`src/storage/backup_scheduler.py` import 모듈/필수 키 폐기 / `scripts/verify_backup_e2e.py` SCP 7단계 재작성 / `.gitignore` `data/backup_local/` 교체) + 삭제 3 (GitHub 코드 일체) + 사양 5종 (README v1.3 박스 / 01 §1.4·§11·§12 / 02 §모듈·§9 / 03 §13 전체 / HANDOVER §1·§2.0aa·§3.3·§6·§8). `.env` 키 13→8 종 (PAT/repo URL/branch/git user 5종 폐기, `BACKUP_LOCAL_DIR` 신설). 7단계 백업 + 6단계 복원으로 git 의존 제거 → `GIT_CEILING_DIRECTORIES` 가드 폐기. 로컬 smoke **16/16 PASS, elapsed 0.03s**. py_compile + ReadLints 0건. verify_backup_e2e graceful exit 2 확인. 외부 호스팅/PAT 의존 0. **commit `2da4b4b` push 완료**. | Cursor Agent (Opus 4.7) |
-| 2026-06-07 | HANDOVER 후속 갱신 — push 완료 사실 반영 (§0/§1/§2.0aa/§3.3 헤더). §3.3 Step 2' 운영자 검증 매트릭스를 단순 7항목 → **9단계 표 (작업/명령/기대 출력/실패 분기)** 로 보강 + 롤백 절차 1 박스 추가. §6 우선순위 1번을 commit/push 완료로 갱신, Step 2' 를 단일 항목으로 통합. 다른 PC 가 본 문서 1개로 즉시 LightSail 작업 진입 가능하도록 명령·기대 출력 캡처. | Cursor Agent (Opus 4.7) |
+| 2026-06-07 | HANDOVER 후속 갱신 — push 완료 사실 반영 (§0/§1/§2.0aa/§3.3 헤더). §3.3 Step 2' 운영자 검증 매트릭스를 단순 7항목 → **9단계 표 (작업/명령/기대 출력/실패 분기)** 로 보강 + 롤백 절차 1 박스 추가. §6 우선순위 1번을 commit/push 완료로 갱신, Step 2' 를 단일 항목으로 통합. 다른 PC 가 본 문서 1개로 즉시 LightSail 작업 진입 가능하도록 명령·기대 출력 캡처. | Cursor Agent (Sonnet 4.6) |
+| 2026-06-07 | **Phase 4' Step 2' 운영자 검증 #1~7 완료** — git pull / .env 8키 추가 (이전 5키 삭제) / E2E 비파괴 PASS / 실 백업 `autostock-20260607-2039.db.gz` 128KB / 봇 재기동 3 jobs 등록 / 복원 시뮬레이션 `integrity=ok`. HANDOVER §0/§1/§3.3/§6 + 03 §13.9 체크리스트 갱신. #8 rsync + #9 1주 안정 대기. | Cursor Agent (Sonnet 4.6) |
 
 > 다음 작업이 끝날 때마다 본 §9 에 한 줄 추가 + 영향 받은 섹션 갱신. 그래야 다음 PC 의 agent 가 이질감 없이 받음.

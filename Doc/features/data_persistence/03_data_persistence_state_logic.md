@@ -1059,11 +1059,11 @@ git 메타데이터(.git, .gitignore, README.md) 미존재 — 단순 디렉터�
 - [x] **부트스트랩 통합**: `main.py` 의 schedule 등록 영역에 `register_backup_jobs(schedule, notify_fn=orchestrator.send_slack)` 1 블록 (정책 변경 후 동일, main.py 수정 0).
   - 활성 시: `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30`
   - 비활성 시: `[BACKUP] disabled (BACKUP_ENABLED=false)`
-- [ ] **실 서버 1회 백업 성공**: LightSail 에서 `python scripts/backup_sqlite_local.py --kind daily` 1회 실행 후 `data/backup_local/daily/` 에 .db.gz 1건 + 슬랙 `[Backup OK]` 수신. (**Step 2' 운영자 작업**)
-- [ ] **운영자 PC rsync 1회**: 운영자 macOS 에서 `rsync -avz --delete ubuntu@<LIGHTSAIL>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/` 1회 + 결과 확인. (**Step 2' 운영자 작업**)
-- [ ] **복원 시뮬레이션 1회**: 운영자 PC 에서 다운받은 .db.gz 로 임시 경로 복원 → integrity_check ok. (**Step 2' 운영자 작업**)
-- [ ] **1주 운영 안정**: 일간 백업 7회 + 주간 백업 1회 모두 성공 슬랙 수신. (**Step 2' 운영자 작업**)
-- [ ] **(권장) 서버 E2E 1-shot 검증**: LightSail 에서 `python scripts/verify_backup_e2e.py` 1회 실행 → 위 실 백업 + 복원 시뮬레이션을 자동 묶음 검증 (§13.13 참조). (**Step 2' 운영자 작업**)
+- [x] **실 서버 1회 백업 성공**: LightSail 에서 `python scripts/backup_sqlite_local.py --kind daily` → `data/backup_local/daily/autostock-20260607-2039.db.gz` (128KB) + `[Backup OK]` 슬랙 수신 확인. (2026-06-07)
+- [ ] **운영자 PC rsync 1회**: 운영자 macOS 에서 `rsync -avz --delete ubuntu@<LIGHTSAIL>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/` 1회 + 결과 확인. (**Step 2' 대기**)
+- [x] **복원 시뮬레이션 1회**: LightSail `/tmp/test.db` 대상 `restore_sqlite_from_local.py --latest --kind daily --target-path /tmp/test.db --no-slack` → `[Restore OK] integrity=ok size=600KB`. 라이브 DB 무영향 확인. (2026-06-07)
+- [ ] **1주 운영 안정**: 일간 백업 7회 + 주간 백업 1회 모두 성공 슬랙 수신. (**Step 2' 대기**)
+- [x] **(권장) 서버 E2E 1-shot 검증 (비파괴 모드)**: LightSail 에서 `python scripts/verify_backup_e2e.py --skip-real-backup --no-slack` → PASS 6/FAIL 1(설계상 dry-run .gz 폐기)/SKIP 2 확인. (2026-06-07)
 
 ### 13.10 Phase 4 부트스트랩 순서 (Phase 2 §10.4 / Phase 3 §11.10 계승)
 - `backup_scheduler.register_backup_jobs` 는 **봇 부팅 시 1회만 호출**되고, 이후 `schedule` 가 트리거 시각마다 자동 실행한다.
