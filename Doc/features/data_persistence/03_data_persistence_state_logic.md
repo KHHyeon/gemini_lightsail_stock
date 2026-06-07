@@ -1052,41 +1052,65 @@ data/backup_repo/                            ← BACKUP_REPO_DIR (별도 git 작
 
 모든 에러는 Phase 2/3 의 **B-Type 정책** (`system_architecture.md §42-46`) 과 일관: 사용자 개입 필요 시 Pause + Slack 안내 + 운영자가 조치 후 슬랙 `완료` 입력으로 재개.
 
-### 13.9 Phase 4 검증 체크리스트 (Step 2 구현 시 이행 항목)
-Step 1 (사양) 단계에서는 미수행. Step 2 PR 에서 모두 채움.
-- [ ] **py_compile**: `backup_scheduler.py / backup_sqlite_to_github.py / restore_sqlite_from_github.py` 3 파일 PASS.
-- [ ] **ReadLints**: 3 파일 모두 0건.
-- [ ] **smoke `tests/smoke_backup_to_github.py` 신설** (8단계 검증):
-  - [ ] BACKUP_ENABLED=false → register_backup_jobs 가 schedule 등록 0건 + return False.
-  - [ ] BACKUP_ENABLED=true + 필수 env 설정 → register_backup_jobs 가 schedule 3 jobs 등록 + return True.
-  - [ ] run_backup_cycle(kind='daily', dry_run=True) → VACUUM INTO + gzip + 회전 시뮬레이션 + git commit/push 미실행 + exit 0.
-  - [ ] run_backup_cycle(kind='daily') 실 실행 → daily/{stamp}.db.gz 생성 + git commit + push + integrity_check 통과.
-  - [ ] 회전 알고리즘 — mock 31일 전 stamp 1개 + 30일 이내 5개 → run_backup_cycle 후 31일 전 1개만 git rm.
-  - [ ] run_restore(--latest --dry-run) → integrity_check + 시뮬레이션만 + 봇 본체 db 변경 0.
-  - [ ] run_restore(--stamp <T> --kind daily) 실 실행 → target_path.bak-* 생성 + 새 db 적용 + integrity_check ok.
-  - [ ] schema_version v1+v2 양 row 가 복원된 db 에서도 동일하게 조회됨.
-- [ ] **부트스트랩 통합**: `main.py` 의 schedule 등록 영역에 `register_backup_jobs(schedule, notify_fn=slack_notifier.send)` 1줄 추가 + 부팅 시 stdout `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=01 00:30` 또는 `[BACKUP] disabled (BACKUP_ENABLED=false)` 출력.
-- [ ] **로컬 dry-run 1회 성공**: 운영자 PC 또는 CI 환경에서 `python scripts/backup_sqlite_to_github.py --kind daily --dry-run --no-slack` 실행 + exit 0 확인.
-- [ ] **실 서버 1회 백업 성공**: LightSail 에서 `python scripts/backup_sqlite_to_github.py --kind daily` 1회 실행 후 GitHub backup 브랜치에 commit 1건 + 슬랙 `[Backup OK]` 수신.
-- [ ] **복원 시뮬레이션 1회**: 다른 PC 에서 `python scripts/restore_sqlite_from_github.py --latest --target-path /tmp/test.db` → integrity_check ok 확인.
+### 13.9 Phase 4 검증 체크리스트 (Step 2 실측, 2026-06-07)
+- [x] **py_compile**: `backup_scheduler.py / backup_sqlite_to_github.py / restore_sqlite_from_github.py` 3 파일 PASS.
+- [x] **ReadLints**: 3 파일 + `main.py` 모두 0건.
+- [x] **smoke `tests/smoke_backup_to_github.py`** (15 항목 검증, **15/15 PASS**, elapsed ≈ 1.1s):
+  - [x] BACKUP_ENABLED=false → register_backup_jobs 가 schedule 등록 0건 + return False.
+  - [x] BACKUP_ENABLED=true + 필수 env 설정 → register_backup_jobs 가 schedule 3 jobs 등록 + return True.
+  - [x] weekday 매핑 검증: jobs 의 weekday 속성이 `{day, sunday}` 로 정확히 분포 (day 2건 + sunday 1건).
+  - [x] run_backup_cycle(kind='daily', dry_run=True) → VACUUM INTO + gzip + 회전 시뮬레이션 + git commit/push 미실행. daily/ 비어있음 확인.
+  - [x] run_backup_cycle(kind='daily') 실 실행 → orphan 브랜치 자동 신설 + daily/{stamp}.db.gz 1건 생성 + git commit + push + commit_sha 7자 이상.
+  - [x] result.gz_size 와 실제 파일 사이즈 일치.
+  - [x] 회전 알고리즘 — seed 31일 전 stamp 1개 + 30일 이내 4개 + 신규 1개 → 31일 전 1개만 회전, 5개 잔존.
+  - [x] run_restore(--list 동등) `_list_all_backups` 가 daily 5건 보고.
+  - [x] run_restore(--latest --dry-run) → integrity_check=ok + target 미생성.
+  - [x] run_restore(--latest, force=True) 실 실행 → target 생성 + integrity_check=ok + status=ok.
+  - [x] 복원된 DB 의 schema_version row + portfolio TEST 동일 (cycle 무손실).
+- [x] **부트스트랩 통합**: `main.py` 의 schedule 등록 영역에 `register_backup_jobs(schedule, notify_fn=orchestrator.send_slack)` 1 블록 추가. 부팅 시 stdout 출력 검증:
+  - 활성 시: `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30`
+  - 비활성 시: `[BACKUP] disabled (BACKUP_ENABLED=false)`
+- [x] **로컬 dry-run smoke**: 위 smoke 의 [3/8] 단계가 dry-run 흐름 검증 (외부 GitHub 없이 file:// remote 사용, sandbox 우회 시 PASS).
+- [ ] **실 서버 1회 백업 성공**: LightSail 에서 `python scripts/backup_sqlite_to_github.py --kind daily` 1회 실행 후 GitHub backup 브랜치에 commit 1건 + 슬랙 `[Backup OK]` 수신. (**Step 3 운영자 작업**)
+- [ ] **복원 시뮬레이션 1회**: 다른 PC 에서 `python scripts/restore_sqlite_from_github.py --latest --target-path /tmp/test.db` → integrity_check ok 확인. (**Step 3 운영자 작업**)
+- [ ] **1주 운영 안정**: 일간 백업 7회 + 주간 백업 1회 모두 성공 슬랙 수신. (**Step 3 운영자 작업**)
 
 ### 13.10 Phase 4 부트스트랩 순서 (Phase 2 §10.4 / Phase 3 §11.10 계승)
 - `backup_scheduler.register_backup_jobs` 는 **봇 부팅 시 1회만 호출**되고, 이후 `schedule` 가 트리거 시각마다 자동 실행한다.
 - `register_backup_jobs` 호출 시점에서 `BACKUP_ENABLED` / `BACKUP_REPO_URL` 등을 1회 읽는다.
 - 따라서 `main.py` 의 `load_dotenv()` 가 `register_backup_jobs` 호출 라인보다 먼저 호출되어야 한다 (이미 Phase 2 PR 에서 정정됨).
 
-### 13.11 Phase 4 회귀 차단 (P4R1~5 검증)
+### 13.11 Phase 4 회귀 차단 (P4R1~6 검증)
 - **R1**: 기본값 `BACKUP_ENABLED=false` → 봇 부팅 시 schedule 등록 0건. Phase 1~3 동작 100% 동일.
 - **R2**: 백업 thread 가 SQLite write transaction 을 갖지 않음 (`VACUUM INTO` 는 read snapshot). 봇 거래/Chronicle 흐름에 lock contention 없음.
-- **R3**: 복원 스크립트의 `_check_bot_not_running` 가드 (P4F7-1) 가 라이브 DB 덮어쓰기 사고 차단.
+- **R3**: 복원 스크립트의 `_is_db_in_use` 가드 (P4F7-1) 가 라이브 DB 덮어쓰기 사고 차단 (lsof / fuser / wal+shm 폴백).
 - **R4**: 회전이 `git rm` + commit 이며 force-push 미사용. 백업 이력은 git log 로 추적 가능 (단 회전 파일 자체는 HEAD 기준 미존재).
 - **R5**: `BACKUP_REPO_DIR=data/backup_repo` 가 본 repo 작업 디렉터리(`/home/ubuntu/my_bot/.git`) 와 분리되어 main 브랜치 git 작업과 충돌 없음.
+- **R6**: `_run_git` 가 모든 호출에 `GIT_CEILING_DIRECTORIES=<parent_of_cwd>` 를 자동 부여 (Step 2 smoke 1차 실행에서 실측 발견된 오염 패턴 차단). backup_repo/.git 부재 시 git add/commit 이 상위 .git (봇 본체 repo) 으로 올라가 운영 코드 commit 을 오염시키는 사고를 git 레벨에서 원천 차단. clone/init 은 cwd 자체에 .git 을 신규 생성하므로 ceiling 영향 무관.
 
-### 13.12 Step 2 구현 후 갱신 예약 항목 (Post-Update 명세)
-Step 2 PR 적용 시 본 §13 의 다음 항목을 **Post-Update 동기화** 로 갱신:
-- §13.4 의 실제 코드 라인 번호 / 함수명 / KST 타임스탬프 형식.
-- §13.9 의 체크리스트 [ ] → [x] 전환 (PASS 항목).
-- §13.6 회전 알고리즘의 실측 회전 카운트.
-- 슬랙 메시지 실제 포맷 (`§02 §9.5` 와 동일하게 사양↔구현 일치 검증).
-- 실 서버 1회 백업 성공 결과 (commit_sha / gz_size / elapsed_ms / 슬랙 메시지 본문).
+### 13.12 Step 2 (코드 구현) 완료 후 갱신 — 2026-06-07 작성
+- ✅ **신설 4 파일**:
+  - `src/storage/backup_scheduler.py` (~230 라인): `register_backup_jobs(scheduler, *, notify_fn=None) -> bool` + `_safe_run_backup(kind, notify_fn)` daemon thread 래퍼 + `_run_in_thread_if_first_of_month(target_day, notify_fn)` (월간 day-of-month 게이트).
+  - `scripts/backup_sqlite_to_github.py` (~530 라인): `run_backup_cycle(*, kind, db_path, repo_dir, notify_fn=None, dry_run=False) -> dict` + 10단계 흐름 + CLI 진입점 + helper (`_kst_now / _format_kst_stamp / _setup_repo_dir / _vacuum_into / _gzip_file / _rotate_files / _git_push_with_retry / _promote_monthly_from_daily`).
+  - `scripts/restore_sqlite_from_github.py` (~430 라인): `run_restore(...)` + 8단계 흐름 + CLI 진입점 + 봇 실행 점검 (`_is_db_in_use` lsof/fuser/wal+shm 폴백) + DRY 원칙으로 `backup_sqlite_to_github` 의 helper 재사용.
+  - `tests/smoke_backup_to_github.py` (~480 라인): 8 단계 시나리오 + 자체 `_StubScheduler` (로컬 schedule 미설치 환경 대응). file:// 베어 저장소로 외부 GitHub 의존성 0.
+- ✅ **수정 2 파일**:
+  - `main.py`: `run_scheduler()` 의 risk_monitor 등록 직후 `register_backup_jobs(schedule, notify_fn=orchestrator.send_slack)` 호출 1 블록 추가 (예외 안전).
+  - `.gitignore`: `data/backup_repo/`, `data/.smoke_workspace/`, `*.db.gz` 추가.
+- ✅ **시그니처/상수 실측**:
+  - 환경변수 정확히 §02 §9.1 와 일치 (13종). `BACKUP_DAILY_AT` 기본 `18:00`, `BACKUP_WEEKLY_AT` 기본 `sunday 22:00`, `BACKUP_MONTHLY_AT` 기본 `01 00:30` (1~28일만 허용 — 월말 차이 누락 방지).
+  - 타임스탬프 형식: `YYYYMMDD-HHMM` KST. `_format_kst_stamp(dt)`.
+  - PAT 노출 방지: `_redact_token(text, token)` 으로 모든 stderr/슬랙 메시지에서 마스킹.
+  - 회전 cutoff 단순화: `daily=days(30) / weekly=weeks(12) / monthly=days(months*31)`. relativedelta 외부 의존성 회피 (P4N1).
+  - `_setup_repo_dir` 가 idempotent: 기존 .git 보존 / 부분 잔존 정리 / 빈 브랜치 시 init+orphan 자동 신설.
+- ✅ **슬랙 메시지 실측 포맷** (`§02 §9.5` 와 일치):
+  - 성공: `[Backup OK] daily 20260606-1800 | gz=12KB | rotated=1 | elapsed=28s`
+  - 실패: `[Backup FAIL] daily 20260606-1800 | step=git_push | err=...\n운영자 조치: ...`
+  - 회전 WARN: `[Backup WARN] daily 20260606-1800 OK / rotate FAIL — 백업 자체는 성공. 다음 회차 재시도.`
+  - 복원: `[Restore OK] daily 20260606-1800 -> /path | size=N KB | integrity=ok | elapsed=Xs`
+- ✅ **smoke 결과**: 15/15 PASS, elapsed ≈ 1.1s (file:// 베어 저장소 기반).
+- ⏳ **Step 3 대상 (운영자 작업)**:
+  - GitHub Private Repo 의 `backup` orphan 브랜치 1회 초기화 (스크립트 자동 신설 가능, 또는 운영자가 사전에 수동 push).
+  - LightSail 에서 1회 실 백업 + 슬랙 수신 + Drive backup repo 의 commit 1건 확인.
+  - 1주 운영 안정 (일간 7회 + 주간 1회 모두 PASS).
 

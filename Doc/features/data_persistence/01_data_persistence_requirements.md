@@ -222,3 +222,4 @@
 - P4R3. 복원 스크립트는 봇이 실행 중이면 자동 차단 (P4F7-1). 사용자 실수로 라이브 DB 덮어쓰기 사고 차단.
 - P4R4. 보관 정책 회전은 git rm + commit 이며 force-push 미사용. 백업 이력은 git log 로 영구 추적 가능 (단, 회전된 파일 자체는 HEAD 기준 미존재).
 - P4R5. `BACKUP_REPO_DIR` 가 본 작업 디렉터리(`/home/ubuntu/my_bot`) 와 분리되어 있어 main 브랜치 git 작업과 충돌 없음 (`data/backup_repo/.git` 별도).
+- P4R6. `scripts/backup_sqlite_to_github.py` 의 모든 git subprocess 호출은 `GIT_CEILING_DIRECTORIES` 환경변수로 상위 .git 탐색을 자동 차단한다. backup_repo/.git 부재 시 git add/commit 이 봇 본체 repo (`/home/ubuntu/my_bot/.git`) 로 올라가는 사고를 원천 차단.

@@ -12,10 +12,10 @@
   - Step 1 (문서 사양 확정): **100%** (commit `e608ad8`).
   - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): **100%** (commit `935203f` — 신설 3 파일 + 수정 4 파일 + 라운드트립 검증 PASS).
   - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + smoke + 검증): **100%** (이관 스크립트 8단계 + tests/smoke_chronicle_repo.py 7/7 PASS + **실 서버 이관 1회 성공** — 2026-06-05, 40 entries / 160 sections / 160 FTS rows, skipped 0건, 카운트 100% 일치, 소요 63.34s).
-- v1.3 (Phase 4, 본 단계 시작): **SQLite → GitHub Private Repo 자동 백업 + 수동 복원**.
-  - Step 1 (문서 사양 확정): **100%** (본 PR — `01/02/03_data_persistence_*.md` 의 Phase 4 섹션 신설).
-  - Step 2 (`backup_scheduler` + `scripts/backup_sqlite_to_github.py` + `scripts/restore_sqlite_from_github.py` 신설): **0%** (Step 1 컨펌 후).
-  - Step 3 (smoke 테스트 + 복원 시뮬레이션 + 1주 운영 검증): **0%**.
+- v1.3 (Phase 4, 본 단계): **SQLite → GitHub Private Repo 자동 백업 + 수동 복원**.
+  - Step 1 (문서 사양 확정): **100%** (commit `7db5f52` — `01/02/03_data_persistence_*.md` 의 Phase 4 섹션 신설).
+  - Step 2 (`backup_scheduler` + `scripts/backup_sqlite_to_github.py` + `scripts/restore_sqlite_from_github.py` 신설 + `main.py` 통합): **100%** (본 PR — 신설 4 파일 + main.py 1 블록 추가 + `tests/smoke_backup_to_github.py` 8단계 검증 신설, **로컬 smoke 15/15 PASS**, py_compile + ReadLints 0건).
+  - Step 3 (운영자 검증 — backup 브랜치 1회 초기화 + LightSail 1회 실 백업 + 1주 운영 안정 확인): **0%** (운영자 결정 대기).
 - v1.4 (Phase 5, 예정): Drive/OAuth 인프라 제거 + 문서 정리. Phase 4 완료 + SQLite 4주 안정 운영 후 진행.
 
 ## 기능 요약

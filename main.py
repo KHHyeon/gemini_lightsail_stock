@@ -211,7 +211,16 @@ def run_scheduler():
     schedule.every(30).minutes.do(lambda: risk_manager.run_risk_monitor(
         kis, CONFIG, orchestrator.send_slack
     ))
-    
+
+    # Phase 4: SQLite -> GitHub backup orphan branch 자동 백업.
+    # BACKUP_ENABLED=false (기본값) 면 schedule 등록 0건 -> Phase 1~3 회귀 0.
+    # 상세: Doc/features/data_persistence/03_data_persistence_state_logic.md §13.
+    try:
+        from src.storage.backup_scheduler import register_backup_jobs
+        register_backup_jobs(schedule, notify_fn=orchestrator.send_slack)
+    except Exception as exc:
+        print(f"Log: [BACKUP] register_backup_jobs failed: {exc}", flush=True)
+
     while True:
         schedule.run_pending()
         time.sleep(1)
