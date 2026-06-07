@@ -26,6 +26,19 @@
 - `lifecycle.py` 의 Drive 임시 폴더 TTL 청소는 **Phase 3 비대상** (Phase 5 에서 통째 정리).
 - `scripts/migrate_master_index_v2.py` 는 SQLite 모드에서 자동 비활성 (Drive 모드 호환성을 위해 코드는 유지).
 
+### 1.4 Phase 4 (본 PR 의 사양 정의 단계)
+- **목적**: SQLite DB 파일이 LightSail 디스크 손실/실수 삭제 시 단일 장애점이 되지 않도록 자동 백업 체계를 수립한다.
+- **백업 채널**: 본 GitHub repo 의 `backup` orphan 브랜치 (별도 작업 디렉터리에 single-branch clone, main 영향 0).
+- **트리거**: 봇 내부 `schedule` 라이브러리 (`main.py` 의 기존 패턴 계승). 별도 thread 에서 비차단 실행.
+- **주기**: 일간 18:00 KST (장 마감 후) + 주간 일요일 22:00 KST.
+- **백업 파일 형식**: SQLite `VACUUM INTO` 로 단일 .db 추출 → gzip 압축 (`.db.gz`).
+- **보관 정책**: 일간 30일 + 주간 12주 + 월간 12개월 계층형. 회전 알고리즘으로 repo 사이즈 안정화.
+- **슬랙 보고**: 성공/실패 모두 보고. 실패는 B-Type Pause + stacktrace.
+- **복원**: 수동 스크립트만 (`scripts/restore_sqlite_from_github.py`). 자동 복원은 미지원.
+- **신설 모듈**: `src/storage/backup_scheduler.py` (스케줄러) + `scripts/backup_sqlite_to_github.py` (백업 실행) + `scripts/restore_sqlite_from_github.py` (복원).
+- **GitHub 인증**: GitHub PAT (Personal Access Token) — `.env` 의 `BACKUP_GITHUB_TOKEN` (Phase 4 신규 키).
+- **본 Phase 4 비대상**: Lightsail Snapshot, S3 미러, 운영자 외부 백업, 자동 복원 — 후속 Phase 검토.
+
 ## 2. 기능 요구사항
 - F1. 호출자는 백엔드 종류(Drive/SQLite/PG)를 알 수 없어야 한다.
 - F2. 도메인 메서드는 의미 단위로 분리한다 (`get_portfolio`, `save_split_orders` 등). 파일명·확장자·경로를 호출자가 알 필요 없다.
@@ -152,3 +165,60 @@
 - P3R3. 마이그레이션 스크립트 dry-run 에서 INSERT 미실행 + 카운트만 비교 + exit 0.
 - P3R4. v002 마이그레이션은 v001 적용된 DB 위에 add-on 으로만 동작 (drop 없음).
 - P3R5. 호출부 마이그레이션은 동일 import (`from src.storage import state_store`) 만 사용. 신규 import 0 (chronicle_repo 직접 import 금지).
+
+## 11. Phase 4 요구사항
+### 11.1 기능
+- P4F1. 신규 모듈 `src/storage/backup_scheduler.py` 는 봇 프로세스 내부에서 백업 사이클을 등록하는 진입점이다. `main.py` 가 부팅 시 1회 호출하여 `schedule.every().day.at("18:00").do(...)` / `schedule.every().sunday.at("22:00").do(...)` 등록.
+- P4F2. 실제 백업 작업은 `scripts/backup_sqlite_to_github.py` 의 공개 함수 `run_backup_cycle(kind: Literal["daily","weekly","monthly"], *, db_path: str, repo_dir: str, notify_fn=None) -> dict` 가 수행한다. 동일 함수는 운영자가 CLI 로도 직접 호출할 수 있다 (예: `python scripts/backup_sqlite_to_github.py --kind daily --no-slack`).
+- P4F3. 백업 사이클 단계 (Atomic):
+  1. 작업 디렉터리(`BACKUP_REPO_DIR`, 기본 `data/backup_repo/`) 가 없거나 `backup` 브랜치 미보유 시 → `git clone --single-branch --branch backup` 으로 신규 clone (또는 첫 실행 시 orphan 브랜치 자동 생성).
+  2. SQLite 라이브 DB 에 대해 `VACUUM INTO 'data/backup_repo/staging/autostock-{stamp}.db'` 실행. WAL/SHM 통합 일관성 보장.
+  3. staging .db 를 gzip 압축 → `data/backup_repo/{kind}/autostock-{stamp}.db.gz` 로 이동. staging 정리.
+  4. `git add` + `git commit -m "[backup] {kind} {stamp}"` + `git push origin backup`.
+  5. 보관 정책 회전 알고리즘 적용: `daily/` 30일 초과 / `weekly/` 12주 초과 / `monthly/` 12개월 초과 파일을 git rm + 추가 commit + push.
+  6. 슬랙 보고 (성공: 1줄, 실패: stacktrace + B-Type Pause).
+- P4F4. **타임스탬프 형식**: KST 기준 `YYYYMMDD-HHMM` (`autostock-20260606-1800.db.gz`). UTC 가 아닌 KST 사용 — 운영자가 슬랙/파일명에서 즉시 인지 가능.
+- P4F5. 보관 정책 분류:
+  - 일간 (`daily/`): 매 18:00 KST 실행 → 30일 보존.
+  - 주간 (`weekly/`): 매 일요일 22:00 KST 실행 → 12주 보존.
+  - 월간 (`monthly/`): 매월 1일 00:30 KST 자동 승격 (일간 백업 1개를 monthly 로 복사) → 12개월 보존.
+- P4F6. 복원 스크립트 `scripts/restore_sqlite_from_github.py` 는 운영자가 명시적으로 실행한다. 옵션:
+  - `--list`: 사용 가능한 백업 파일 나열 (kind/stamp/size 기준).
+  - `--stamp <YYYYMMDD-HHMM>` + `--kind {daily,weekly,monthly}`: 특정 시점으로 복원.
+  - `--latest [--kind ...]`: 가장 최신 백업으로 복원 (기본 `daily`).
+  - `--target-path PATH`: 복원 대상 DB 경로 (기본 `STATE_STORE_DB_PATH`).
+  - `--dry-run`: 다운로드만 + 압축 풀이 + integrity_check + 시뮬레이션 보고 + INSTALL 미실행.
+- P4F7. 복원 절차의 안전 보장:
+  1. 봇이 실행 중이면 운영자가 먼저 `s-stop`. 스크립트는 `lsof`/`fuser` 로 DB 파일 사용 중 여부 점검 → 사용 중이면 즉시 중단 + 안내.
+  2. 기존 DB 파일은 `{db_path}.bak-{stamp}` 로 rename (덮어쓰기 직전 1회).
+  3. 다운로드된 .db.gz → 압축 풀이 → `PRAGMA integrity_check` 통과 시에만 `{db_path}` 로 이동.
+  4. 실패 시 `.bak` 파일 자동 복원 후 종료 코드 ≠ 0.
+- P4F8. 백업 작업이 봇의 거래/orchestrator 사이클에 영향을 주지 않도록 별도 thread 에서 실행 (`threading.Thread(target=..., daemon=True)`). schedule 의 메인 thread blocking 방지.
+
+### 11.2 비기능
+- P4N1. 외부 의존성 0 추가 — `git` CLI + `gzip` (모두 LightSail Ubuntu 기본 설치) + Python stdlib 만 사용. PyGithub 등 외부 라이브러리 미사용.
+- P4N2. 백업 1회 소요 시간 목표: DB 100MB 기준 60초 이내 (VACUUM INTO 30s + gzip 10s + git push 20s 가정).
+- P4N3. 백업 실행 중 봇의 SQLite read/write latency 영향 ≤ 50ms (VACUUM INTO 는 read-only snapshot 이므로 write 차단 ≤ 100ms 수준 예상).
+- P4N4. backup repo 의 디스크 사용량 목표: 30 daily × 5MB + 12 weekly × 5MB + 12 monthly × 5MB ≈ 270MB 이하 (DB 100MB / gzip 비율 1:20 가정 시 더 작음).
+
+### 11.3 폴백/에러 정책
+- P4E1. **VACUUM INTO 실패** (`sqlite3.OperationalError: database is locked` 등): 60초 후 1회 재시도 → 그래도 실패 시 슬랙 보고 + B-Type Pause. SQLite 에러는 Phase 2/3 정책 (`§9.7 E1 / §11.7 E5`) 와 일관.
+- P4E2. **gzip 실패** (디스크 부족 등): staging 파일 정리 + 슬랙 보고 + B-Type Pause.
+- P4E3. **git push 실패** (네트워크/인증/conflict): 60초 후 1회 재시도 (`git pull --rebase` 후 push) → 그래도 실패 시 staging 보존 + 슬랙 보고 + B-Type Pause. 재시도 시 PAT 재발급 안내 포함.
+- P4E4. **보관 정책 회전 중 실패**: 백업 자체는 성공으로 간주. 회전 실패만 별도 슬랙 WARN 보고. 다음 회차에 재시도.
+- P4E5. **복원 시 integrity_check 실패**: 압축 풀이된 .db 즉시 폐기 + `.bak` 자동 복원 + exit 4. 운영자에게 백업 파일 손상 안내.
+- P4E6. **백업 thread 예외**: thread 가 죽어도 봇 본체에는 영향 없음 (`daemon=True`). 다음 schedule tick 에 재시도. 슬랙 1회 보고.
+
+### 11.4 비고
+- P4T1. `backup` 브랜치는 main 과 완전히 분리된 orphan 이다. main 의 코드 변경은 백업과 무관. 백업 commit 은 main 에 절대 머지하지 않는다 (CI 가드 또는 수동 점검).
+- P4T2. 백업 commit 메시지 형식: `[backup] {kind} {stamp}` (예: `[backup] daily 20260606-1800`). 회전 commit: `[backup] rotate {kind} -{N}` (예: `[backup] rotate daily -1`).
+- P4T3. 월간 승격은 일간 백업이 적어도 1개 존재할 때만 실행. 첫 달 실행 시 일간 백업이 없으면 skip + 슬랙 INFO.
+- P4T4. **PAT 권한**: `repo` (Private Repo write) 만 부여. Personal Account 또는 Machine User 계정 권장.
+- P4T5. 본 Phase 4 는 Drive 의존을 0 으로 만들지 않는다 (Drive 코드는 Phase 5 에서 일괄 제거). Phase 4 완료 후에도 Drive 백엔드는 폴백용으로 코드 보존.
+
+## 12. Phase 4 회귀 안전망
+- P4R1. 기본값 `BACKUP_ENABLED=false` (`.env` 미설정 시 백업 미실행). Phase 1~3 회귀 0 보장.
+- P4R2. 백업 thread 가 SQLite write transaction 을 갖지 않으므로 봇의 거래/Chronicle 흐름에 영향 0.
+- P4R3. 복원 스크립트는 봇이 실행 중이면 자동 차단 (P4F7-1). 사용자 실수로 라이브 DB 덮어쓰기 사고 차단.
+- P4R4. 보관 정책 회전은 git rm + commit 이며 force-push 미사용. 백업 이력은 git log 로 영구 추적 가능 (단, 회전된 파일 자체는 HEAD 기준 미존재).
+- P4R5. `BACKUP_REPO_DIR` 가 본 작업 디렉터리(`/home/ubuntu/my_bot`) 와 분리되어 있어 main 브랜치 git 작업과 충돌 없음 (`data/backup_repo/.git` 별도).

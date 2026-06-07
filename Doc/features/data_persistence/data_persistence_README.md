@@ -12,7 +12,11 @@
   - Step 1 (문서 사양 확정): **100%** (commit `e608ad8`).
   - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): **100%** (commit `935203f` — 신설 3 파일 + 수정 4 파일 + 라운드트립 검증 PASS).
   - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + smoke + 검증): **100%** (이관 스크립트 8단계 + tests/smoke_chronicle_repo.py 7/7 PASS + **실 서버 이관 1회 성공** — 2026-06-05, 40 entries / 160 sections / 160 FTS rows, skipped 0건, 카운트 100% 일치, 소요 63.34s).
-- v1.3~v1.4 (Phase 4~5, 예정): 백업 cron(GitHub Private Repo / S3 / Lightsail Snapshot), Drive/OAuth 인프라 제거 + 문서 정리.
+- v1.3 (Phase 4, 본 단계 시작): **SQLite → GitHub Private Repo 자동 백업 + 수동 복원**.
+  - Step 1 (문서 사양 확정): **100%** (본 PR — `01/02/03_data_persistence_*.md` 의 Phase 4 섹션 신설).
+  - Step 2 (`backup_scheduler` + `scripts/backup_sqlite_to_github.py` + `scripts/restore_sqlite_from_github.py` 신설): **0%** (Step 1 컨펌 후).
+  - Step 3 (smoke 테스트 + 복원 시뮬레이션 + 1주 운영 검증): **0%**.
+- v1.4 (Phase 5, 예정): Drive/OAuth 인프라 제거 + 문서 정리. Phase 4 완료 + SQLite 4주 안정 운영 후 진행.
 
 ## 기능 요약
 본 봇의 영속화 책임을 **단일 도메인 API (`src/storage/state_store.py`)** 로 일원화한다.
@@ -52,12 +56,19 @@
    - 환경변수 `STATE_STORE_DB_PATH` (기본 `data/sqlite/autostock.db`).
    - 이관 후 Drive 데이터는 그대로 보존 (Phase 5 에서 일괄 정리).
    - `logger.record_trade` 의 self-call 은 Phase 2.5 에서 별도 처리.
-3. **Phase 3 (본 단계)**: Market Chronicles C/D 도메인을 SQLite + FTS5 + `chronicle_report_sections` 정규화로 전환.
+3. **Phase 3 (완료)**: Market Chronicles C/D 도메인을 SQLite + FTS5 + `chronicle_report_sections` 정규화로 전환.
    - 신규 모듈 `src/storage/chronicle_repo.py` 도입. `state_store` 는 chronicle 메서드를 re-export.
    - SQLite 스키마 v2: `chronicle_entries` / `chronicle_reports` / `chronicle_report_sections` / `chronicle_search`(FTS5) / `chronicle_backfill_state`.
    - `embedding_vector BLOB` 컬럼은 사전 예약 (v3.5 활성).
    - 호출부 전환: `chronicle_writer` / `backfill` / `context_retriever` (3 파일, 20 호출).
    - `lifecycle.py` (Drive 임시 파일 TTL 청소) 와 `migrate_master_index_v2.py` 는 Phase 3 비대상 (Phase 5 에서 통째 정리/제거).
    - 동일 환경변수 `STATE_STORE_BACKEND=sqlite` 로 A/B + C/D 모두 활성. Phase 2 와 같은 백엔드 분기 정책 계승.
-4. **Phase 4 (예정)**: 백업 cron (GitHub Private Repo 또는 S3) + Lightsail Snapshot 2차 안전망.
-5. **Phase 5 (예정)**: Drive/OAuth 인프라 통째로 제거 + 문서 정리.
+4. **Phase 4 (본 단계, Step 1 시작)**: SQLite → GitHub Private Repo (`backup` orphan 브랜치) 자동 백업 + 수동 복원.
+   - **트리거**: 봇 내부 `schedule` (별도 thread). cron / systemd timer 미사용.
+   - **주기**: 일간 18:00 KST (장 마감 후) + 주간 일요일 22:00 KST.
+   - **저장**: 본 repo 의 `backup` orphan 브랜치 (별도 작업 디렉터리 single-branch clone). main 영향 0.
+   - **형식**: `VACUUM INTO` + gzip (`.db.gz`). WAL 통합 일관성 보장 + 즉시 sqlite3 복원 가능.
+   - **보관**: 일간 30일 + 주간 12주 + 월간 12개월 계층형. 회전 알고리즘으로 repo 사이즈 안정화.
+   - **슬랙 보고**: 성공/실패 모두 보고. 실패 시 B-Type Pause.
+   - **복원**: 수동만 (`scripts/restore_sqlite_from_github.py`). 자동 복원 미지원.
+5. **Phase 5 (예정)**: Drive/OAuth 인프라 통째로 제거 + 문서 정리. Phase 4 완료 + SQLite 4주 안정 운영 후 진행.

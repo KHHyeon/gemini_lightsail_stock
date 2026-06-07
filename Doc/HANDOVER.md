@@ -1,6 +1,6 @@
 # HANDOVER — 작업 인계 문서
 
-> **최신 갱신**: 2026-06-05 (Phase 3 Chronicle SQLite 전환 + 실 서버 이관 1회 성공 직후).
+> **최신 갱신**: 2026-06-07 (Phase 4 Step 1 사양 정의 완료 직후).
 > **목적**: 다른 PC / 새 세션의 Cursor Agent 가 본 문서 1개만 먼저 읽으면 즉시 이질감 없이 작업을 이어받을 수 있도록 한다.
 
 ---
@@ -9,7 +9,8 @@
 
 1. `git clone` 또는 `git pull` 후 브랜치 확인.
    - 운영 브랜치: **`my_bot`**.
-   - 최근 푸시 기준 (2026-06-05): `3bcb6d1 fix(m6): C17/C18 회귀 점검 오탐 제거 및 cutover 기준 보정`.
+   - 최근 push 기준 (2026-06-06): `cb2f1c9 docs(handover): 다중 PC 작업 인계용 HANDOVER.md 신설 + 우선 읽기 규약 반영`.
+   - **로컬 작업 중 (2026-06-07, 미push)**: Phase 4 Step 1 사양 정의 (`Doc/features/data_persistence/*` 4 파일 갱신 + 본 HANDOVER 갱신).
 2. `.env` 파일 확보 (보안 사유로 git 제외). 운영자가 별도 전달.
    - 필수 키: `APP_KEY / SECRET_KEY / ACCOUNT_NO / HTS_ID / SLACK_TOKEN / SLACK_CHANNEL / GOOGLE_API_KEY / GOOGLE_DRIVE_OAUTH_CLIENT_FILE / DART_API_KEY / TRADING_MODE_NORMAL / SCALP_CONDITION_NAME / TG_API_ID / TG_API_HASH`.
    - **Phase 2/3 신규 키**: `STATE_STORE_BACKEND` (값: `drive` 또는 `sqlite`, 기본 `drive`). 운영 서버는 `sqlite` 활성화 상태.
@@ -31,22 +32,45 @@
 
 ## 1. 한 줄 요약 (현재 상태)
 
-**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. A/B/C/D 4 도메인 + backfill_state 모두 SQLite 백엔드 사용 가능. 실 서버 이관 1회 성공 (2026-06-05). 봇 운영은 `.env` 의 `STATE_STORE_BACKEND` 환경변수로 분기 — 운영자가 SQLite 활성 결정.**
+**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. A/B/C/D 4 도메인 + backfill_state 모두 SQLite 백엔드 사용 가능. 실 서버 이관 1회 성공 (2026-06-05). Phase 4 Step 1 (백업 정책 사양) 정의 완료 (2026-06-07, 로컬). 봇 운영은 `.env` 의 `STATE_STORE_BACKEND` 환경변수로 분기 — 운영자가 SQLite 활성 결정.**
 
 상위 작업 컨테이너 (체크포인트):
 
 | 영역 | 상태 | 진척 |
 |---|---|---|
-| Phase 1 — 추상화 레이어 (`state_store`) | ✅ 완료 | 38 호출 마이그레이션, commit `1652b24` + `dad168e` |
-| Phase 2 — SQLite 백엔드 (A/B 도메인) | ✅ 완료 + 실 서버 이관 성공 | commit `e8e218f`/`c0aaef5`/`1d73773`/`4c5af9d` |
-| Phase 3 — Chronicle SQLite (C/D + backfill_state) | ✅ 완료 + 실 서버 이관 성공 | commit `e608ad8`/`935203f`/`4204c9b`/`156c9d3` |
-| M6 안정성 모니터링 | 🟡 진행 중 (Day 1~3 PASS) | commit `3591d75`/`74934a3`/`a73625b`/`3bcb6d1` |
-| Phase 4 — 백업 정책 (SQLite → GitHub Private Repo) | ⏳ 미착수 | 사양 작성부터 |
-| Phase 5 — Drive 코드 통째 정리 | ⏳ 미착수 (Phase 4 + 안정 운영 후) | — |
+| Phase 1 — 추상화 레이어 (`state_store`) | 완료 | 38 호출 마이그레이션, commit `1652b24` + `dad168e` |
+| Phase 2 — SQLite 백엔드 (A/B 도메인) | 완료 + 실 서버 이관 성공 | commit `e8e218f`/`c0aaef5`/`1d73773`/`4c5af9d` |
+| Phase 3 — Chronicle SQLite (C/D + backfill_state) | 완료 + 실 서버 이관 성공 | commit `e608ad8`/`935203f`/`4204c9b`/`156c9d3` |
+| M6 안정성 모니터링 | 진행 중 (Day 1~3 PASS) | commit `3591d75`/`74934a3`/`a73625b`/`3bcb6d1` |
+| Phase 4 Step 1 — 백업 정책 사양 정의 | 완료 (로컬, 미push) | `Doc/features/data_persistence/*` 4 파일 + 본 HANDOVER |
+| Phase 4 Step 2 — 백업 코드 구현 | 미착수 | Step 1 컨펌 후 |
+| Phase 4 Step 3 — smoke + 1주 운영 검증 | 미착수 | Step 2 후 |
+| Phase 5 — Drive 코드 통째 정리 | 미착수 (Phase 4 + 안정 운영 후) | — |
 
 ---
 
 ## 2. 완료된 작업 (시간 역순, 핵심만)
+
+### 2.0 Phase 4 Step 1 — 백업 정책 사양 정의 (2026-06-07, 로컬 미push)
+- **결정 사항 (사용자 컨펌)**:
+  - 트리거: 봇 내부 `schedule` (별도 thread, 인프라 추가 0).
+  - 주기: 일간 18:00 KST + 주간 일요일 22:00 KST + 월간 1일 00:30 KST (월간은 일간 백업 1개 승격).
+  - 저장: 본 GitHub repo 의 `backup` orphan 브랜치 (별도 작업 디렉터리에 single-branch clone, main 영향 0).
+  - 형식: SQLite `VACUUM INTO` + gzip (`.db.gz`).
+  - 보관: 일간 30일 + 주간 12주 + 월간 12개월 계층형 (회전 알고리즘).
+  - 슬랙 보고: 성공/실패 모두. 실패는 B-Type Pause + stacktrace.
+  - 복원: 수동 스크립트만 (`scripts/restore_sqlite_from_github.py`).
+- **사양서 갱신 (4 파일)**:
+  - `Doc/features/data_persistence/data_persistence_README.md`: v1.3 (Phase 4) Step 1 100% 마킹 + 로드맵 갱신.
+  - `01_data_persistence_requirements.md`: §1.4 Phase 4 범위 + §11 요구사항 (P4F1~F8 / P4N1~N4 / P4E1~E6 / P4T1~T5) + §12 회귀 안전망 (P4R1~R5).
+  - `02_data_persistence_api_spec.md`: §9 Phase 4 API (환경변수 13종 + `register_backup_jobs` + `run_backup_cycle` + `run_restore` + 슬랙 메시지 4종 규약 + 의존성 그래프).
+  - `03_data_persistence_state_logic.md`: §13 Phase 4 동작 흐름 (모듈 의존 그래프 + 디렉터리 명명 + 단일 백업 사이클 10단계 + 월간 승격 + 보관 정책 회전 + 복원 절차 8단계 + 에러 정책 + 검증 체크리스트 + 부트스트랩 순서 + 회귀 차단 + Step 2 Post-Update 예약).
+- **본 PR 비대상 (Step 2 에서 처리)**:
+  - 신설 코드 3 파일: `src/storage/backup_scheduler.py` / `scripts/backup_sqlite_to_github.py` / `scripts/restore_sqlite_from_github.py`.
+  - `main.py` 의 `register_backup_jobs(...)` 1줄 통합.
+  - `tests/smoke_backup_to_github.py` 8단계 검증 신설.
+  - GitHub Private Repo 의 `backup` orphan 브랜치 초기화 (운영자 수동 1회).
+- **다음 단계 권장 순서**: Step 1 컨펌 → Step 2 코드 구현 → 로컬 dry-run smoke → LightSail 1회 백업 실 실행 → 1주 운영 안정 확인 → Phase 5 진입.
 
 ### 2.1 Phase 3 — Chronicle SQLite 전환 (2026-06-02 ~ 2026-06-05)
 - **Step 1 (문서 사양 확정, `e608ad8`)**: `Doc/features/data_persistence/*` 4 파일에 Chronicle 스키마 v2 (5 테이블 + FTS5) / API 16개 / 호출자 마이그레이션 매트릭스 / .md 파싱 룰 / 에러 정책 P3E1~E5 정의.
@@ -95,14 +119,22 @@
   2. Chronicle 작성 (장 마감 트리거) 시 `chronicle_entries` 1 row 증가, `chronicle_reports` 1 row 증가, `chronicle_report_sections` ≈ 4 row 증가, `chronicle_search` ≈ 4 row 증가.
   3. `context_retriever.search_similar_guidelines(...)` 호출 시 SQLite 경유로 정상 작동.
 
-### 3.3 Phase 4 — 백업 정책 (⏳ 미착수, 차순위)
-- **목적**: SQLite DB 파일이 단일 장애점이 되지 않도록 자동 백업 체계 수립.
-- **사용자 결정 사항 (이전 대화 컨텍스트)**: Option 5 Hybrid — 로컬 SQLite + GitHub Private Repo 백업.
-- **예상 작업**:
-  1. Step 1 (사양): `Doc/features/data_persistence/` 에 Phase 4 섹션 추가 (백업 주기 / 보관 정책 / 복원 절차).
-  2. Step 2 (코드): `scripts/backup_sqlite_to_github.py` 신설 — 일/주 단위 자동 push + 슬랙 보고.
-  3. Step 3 (검증): 복원 시뮬레이션 1회 + smoke 테스트.
-- **시작 시점 권장**: Phase 3 SQLite 운영 안정 확인 후 (1주 이상).
+### 3.3 Phase 4 — 백업 정책 (Step 1 완료, Step 2 대기)
+- **Step 1 (사양 정의)**: 완료 (2026-06-07, §2.0 참조). 4 사양서 + HANDOVER 갱신.
+- **Step 2 (코드 구현)**: 미착수. 다음 작업 단위:
+  1. `src/storage/backup_scheduler.py` 신설 — `register_backup_jobs(scheduler, notify_fn)` + `_safe_run_backup` 스레드 래퍼.
+  2. `scripts/backup_sqlite_to_github.py` 신설 — `run_backup_cycle(kind, db_path, repo_dir, notify_fn, dry_run)` + CLI 진입점 (10단계 흐름).
+  3. `scripts/restore_sqlite_from_github.py` 신설 — `run_restore(...)` + CLI 진입점 (8단계 흐름).
+  4. `main.py` 의 schedule 등록 영역에 `register_backup_jobs(schedule, notify_fn=slack_notifier.send)` 1줄 추가.
+  5. `.env` 신규 키 13종 (`BACKUP_*`) 운영자 안내 + 기본값 정의 (사양 §02 §9.1).
+  6. ReadLints + py_compile + 로컬 dry-run smoke.
+- **Step 3 (검증)**: 미착수. 다음 작업 단위:
+  1. `tests/smoke_backup_to_github.py` 신설 (8단계 검증, 사양 §03 §13.9).
+  2. GitHub Private Repo 의 `backup` orphan 브랜치 운영자 1회 초기화.
+  3. LightSail 에서 `python scripts/backup_sqlite_to_github.py --kind daily` 1회 실 실행 + 슬랙 `[Backup OK]` 수신 확인.
+  4. 다른 PC 에서 `python scripts/restore_sqlite_from_github.py --latest --target-path /tmp/test.db` 복원 시뮬레이션.
+  5. 1주 운영 안정 확인 (일간 백업 7회 + 주간 백업 1회 모두 PASS).
+- **회귀 안전망 (Phase 1~3 무영향 보장)**: 기본값 `BACKUP_ENABLED=false` 로 운영자 명시 활성화 전까지 schedule 등록 0건.
 
 ### 3.4 Phase 5 — Drive 코드 통째 정리 (⏳ 미착수, 최후 단계)
 - **대상 (모두 Drive 모드 전용으로 잔존)**:
@@ -245,14 +277,16 @@ Doc/
 
 순서대로:
 
-1. **(즉시)** Phase 3 운영 활성 여부 확인 (사용자에게 질의):
-   - 서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태?
-   - 활성이라면 봇 재기동 후 Chronicle write 1회 발생 시 SQLite row 증가 확인.
-2. **(M6 종료 후)** Phase 4 백업 정책 사양 작성 → 코드 → 검증.
-3. **(Phase 4 완료 + 4주 안정)** Phase 5 Drive 코드 통째 정리.
-4. **(여유 시)** FTS5 한국어 토크나이저 / 임베딩 활성 검토 (Phase 3.5).
+1. **(즉시)** Phase 4 Step 1 사양 컨펌 (사용자):
+   - 본 §2.0 + `Doc/features/data_persistence/01~03_*.md` Phase 4 섹션 검토.
+   - 컨펌 후 Step 2 (코드 구현) 진입 가능.
+2. **(Step 1 컨펌 후)** Phase 4 Step 2 코드 구현 (`backup_scheduler.py` + `scripts/backup_sqlite_to_github.py` + `scripts/restore_sqlite_from_github.py` + `main.py` 통합).
+3. **(Step 2 PR 머지 후)** Phase 4 Step 3 smoke + 실 서버 1회 백업 + 1주 운영 안정 검증.
+4. **(병행 가능)** Phase 3 운영 활성 여부 확인 (서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태 + Chronicle write 1회 SQLite row 증가).
+5. **(Phase 4 완료 + 4주 안정)** Phase 5 Drive 코드 통째 정리. 큰 회귀 위험이므로 사전 사양 작성 + 컨펌 필수.
+6. **(여유 시)** FTS5 한국어 토크나이저 / 임베딩 활성 검토 (Phase 3.5).
 
-작업 시작 전 사용자에게 우선순위 컨펌 받을 것. 특히 Phase 5 는 큰 회귀 위험이므로 사전 사양 작성 + 컨펌 필수.
+작업 시작 전 사용자에게 우선순위 컨펌 받을 것. M6 안정성 모니터링 (`scripts/m6_stability_check.py`) 은 별도 agent 영역으로 본 핸드오버 agent 는 직접 수정 금지 (§7.1 참조).
 
 ---
 
@@ -297,5 +331,6 @@ python scripts/migrate_master_index_v2.py --dry-run
 | 일자 | 갱신 사유 | 작성자 (agent) |
 |---|---|---|
 | 2026-06-05 | Phase 3 Step 3 실 서버 이관 성공 직후 초안 작성. Phase 1~3 완료 + Phase 4/5 보류 정리. | Cursor Agent (Opus 4.7) |
+| 2026-06-07 | Phase 4 Step 1 사양 정의 완료. `Doc/features/data_persistence/*` 4 파일 갱신 (README v1.3 + §1.4/§11/§12 요구사항 + §9 API + §13 동작 흐름). 사용자 결정 5건 컨펌 후 반영 (트리거=봇 내부 schedule / 주기=일간+주간+월간 / 저장=본 repo backup orphan 브랜치 / 형식=VACUUM INTO+gzip / 보관=계층형 30일+12주+12개월). 본 HANDOVER §1/§2.0/§3.3/§6 갱신. | Cursor Agent (Opus 4.7) |
 
 > 다음 작업이 끝날 때마다 본 §9 에 한 줄 추가 + 영향 받은 섹션 갱신. 그래야 다음 PC 의 agent 가 이질감 없이 받음.
