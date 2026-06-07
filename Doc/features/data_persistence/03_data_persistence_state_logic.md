@@ -1060,7 +1060,7 @@ git 메타데이터(.git, .gitignore, README.md) 미존재 — 단순 디렉터�
   - 활성 시: `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30`
   - 비활성 시: `[BACKUP] disabled (BACKUP_ENABLED=false)`
 - [x] **실 서버 1회 백업 성공**: LightSail 에서 `python scripts/backup_sqlite_local.py --kind daily` → `data/backup_local/daily/autostock-20260607-2039.db.gz` (128KB) + `[Backup OK]` 슬랙 수신 확인. (2026-06-07)
-- [ ] **운영자 PC rsync 1회**: 운영자 macOS 에서 `rsync -avz --delete ubuntu@<LIGHTSAIL>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/` 1회 + 결과 확인. (**Step 2' 대기**)
+- [x] **운영자 PC rsync 1회**: `rsync -avz --delete stock_ls:/home/ubuntu/my_bot/data/backup_local ./autostock_backup` → `autostock_backup/daily/autostock-20260607-2039.db.gz` 131,650 bytes 동기 확인. (2026-06-07)
 - [x] **복원 시뮬레이션 1회**: LightSail `/tmp/test.db` 대상 `restore_sqlite_from_local.py --latest --kind daily --target-path /tmp/test.db --no-slack` → `[Restore OK] integrity=ok size=600KB`. 라이브 DB 무영향 확인. (2026-06-07)
 - [ ] **1주 운영 안정**: 일간 백업 7회 + 주간 백업 1회 모두 성공 슬랙 수신. (**Step 2' 대기**)
 - [x] **(권장) 서버 E2E 1-shot 검증 (비파괴 모드)**: LightSail 에서 `python scripts/verify_backup_e2e.py --skip-real-backup --no-slack` → PASS 6/FAIL 1(설계상 dry-run .gz 폐기)/SKIP 2 확인. (2026-06-07)

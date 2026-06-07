@@ -1,6 +1,6 @@
 # HANDOVER — 작업 인계 문서
 
-> **최신 갱신**: 2026-06-07 (**Phase 4' Step 2' 운영자 검증 #1~7 완료** — .env 8키/실 백업/봇 재기동/복원 시뮬레이션 PASS. #8 rsync 대기, #9 1주 안정 대기).
+> **최신 갱신**: 2026-06-07 (**Phase 4' Step 2' 운영자 검증 #1~8 완료** — 실 백업/봇 재기동/복원 시뮬레이션/rsync 동기 PASS. #9 1주 안정 대기).
 > **목적**: 다른 PC / 새 세션의 Cursor Agent 가 본 문서 1개만 먼저 읽으면 즉시 이질감 없이 작업을 이어받을 수 있도록 한다.
 
 ---
@@ -33,7 +33,7 @@
 
 ## 1. 한 줄 요약 (현재 상태)
 
-**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. Phase 4' SCP/Local 백업 정책 전환 완료 + Step 2' 운영자 검증 #1~7 완료 (실 백업 OK / 봇 재기동 OK / 복원 시뮬레이션 OK). 남은 작업 = #8 rsync 1회 + #9 1주 운영 안정.**
+**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. Phase 4' SCP/Local 백업 정책 전환 완료 + Step 2' 운영자 검증 #1~8 완료 (실 백업 / 봇 재기동 / 복원 / rsync 동기 모두 OK). 남은 작업 = #9 1주 운영 안정 모니터링.**
 
 상위 작업 컨테이너 (체크포인트):
 
@@ -45,7 +45,7 @@
 | M6 안정성 모니터링 | 진행 중 (Day 1~3 PASS) | commit `3591d75`/`74934a3`/`a73625b`/`3bcb6d1` |
 | Phase 4 — 백업 정책 (GitHub 안) | **폐기** (commit `2da4b4b` 으로 SCP/Local 전환) | commit `7db5f52` (Step 1 사양) + `5b79cf0` (Step 2 코드) + `6c7f9c6` (Step 3 E2E) — 이력 보존 |
 | Phase 4' — 백업 정책 SCP/Local | **완료, push** | commit `2da4b4b` — 신설 3 + 수정 3 + 삭제 3 + 사양 5종 갱신 + smoke 16/16 PASS |
-| Phase 4' Step 2' — 운영자 검증 | **진행 중 (#1~7 완료, #8~9 대기)** | #1 git pull / #2~3 .env / #4 E2E 비파괴 PASS / #5 실 백업 OK / #6 봇 재기동 3 jobs / #7 복원 integrity=ok — #8 rsync 대기 / #9 1주 안정 대기 |
+| Phase 4' Step 2' — 운영자 검증 | **진행 중 (#1~8 완료, #9 대기)** | #1~7 완료 + #8 rsync `stock_ls` → `./autostock_backup` 131KB 동기 완료 (2026-06-07) — #9 1주 안정 모니터링 대기 |
 | Phase 5 — Drive 코드 통째 정리 | 미착수 (Phase 4' Step 2' + 4주 안정 후) | — |
 
 ---
@@ -177,7 +177,7 @@
 | 5 | **완료** | 1회 수동 백업 | `python scripts/backup_sqlite_local.py --kind daily` | `[Backup OK] daily 20260607-2039 \| gz=128KB \| rotated=0 \| elapsed=0s` — `data/backup_local/daily/autostock-20260607-2039.db.gz` 생성 확인. | `status=preflight_failed` → DB 경로/디스크 용량 점검. |
 | 6 | **완료** | 봇 재기동 (스케줄 등록) | `s-restart` (또는 `sudo systemctl restart autostock`) | `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30` 매칭 확인. | 로그 미매칭 → `BACKUP_ENABLED` 값/`schedule` 라이브러리 점검. |
 | 7 | **완료** | 복원 시뮬레이션 (라이브 DB 무영향) | `python scripts/restore_sqlite_from_local.py --latest --kind daily --target-path /tmp/test.db --no-slack` | `[Restore OK] daily 20260607-2039 -> /tmp/test.db \| size=600KB \| integrity=ok` 확인. | `db_in_use=true` → 반드시 `/tmp/...` 사용. |
-| 8 | **대기** | 운영자 PC rsync 1회 | macOS 에서 `rsync -avz --delete ubuntu@<LIGHTSAIL_IP>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/` | `~/autostock_backup/daily/autostock-20260607-2039.db.gz` 1건 동기 | SSH 키 미설정 → `~/.ssh/config` 에 LightSail Host 등록. 자동화는 launchd/cron 운영자 재량. |
+| 8 | **완료** | 운영자 PC rsync 1회 | `rsync -avz --delete stock_ls:/home/ubuntu/my_bot/data/backup_local ./autostock_backup` | `autostock_backup/daily/autostock-20260607-2039.db.gz` 동기 확인 (131,650 bytes). SSH alias `stock_ls` 사용. (2026-06-07) | — |
 | 9 | **대기** | 1주 운영 안정 | 별도 작업 없음, 매일 슬랙 모니터링 | 일간 `[Backup OK]` 7회 + 주간 1회 (일요일 22:00) 수신 + `data/backup_local/daily/` 8개 .gz | `[Backup FAIL]` 수신 시 즉시 보고 + B-Type Pause. |
 
 - **(권장) 서버 E2E 1-shot 검증 스크립트**: `scripts/verify_backup_e2e.py` (commit `2da4b4b` 재작성, SCP/Local 7단계). 위 #5 + #7 단계(실 백업 + 복원 시뮬레이션)를 단일 명령으로 자동 묶음 검증. 라이브 DB 무손상(복원 대상=임시 경로) + 백업 디렉터리도 임시 격리. 실행: `python scripts/verify_backup_e2e.py` (전체) 또는 `--skip-real-backup --no-slack` (비파괴 사전 점검). 상세는 03 §13.13 참조.
@@ -328,11 +328,9 @@ Doc/
 
 순서대로:
 
-1. **(대기)** Phase 4' Step 2' #8 운영자 PC rsync 1회 (§3.3 매트릭스 #8):
-   - `rsync -avz --delete ubuntu@<LIGHTSAIL_IP>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/`
-   - 결과: `~/autostock_backup/daily/autostock-20260607-2039.db.gz` 1건 동기 확인.
-   - 자동화 (선택): macOS `launchd` plist 또는 cron 등록.
-2. **(대기)** Phase 4' Step 2' #9 1주 운영 안정 — 매일 슬랙 모니터링. 일간 7회 + 주간 1회 `[Backup OK]` 수신 후 Phase 4' Step 2' 전체 완료 마킹.
+1. **(대기)** Phase 4' Step 2' #9 1주 운영 안정 — 매일 슬랙 `[Backup OK]` 모니터링. 일간 7회 + 주간 1회 (일요일 22:00) 수신 후 Step 2' 전체 완료 마킹.
+2. **(선택)** 운영자 PC rsync 자동화 — macOS `launchd` plist 또는 cron 으로 등록. 빠른 참조 명령은 §8 참조.
+3. **(병행 가능)** Phase 3 운영 활성 여부 확인 (서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태 + Chronicle write 1회 SQLite row 증가).
 2. **(병행 가능)** Phase 3 운영 활성 여부 확인 (서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태 + Chronicle write 1회 SQLite row 증가).
 3. **(Phase 4' Step 2' 완료 + 4주 안정)** Phase 5 Drive 코드 통째 정리. 큰 회귀 위험이므로 사전 사양 작성 + 컨펌 필수.
 4. **(여유 시)** FTS5 한국어 토크나이저 / 임베딩 활성 검토 (Phase 3.5).
@@ -367,8 +365,13 @@ python scripts/restore_sqlite_from_local.py --latest --target-path /tmp/test.db 
 python scripts/verify_backup_e2e.py                    # 서버 종단 검증 (라이브 DB → 임시 백업 → 복원 시뮬레이션)
 python scripts/verify_backup_e2e.py --skip-real-backup --no-slack   # 비파괴 사전 점검
 
-# 운영자 PC (별도 채널, 본 봇 외부)
-rsync -avz --delete ubuntu@<LIGHTSAIL_IP>:/home/ubuntu/my_bot/data/backup_local/ ~/autostock_backup/
+# 운영자 PC rsync (별도 채널, 본 봇 외부)
+# SSH alias: stock_ls (~/.ssh/config 에 LightSail Host 등록됨)
+# --delete: LightSail 회전 삭제 파일이 로컬에서도 삭제됨 (보관 정책 일관성 유지)
+rsync -avz --delete stock_ls:/home/ubuntu/my_bot/data/backup_local ./autostock_backup
+
+# 단일 파일만 가져올 때
+scp stock_ls:/home/ubuntu/my_bot/data/backup_local/daily/autostock-<STAMP>.db.gz ./autostock_backup/daily/
 
 # 마이그레이션 (운영 서버, 1회성)
 python scripts/migrate_drive_to_sqlite.py --dry-run
@@ -399,5 +402,6 @@ python scripts/migrate_master_index_v2.py --dry-run
 | 2026-06-07 | **Phase 4 백업 정책 GitHub → SCP/Local 전환** (사용자 결정). 신설 3 (`scripts/backup_sqlite_local.py` ~360 / `scripts/restore_sqlite_from_local.py` ~310 / `tests/smoke_backup_local.py` ~430) + 수정 3 (`src/storage/backup_scheduler.py` import 모듈/필수 키 폐기 / `scripts/verify_backup_e2e.py` SCP 7단계 재작성 / `.gitignore` `data/backup_local/` 교체) + 삭제 3 (GitHub 코드 일체) + 사양 5종 (README v1.3 박스 / 01 §1.4·§11·§12 / 02 §모듈·§9 / 03 §13 전체 / HANDOVER §1·§2.0aa·§3.3·§6·§8). `.env` 키 13→8 종 (PAT/repo URL/branch/git user 5종 폐기, `BACKUP_LOCAL_DIR` 신설). 7단계 백업 + 6단계 복원으로 git 의존 제거 → `GIT_CEILING_DIRECTORIES` 가드 폐기. 로컬 smoke **16/16 PASS, elapsed 0.03s**. py_compile + ReadLints 0건. verify_backup_e2e graceful exit 2 확인. 외부 호스팅/PAT 의존 0. **commit `2da4b4b` push 완료**. | Cursor Agent (Opus 4.7) |
 | 2026-06-07 | HANDOVER 후속 갱신 — push 완료 사실 반영 (§0/§1/§2.0aa/§3.3 헤더). §3.3 Step 2' 운영자 검증 매트릭스를 단순 7항목 → **9단계 표 (작업/명령/기대 출력/실패 분기)** 로 보강 + 롤백 절차 1 박스 추가. §6 우선순위 1번을 commit/push 완료로 갱신, Step 2' 를 단일 항목으로 통합. 다른 PC 가 본 문서 1개로 즉시 LightSail 작업 진입 가능하도록 명령·기대 출력 캡처. | Cursor Agent (Sonnet 4.6) |
 | 2026-06-07 | **Phase 4' Step 2' 운영자 검증 #1~7 완료** — git pull / .env 8키 추가 (이전 5키 삭제) / E2E 비파괴 PASS / 실 백업 `autostock-20260607-2039.db.gz` 128KB / 봇 재기동 3 jobs 등록 / 복원 시뮬레이션 `integrity=ok`. HANDOVER §0/§1/§3.3/§6 + 03 §13.9 체크리스트 갱신. #8 rsync + #9 1주 안정 대기. | Cursor Agent (Sonnet 4.6) |
+| 2026-06-07 | **Phase 4' Step 2' #8 rsync 완료** — `rsync -avz --delete stock_ls:/home/ubuntu/my_bot/data/backup_local ./autostock_backup` → `autostock_backup/daily/autostock-20260607-2039.db.gz` 131,650 bytes 동기 성공. §8 빠른 참조에 실측 명령(SSH alias `stock_ls`) + 단일 파일 scp 예시 추가. §3.3 매트릭스 #8 완료, 03 §13.9 [x] 처리. 남은 작업 #9 1주 안정만. | Cursor Agent (Sonnet 4.6) |
 
 > 다음 작업이 끝날 때마다 본 §9 에 한 줄 추가 + 영향 받은 섹션 갱신. 그래야 다음 PC 의 agent 가 이질감 없이 받음.
