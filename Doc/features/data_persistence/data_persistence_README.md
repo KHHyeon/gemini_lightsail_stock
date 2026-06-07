@@ -12,10 +12,12 @@
   - Step 1 (문서 사양 확정): **100%** (commit `e608ad8`).
   - Step 2 (`chronicle_repo` + 스키마 v2 + 호출부 전환): **100%** (commit `935203f` — 신설 3 파일 + 수정 4 파일 + 라운드트립 검증 PASS).
   - Step 3 (`scripts/migrate_chronicles_to_sqlite.py` + smoke + 검증): **100%** (이관 스크립트 8단계 + tests/smoke_chronicle_repo.py 7/7 PASS + **실 서버 이관 1회 성공** — 2026-06-05, 40 entries / 160 sections / 160 FTS rows, skipped 0건, 카운트 100% 일치, 소요 63.34s).
-- v1.3 (Phase 4, 본 단계): **SQLite → GitHub Private Repo 자동 백업 + 수동 복원**.
-  - Step 1 (문서 사양 확정): **100%** (commit `7db5f52` — `01/02/03_data_persistence_*.md` 의 Phase 4 섹션 신설).
-  - Step 2 (`backup_scheduler` + `scripts/backup_sqlite_to_github.py` + `scripts/restore_sqlite_from_github.py` 신설 + `main.py` 통합): **100%** (본 PR — 신설 4 파일 + main.py 1 블록 추가 + `tests/smoke_backup_to_github.py` 8단계 검증 신설, **로컬 smoke 15/15 PASS**, py_compile + ReadLints 0건).
-  - Step 3 (운영자 검증 — backup 브랜치 1회 초기화 + LightSail 1회 실 백업 + 1주 운영 안정 확인): **검증 도구 100% / 운영자 실행 0%**. 서버 종단(E2E) 자동 검증 스크립트 `scripts/verify_backup_e2e.py` 신설 (실 GitHub + 실 PAT 8단계, 라이브 DB 무손상, 03 §13.13). 운영자가 `.env` 13종 키 추가 후 1회 실행으로 실 백업+복원 시뮬레이션 묶음 검증 가능. 실 실행/1주 안정은 운영자 결정 대기.
+- v1.3 (Phase 4, 본 단계): **SQLite → LightSail 로컬 디렉터리 자동 백업 + 별도 SCP/rsync 채널 수동 동기화**.
+  - **정책 변경 (2026-06-07)**: 초기 v1.3 의 GitHub Private Repo 정책을 폐기하고, 봇은 LightSail 로컬 디렉터리(`BACKUP_LOCAL_DIR`, 기본 `data/backup_local/`)에만 `.db.gz` 를 누적·회전한다. 운영자 PC 와의 동기화는 **별도 SCP/rsync 채널**로 분리 (외부 호스팅/PAT 의존 0).
+  - Step 1 (문서 사양 확정 — GitHub 안): commit `7db5f52` (이력 보존, 본 v1.3 으로 정책 변경).
+  - Step 2 (GitHub 코드 구현): commit `5b79cf0` + `6c7f9c6` (이력 보존, 본 v1.3 으로 코드 교체).
+  - Step 1' (SCP 정책 사양 + 코드): **본 PR**. 신설 3 파일 (`scripts/backup_sqlite_local.py` / `scripts/restore_sqlite_from_local.py` / `tests/smoke_backup_local.py`) + 수정 3 파일 (`src/storage/backup_scheduler.py` / `scripts/verify_backup_e2e.py` / `.gitignore`) + 삭제 3 파일 (GitHub 코드/smoke 일체) + 사양 5종 갱신.
+  - Step 2' (운영자 검증 — `.env` 8종 키 추가 + LightSail 1회 실 백업 + rsync 동기화 1회 + 1주 운영 안정): **검증 도구 100% / 운영자 실행 대기**.
 - v1.4 (Phase 5, 예정): Drive/OAuth 인프라 제거 + 문서 정리. Phase 4 완료 + SQLite 4주 안정 운영 후 진행.
 
 ## 기능 요약
@@ -63,12 +65,13 @@
    - 호출부 전환: `chronicle_writer` / `backfill` / `context_retriever` (3 파일, 20 호출).
    - `lifecycle.py` (Drive 임시 파일 TTL 청소) 와 `migrate_master_index_v2.py` 는 Phase 3 비대상 (Phase 5 에서 통째 정리/제거).
    - 동일 환경변수 `STATE_STORE_BACKEND=sqlite` 로 A/B + C/D 모두 활성. Phase 2 와 같은 백엔드 분기 정책 계승.
-4. **Phase 4 (본 단계, Step 1 시작)**: SQLite → GitHub Private Repo (`backup` orphan 브랜치) 자동 백업 + 수동 복원.
-   - **트리거**: 봇 내부 `schedule` (별도 thread). cron / systemd timer 미사용.
-   - **주기**: 일간 18:00 KST (장 마감 후) + 주간 일요일 22:00 KST.
-   - **저장**: 본 repo 의 `backup` orphan 브랜치 (별도 작업 디렉터리 single-branch clone). main 영향 0.
+4. **Phase 4 (본 단계, 정책 SCP/Local 로 변경)**: SQLite → LightSail 로컬 디렉터리 자동 백업 + 별도 SCP/rsync 채널 수동 동기화.
+   - **트리거**: 봇 내부 `schedule` (별도 daemon thread). cron / systemd timer 미사용.
+   - **주기**: 일간 18:00 KST (장 마감 후) + 주간 일요일 22:00 KST + 월간 1일 00:30 KST 자동 승격.
+   - **저장**: LightSail 로컬 `BACKUP_LOCAL_DIR` (기본 `data/backup_local/`). 봇 본체 git 추적 대상 아님 (.gitignore 자동). 외부 호스팅/PAT 의존 0.
    - **형식**: `VACUUM INTO` + gzip (`.db.gz`). WAL 통합 일관성 보장 + 즉시 sqlite3 복원 가능.
-   - **보관**: 일간 30일 + 주간 12주 + 월간 12개월 계층형. 회전 알고리즘으로 repo 사이즈 안정화.
+   - **보관**: 일간 30일 + 주간 12주 + 월간 12개월 계층형. 회전 알고리즘 (`os.remove` 단순 회전) 으로 디스크 사이즈 안정화.
    - **슬랙 보고**: 성공/실패 모두 보고. 실패 시 B-Type Pause.
-   - **복원**: 수동만 (`scripts/restore_sqlite_from_github.py`). 자동 복원 미지원.
+   - **복원**: 수동만 (`scripts/restore_sqlite_from_local.py`). 자동 복원 미지원.
+   - **외부 동기화**: 운영자 PC 의 별도 채널 (rsync/scp). 본 봇 책임 외부. 사양 §02 §9.5 / §03 §13.7 의 부록 참조.
 5. **Phase 5 (예정)**: Drive/OAuth 인프라 통째로 제거 + 문서 정리. Phase 4 완료 + SQLite 4주 안정 운영 후 진행.

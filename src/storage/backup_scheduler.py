@@ -1,17 +1,21 @@
-"""SQLite -> GitHub backup orphan 브랜치 백업 스케줄러 진입점.
+"""SQLite -> LightSail 로컬 디렉터리 백업 스케줄러 진입점 (정책 SCP/Local).
 
 봇 부팅 시 ``main.py`` 가 본 모듈의 ``register_backup_jobs(...)`` 를 1회
 호출하여 ``schedule`` 라이브러리에 일간/주간/월간 백업 잡을 등록한다.
-실제 백업 작업은 ``scripts/backup_sqlite_to_github.run_backup_cycle`` 가
+실제 백업 작업은 ``scripts/backup_sqlite_local.run_backup_cycle`` 가
 수행하며, 본 모듈은 trigger 시각마다 daemon thread 를 띄워 비차단으로
-호출한다.
+호출한다. 운영자 PC 와의 동기화는 별도 SCP/rsync 채널 (본 모듈 책임 외부).
+
+정책 변경 이력 (2026-06-07): 초기 v1.3 의 GitHub Private Repo 정책에서
+LightSail 로컬 정책으로 전환됨. 외부 호스팅/PAT 의존 0.
+사양: Doc/features/data_persistence/01_data_persistence_requirements.md §1.4
 
 설계 지침 (Doc/features/data_persistence/03_data_persistence_state_logic.md
 §13.1 / §13.3 참조):
     - ``BACKUP_ENABLED`` 환경변수 미활성 (기본값 ``false``) 시 schedule 등록 0건 →
       Phase 1~3 회귀 0 보장 (P4R1).
-    - 필수 환경변수 (``BACKUP_REPO_URL``, ``BACKUP_GITHUB_TOKEN``) 누락 시
-      schedule 등록 차단 + 슬랙 ERROR 1회 보고.
+    - 외부 인증 키가 없으므로 필수 키 누락 분기 폐기 (정책 변경). 단, ``BACKUP_*_AT``
+      형식 오류 시 schedule 등록 차단 + 슬랙 ERROR 1회 보고.
     - 트리거 시각마다 daemon thread 에서 ``_safe_run_backup`` 실행 →
       schedule 메인 thread 차단 0.
     - 예외는 thread 안에서 슬랙 1회 보고 후 흡수 (B-Type Pause 안내).
@@ -20,18 +24,15 @@
 from __future__ import annotations
 
 import os
-import sys
 import threading
 import traceback
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 
 _VALID_WEEKDAY_SET = {
     "monday", "tuesday", "wednesday", "thursday",
     "friday", "saturday", "sunday",
 }
-
-_REQUIRED_ENV_KEY_LIST = ("BACKUP_REPO_URL", "BACKUP_GITHUB_TOKEN")
 
 
 def _is_truthy_env(value: Optional[str]) -> bool:
@@ -85,14 +86,14 @@ def _safe_run_backup(kind: str, notify_fn: Optional[Callable[[str], None]]) -> N
     다음 schedule tick 에 자동 재시도된다.
     """
     try:
-        from scripts.backup_sqlite_to_github import run_backup_cycle
+        from scripts.backup_sqlite_local import run_backup_cycle
 
         db_path = os.getenv("STATE_STORE_DB_PATH", "data/sqlite/autostock.db")
-        repo_dir = os.getenv("BACKUP_REPO_DIR", "data/backup_repo")
+        backup_dir = os.getenv("BACKUP_LOCAL_DIR", "data/backup_local")
         run_backup_cycle(
             kind=kind,
             db_path=db_path,
-            repo_dir=repo_dir,
+            backup_dir=backup_dir,
             notify_fn=notify_fn,
             dry_run=False,
         )
@@ -100,7 +101,7 @@ def _safe_run_backup(kind: str, notify_fn: Optional[Callable[[str], None]]) -> N
         message = (
             f"[Backup FAIL] kind={kind} | uncaught | err={type(exc).__name__}: {exc}\n"
             f"{traceback.format_exc(limit=20)}\n"
-            "운영자 조치: 로그 확인 후 .env / GitHub PAT / 디스크 여유 점검. "
+            "운영자 조치: 로그 확인 후 .env / 디스크 여유 점검. "
             "다음 schedule tick 에 자동 재시도됩니다."
         )
         if callable(notify_fn):
@@ -170,23 +171,6 @@ def register_backup_jobs(
     """
     if not _is_truthy_env(os.getenv("BACKUP_ENABLED")):
         print("[BACKUP] disabled (BACKUP_ENABLED=false)", flush=True)
-        return False
-
-    missing_key_list: List[str] = [
-        key for key in _REQUIRED_ENV_KEY_LIST if not os.getenv(key)
-    ]
-    if missing_key_list:
-        message = (
-            "[Backup FAIL] register_backup_jobs SKIP — 필수 환경변수 누락: "
-            + ", ".join(missing_key_list)
-            + ". 운영자 조치: .env 에 해당 키 추가 후 봇 재기동."
-        )
-        print(message, flush=True)
-        if callable(notify_fn):
-            try:
-                notify_fn(message)
-            except Exception:
-                pass
         return False
 
     daily_at = os.getenv("BACKUP_DAILY_AT", "18:00").strip()

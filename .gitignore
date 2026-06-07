@@ -14,7 +14,7 @@ lotto/
 *.txt
 .continue/
 data/sqlite/
-data/backup_repo/
+data/backup_local/
 data/.smoke_workspace/
 *.db
 *.db-journal

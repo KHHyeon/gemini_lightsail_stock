@@ -1,4 +1,4 @@
-"""GitHub backup 브랜치 -> SQLite 수동 복원 스크립트.
+"""LightSail 로컬 백업 디렉터리 -> SQLite 수동 복원 스크립트 (정책 SCP/Local).
 
 운영자가 SSH/CLI 로 명시적으로 실행하는 단방향 스크립트. 자동 복원은
 의도적으로 미지원 (P4F6). 봇이 라이브 DB 를 점유 중이면 안전 가드로
@@ -10,7 +10,7 @@
     0 - 정상 (또는 ``--list`` / ``--dry-run`` 정상).
     1 - 백업 파일 미발견.
     2 - 봇 실행 중이어서 차단 (``--force`` 없을 시).
-    3 - 다운로드 / 압축 풀이 / 원자적 교체 실패.
+    3 - 압축 풀이 / 원자적 교체 실패.
     4 - integrity_check 실패 (P4E5).
 """
 from __future__ import annotations
@@ -36,17 +36,16 @@ from _common import setup_script_path, load_env_file, print_flush  # noqa: E402
 setup_script_path()
 load_env_file(verbose=False)
 
-# DRY: backup 스크립트의 helper 재사용 (token 빌드 / git 실행 / KST 등).
-from backup_sqlite_to_github import (  # noqa: E402
+# DRY: backup 스크립트의 helper 재사용 (KST / listing / 슬랙).
+from backup_sqlite_local import (  # noqa: E402
+    _BACKUP_FILE_PREFIX,
+    _BACKUP_FILE_SUFFIX,
     _format_kst_stamp,
-    _git_fetch_reset,
     _kst_now,
     _list_kind_files,
     _parse_stamp_to_kst,
-    _redact_token,
     _resolve_slack_notifier,
     _send_slack,
-    _setup_repo_dir,
 )
 
 
@@ -97,7 +96,7 @@ def _format_size(num_bytes: int) -> str:
     return f"{num_bytes}TB"
 
 
-def _list_all_backups(repo_dir: str) -> Dict[str, List[Dict[str, Any]]]:
+def _list_all_backups(backup_dir: str) -> Dict[str, List[Dict[str, Any]]]:
     """daily/weekly/monthly 의 모든 백업 메타데이터 수집.
 
     Returns:
@@ -105,14 +104,14 @@ def _list_all_backups(repo_dir: str) -> Dict[str, List[Dict[str, Any]]]:
     """
     result: Dict[str, List[Dict[str, Any]]] = {kind: [] for kind in _VALID_KIND_LIST}
     for kind in _VALID_KIND_LIST:
-        for filename in _list_kind_files(repo_dir, kind):
-            abs_path = os.path.join(repo_dir, kind, filename)
+        for filename in _list_kind_files(backup_dir, kind):
+            abs_path = os.path.join(backup_dir, kind, filename)
             stamp_dt = _parse_stamp_to_kst(filename)
             stamp_raw = filename
-            if stamp_raw.startswith("autostock-"):
-                stamp_raw = stamp_raw[len("autostock-"):]
-            if stamp_raw.endswith(".db.gz"):
-                stamp_raw = stamp_raw[: -len(".db.gz")]
+            if stamp_raw.startswith(_BACKUP_FILE_PREFIX):
+                stamp_raw = stamp_raw[len(_BACKUP_FILE_PREFIX):]
+            if stamp_raw.endswith(_BACKUP_FILE_SUFFIX):
+                stamp_raw = stamp_raw[: -len(_BACKUP_FILE_SUFFIX)]
             result[kind].append({
                 "filename": filename,
                 "stamp": stamp_raw,
@@ -134,22 +133,22 @@ def _print_listing(meta_map: Dict[str, List[Dict[str, Any]]]) -> None:
 
 
 def _resolve_source_file(
-    repo_dir: str,
+    backup_dir: str,
     *,
     kind: str,
     stamp: Optional[str],
 ) -> Optional[str]:
-    """``--latest`` 또는 ``--stamp`` 분기로 source 파일명 결정 (Step 3).
+    """``--latest`` 또는 ``--stamp`` 분기로 source 파일명 결정.
 
     Returns:
         rel_path (예: ``daily/autostock-20260606-1800.db.gz``) 또는 None.
     """
-    files = _list_kind_files(repo_dir, kind)
+    files = _list_kind_files(backup_dir, kind)
     if not files:
         return None
     if stamp is None:
         return f"{kind}/{files[-1]}"
-    target_filename = f"autostock-{stamp}.db.gz"
+    target_filename = f"{_BACKUP_FILE_PREFIX}{stamp}{_BACKUP_FILE_SUFFIX}"
     if target_filename not in files:
         return None
     return f"{kind}/{target_filename}"
@@ -182,13 +181,13 @@ def run_restore(
     *,
     kind: Literal["daily", "weekly", "monthly"],
     target_path: str,
-    repo_dir: str,
+    backup_dir: str,
     stamp: Optional[str] = None,
     notify_fn: Optional[Callable[[str], None]] = None,
     dry_run: bool = False,
     force: bool = False,
 ) -> Dict[str, Any]:
-    """단일 복원 사이클 (8단계).
+    """단일 복원 사이클 (6단계).
 
     Returns:
         result dict (사양 §02 §9.4 참조).
@@ -196,13 +195,10 @@ def run_restore(
     if kind not in _VALID_KIND_LIST:
         raise ValueError(f"kind 는 {_VALID_KIND_LIST} 중 하나여야 합니다 (현재: {kind!r}).")
 
-    repo_url = os.getenv("BACKUP_REPO_URL", "")
-    token = os.getenv("BACKUP_GITHUB_TOKEN", "")
-    branch = os.getenv("BACKUP_BRANCH", "backup")
     started_at = time.monotonic()
     now_kst = _kst_now()
     target_path = os.path.abspath(target_path)
-    repo_dir = os.path.abspath(repo_dir)
+    backup_dir = os.path.abspath(backup_dir)
 
     result: Dict[str, Any] = {
         "kind": kind,
@@ -216,57 +212,35 @@ def run_restore(
     }
 
     print_flush(
-        f"[Step 1/8] kind={kind} stamp={stamp or '<latest>'} "
-        f"target={target_path} repo_dir={repo_dir}"
+        f"[Step 1/6] kind={kind} stamp={stamp or '<latest>'} "
+        f"target={target_path} backup_dir={backup_dir}"
     )
 
-    print_flush(f"[Step 1.5/8] backup repo_dir 부트스트랩 + git fetch/reset")
-    try:
-        _setup_repo_dir(
-            repo_dir,
-            repo_url=repo_url,
-            branch=branch,
-            token=token,
-            notify_fn=notify_fn,
-        )
-        _git_fetch_reset(repo_dir, branch=branch)
-    except subprocess.CalledProcessError as exc:
-        message = (
-            f"[Restore FAIL] step=fetch | "
-            f"err={_redact_token((exc.stderr or '').strip()[:200], token)}\n"
-            "운영자 조치: BACKUP_REPO_URL / BACKUP_GITHUB_TOKEN 점검."
-        )
-        print_flush(message)
-        _send_slack(message, notify_fn)
-        result["status"] = "fetch_failed"
-        result["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
-        sys.exit(3)
-
-    print_flush(f"[Step 3/8] source 파일 결정")
-    source_rel = _resolve_source_file(repo_dir, kind=kind, stamp=stamp)
+    print_flush("[Step 2/6] source 파일 결정")
+    source_rel = _resolve_source_file(backup_dir, kind=kind, stamp=stamp)
     if source_rel is None:
         message = (
             f"[Restore FAIL] step=resolve_source | err=백업 파일 미발견 "
-            f"(kind={kind}, stamp={stamp or '<latest>'})"
+            f"(kind={kind}, stamp={stamp or '<latest>'}, backup_dir={backup_dir})"
         )
         print_flush(message)
         _send_slack(message, notify_fn)
         result["status"] = "source_not_found"
         result["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
         sys.exit(1)
-    source_abs = os.path.join(repo_dir, source_rel)
+    source_abs = os.path.join(backup_dir, source_rel)
     result["gz_size"] = os.path.getsize(source_abs)
     resolved_filename = os.path.basename(source_rel)
     if stamp is None:
         stripped = resolved_filename
-        if stripped.startswith("autostock-"):
-            stripped = stripped[len("autostock-"):]
-        if stripped.endswith(".db.gz"):
-            stripped = stripped[: -len(".db.gz")]
+        if stripped.startswith(_BACKUP_FILE_PREFIX):
+            stripped = stripped[len(_BACKUP_FILE_PREFIX):]
+        if stripped.endswith(_BACKUP_FILE_SUFFIX):
+            stripped = stripped[: -len(_BACKUP_FILE_SUFFIX)]
         result["stamp"] = stripped
     print_flush(f"  source {source_rel} ({_format_size(result['gz_size'])})")
 
-    print_flush(f"[Step 4/8] 봇 실행 점검 (target={target_path})")
+    print_flush(f"[Step 3/6] 봇 실행 점검 (target={target_path})")
     if not force and _is_db_in_use(target_path):
         message = (
             "[Restore FAIL] step=preflight | err=봇이 실행 중일 가능성 (lsof / wal / shm 감지). "
@@ -278,8 +252,8 @@ def run_restore(
         result["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
         sys.exit(2)
 
-    print_flush(f"[Step 5/8] gunzip -> staging/restored.db")
-    staging_dir = os.path.join(repo_dir, "staging")
+    print_flush("[Step 4/6] gunzip -> staging/restored.db")
+    staging_dir = os.path.join(backup_dir, "staging")
     os.makedirs(staging_dir, exist_ok=True)
     staging_db = os.path.join(staging_dir, "restored.db")
     try:
@@ -297,7 +271,7 @@ def run_restore(
         sys.exit(3)
     print_flush(f"  staging .db {result['restored_db_size']} bytes")
 
-    print_flush(f"[Step 6/8] integrity_check")
+    print_flush("[Step 5/6] integrity_check")
     try:
         integrity = _integrity_check(staging_db)
     except Exception as exc:
@@ -348,7 +322,7 @@ def run_restore(
         _send_slack(message, notify_fn)
         return result
 
-    print_flush(f"[Step 7/8] atomic rename (target.bak-* + 신규 적용)")
+    print_flush("[Step 6/6] atomic rename (target.bak-* + 신규 적용)")
     bak_path = ""
     if os.path.exists(target_path):
         bak_stamp = _format_kst_stamp(now_kst)
@@ -396,7 +370,6 @@ def run_restore(
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     result["elapsed_ms"] = elapsed_ms
 
-    print_flush(f"[Step 8/8] 결과 보고")
     message = (
         f"[Restore OK] {kind} {result['stamp']} -> {target_path} | "
         f"size={result['restored_db_size']//1024}KB | integrity=ok | "
@@ -409,7 +382,7 @@ def run_restore(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="GitHub backup 브랜치 -> SQLite 수동 복원 스크립트",
+        description="LightSail 로컬 백업 디렉터리 -> SQLite 수동 복원 (정책 SCP/Local)",
     )
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument(
@@ -440,9 +413,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="복원 대상 DB 경로 (기본: STATE_STORE_DB_PATH).",
     )
     parser.add_argument(
-        "--repo-dir",
-        default=os.getenv("BACKUP_REPO_DIR", "data/backup_repo"),
-        help="백업 작업 디렉터리 (기본: BACKUP_REPO_DIR).",
+        "--backup-dir",
+        default=os.getenv("BACKUP_LOCAL_DIR", "data/backup_local"),
+        help="백업 소스 디렉터리 (기본: BACKUP_LOCAL_DIR).",
     )
     parser.add_argument(
         "--no-slack",
@@ -452,7 +425,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="다운로드 + 압축 풀이 + integrity_check 까지만. INSTALL 미실행.",
+        help="압축 풀이 + integrity_check 까지만. INSTALL 미실행.",
     )
     parser.add_argument(
         "--force",
@@ -467,28 +440,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     notify_fn = _resolve_slack_notifier(args.no_slack)
-    repo_url = os.getenv("BACKUP_REPO_URL", "")
-    token = os.getenv("BACKUP_GITHUB_TOKEN", "")
-    branch = os.getenv("BACKUP_BRANCH", "backup")
-    repo_dir = os.path.abspath(args.repo_dir)
+    backup_dir = os.path.abspath(args.backup_dir)
 
     if args.list_only:
-        try:
-            _setup_repo_dir(
-                repo_dir,
-                repo_url=repo_url,
-                branch=branch,
-                token=token,
-                notify_fn=notify_fn,
-            )
-            _git_fetch_reset(repo_dir, branch=branch)
-        except subprocess.CalledProcessError as exc:
-            print_flush(
-                f"[Restore FAIL] step=fetch_for_list | "
-                f"err={_redact_token((exc.stderr or '').strip()[:200], token)}"
-            )
-            return 3
-        meta_map = _list_all_backups(repo_dir)
+        meta_map = _list_all_backups(backup_dir)
         _print_listing(meta_map)
         return 0
 
@@ -504,7 +459,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             kind=kind,
             stamp=stamp,
             target_path=args.target_path,
-            repo_dir=repo_dir,
+            backup_dir=backup_dir,
             notify_fn=notify_fn,
             dry_run=args.dry_run,
             force=args.force,
