@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import time as _time
 
 import numpy as np
@@ -200,6 +201,71 @@ def calc_market_buy_qty(budget_int, market_price):
     if budget <= 0 or price <= 0:
         return 0
     return budget // price
+
+
+def scalp_top_k():
+    """Top-K 후보 랭킹 크기(.env `SCALP_TOP_K`, 기본 3)."""
+    try:
+        return max(1, int(os.getenv("SCALP_TOP_K", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+def scalp_similarity_soft_margin():
+    """유사도 완화 폭(.env `SCALP_SIMILARITY_SOFT_MARGIN`, 기본 0.02)."""
+    try:
+        return max(0.0, float(os.getenv("SCALP_SIMILARITY_SOFT_MARGIN", "0.02")))
+    except (TypeError, ValueError):
+        return 0.02
+
+
+def estimate_realized_volatility_ratio(ohlcv_3min_list, *, lookback=20):
+    """최근 3분봉 종가 수익률 표준편차(비율) 추정."""
+    if not ohlcv_3min_list:
+        return 0.0
+    close_list = [float(it.get("close", 0) or 0) for it in ohlcv_3min_list]
+    close_list = close_list[-max(3, int(lookback)):]
+    if len(close_list) < 3:
+        return 0.0
+    ret_list = []
+    for prev, curr in zip(close_list[:-1], close_list[1:]):
+        if prev <= 0 or curr <= 0:
+            continue
+        ret_list.append((curr - prev) / prev)
+    if len(ret_list) < 2:
+        return 0.0
+    return float(np.std(np.asarray(ret_list, dtype=float)))
+
+
+def calc_vol_targeted_buy_qty(
+    budget_int,
+    market_price,
+    *,
+    realized_vol_ratio,
+    target_vol_ratio=0.012,
+    min_scale=0.35,
+    max_scale=1.0,
+):
+    """변동성 타깃 기반 시장가 수량 산출.
+
+    realized_vol_ratio 가 target 보다 높을수록 포지션 크기를 줄인다.
+    """
+    base_qty = calc_market_buy_qty(budget_int, market_price)
+    if base_qty <= 0:
+        return 0, 0.0
+    try:
+        rv = float(realized_vol_ratio)
+    except (TypeError, ValueError):
+        rv = 0.0
+    if rv <= 1e-9:
+        scale = max_scale
+    else:
+        scale = target_vol_ratio / rv
+        scale = max(min_scale, min(max_scale, scale))
+    qty = int(base_qty * scale)
+    if qty <= 0 and base_qty > 0:
+        qty = 1
+    return qty, float(scale)
 
 
 def detect_pullback_signal(ohlcv_3min_list, ma20):

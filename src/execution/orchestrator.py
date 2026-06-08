@@ -600,7 +600,7 @@ class MarketOrchestrator:
             )
             return {"state": "HALT_B_TYPE", "failures": failures}
 
-        from src.memory import scalp_trainer
+        from src.memory import scalp_trainer, scalp_meta_dataset
         from src.utils import slack_interface as si
         for ticker, info in scalp_positions:
             pos = si.get_scalp_position() or {}
@@ -611,6 +611,12 @@ class MarketOrchestrator:
             scalp_trainer.record_trade_result(
                 ticker, pnl_ratio > 0, shape_vector,
                 extra={"exit_reason": "force_1510", "similarity": pos.get("similarity")},
+            )
+            scalp_meta_dataset.finalize_signal_label(
+                pos.get("signal_id"),
+                is_win=(pnl_ratio > 0),
+                pnl_ratio=pnl_ratio,
+                exit_reason="force_1510",
             )
         si.clear_scalp_position()
         si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_LIQUIDATED)
@@ -630,7 +636,7 @@ class MarketOrchestrator:
             return False
 
     def scalp_scan_cycle(self, *, candidate_provider=None, chart_provider=None):
-        """S0->S3: 후보 스캔 후 조건 충족 시 예산 100% 시장가 매수.
+        """S0->S3: 후보 스캔 후 조건 충족 시 단일 종목 시장가 매수.
 
         Args:
             candidate_provider: 테스트용 후보 list[dict] 주입.
@@ -668,6 +674,10 @@ class MarketOrchestrator:
             return {"state": "S0", "reason": "no_candidates"}
 
         max_scan = 10
+        soft_margin = scalp_logic.scalp_similarity_soft_margin()
+        top_k = scalp_logic.scalp_top_k()
+        ranked_signals = []
+
         for cand in candidate_list[:max_scan]:
             ticker = cand.get("ticker")
             if not ticker:
@@ -703,65 +713,122 @@ class MarketOrchestrator:
             )
             si.set_scalp_lifecycle(eval_result.get("state", si.SCALP_LIFECYCLE_SCANNING))
 
-            if not eval_result.get("enter"):
+            similarity = float(eval_result.get("similarity") or 0.0)
+            threshold = float(eval_result.get("threshold") or 0.0)
+            margin = similarity - threshold
+            is_pullback_passed = eval_result.get("state") in ("S2", "S3")
+            is_eligible = is_pullback_passed and (eval_result.get("enter") or margin >= -soft_margin)
+            if not is_eligible:
                 continue
 
-            qty = scalp_logic.calc_market_buy_qty(budget, market_price)
-            if qty <= 0:
-                return {"state": "S3", "reason": "qty_zero", "ticker": ticker}
+            last_bar = (ohlcv_3min or [{}])[-1]
+            tr_amount = float(last_bar.get("tr_amount", 0) or 0)
+            ma_gap = 0.0
+            if ma20 and float(ma20) > 0:
+                ma_gap = (float(market_price) - float(ma20)) / float(ma20)
+            realized_vol = scalp_logic.estimate_realized_volatility_ratio(ohlcv_3min)
 
-            order_mgr = OrderManager(
-                self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"],
-                token, self.config["ACC_NO"],
-            )
-            res = order_mgr.submit(OrderRequest(
-                ticker=ticker, name=name, quantity=qty,
-                current_price=market_price,
-                side="buy",
-                reason=(
-                    f"Scalp 진입 sim={eval_result.get('similarity', 0):.3f} "
-                    f"thr={eval_result.get('threshold', 0):.2f}"
-                ),
-                mode_type="SCALP", strategy_tag="SCALP",
-            ))
-            if not res.get("success"):
-                self.send_slack(f"[Scalp] 매수 실패 {name}({ticker}): {res.get('msg')}")
-                continue
-
-            si.set_scalp_position({
+            ranked_signals.append({
                 "ticker": ticker,
                 "name": name,
-                "qty": qty,
-                "remaining_qty": qty,
-                "avg_price": market_price,
-                "highest_price": market_price,
-                "half_sold": False,
-                "shape_vector": eval_result.get("shape_vector") or [],
-                "similarity": eval_result.get("similarity"),
-                "threshold": eval_result.get("threshold"),
+                "market_price": int(market_price),
+                "eval": eval_result,
+                "similarity": similarity,
+                "threshold": threshold,
+                "margin": margin,
+                "has_good_news": has_good_news,
+                "tr_amount": tr_amount,
+                "ma_gap": ma_gap,
+                "realized_vol": realized_vol,
             })
-            si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_EXECUTED)
-            self.send_slack(
-                f"[Scalp 매수] {name}({ticker}) {qty}주 @ {market_price:,}원 "
-                f"(예산 {budget:,}원 100%)\n"
-                f"- 유사도 {eval_result.get('similarity', 0):.3f} / "
-                f"임계치 {eval_result.get('threshold', 0):.2f}"
-            )
-            return {
-                "state": "S3",
-                "ticker": ticker,
-                "qty": qty,
-                "price": market_price,
-                "similarity": eval_result.get("similarity"),
-            }
 
-        si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_SCANNING)
-        return {"state": "S0", "reason": "no_entry_signal"}
+        if not ranked_signals:
+            si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_SCANNING)
+            return {"state": "S0", "reason": "no_entry_signal"}
+
+        ranked_signals.sort(key=lambda x: (x["margin"], x["similarity"]), reverse=True)
+        shortlist = ranked_signals[:top_k]
+        selected = shortlist[0]
+
+        qty, vol_scale = scalp_logic.calc_vol_targeted_buy_qty(
+            budget,
+            selected["market_price"],
+            realized_vol_ratio=selected["realized_vol"],
+        )
+        if qty <= 0:
+            return {"state": "S3", "reason": "qty_zero", "ticker": selected["ticker"]}
+
+        order_mgr = OrderManager(
+            self.config["URL"], self.config["APP_KEY"], self.config["SECRET_KEY"],
+            token, self.config["ACC_NO"],
+        )
+        res = order_mgr.submit(OrderRequest(
+            ticker=selected["ticker"], name=selected["name"], quantity=qty,
+            current_price=selected["market_price"],
+            side="buy",
+            reason=(
+                f"Scalp TopK sim={selected['similarity']:.3f} "
+                f"thr={selected['threshold']:.2f} margin={selected['margin']:+.3f} "
+                f"vol_scale={vol_scale:.2f}"
+            ),
+            mode_type="SCALP", strategy_tag="SCALP",
+        ))
+        if not res.get("success"):
+            self.send_slack(
+                f"[Scalp] TopK 매수 실패 {selected['name']}({selected['ticker']}): {res.get('msg')}"
+            )
+            return {"state": "S0", "reason": "buy_failed", "ticker": selected["ticker"]}
+
+        from src.memory import scalp_meta_dataset
+        signal_id = scalp_meta_dataset.record_entry_signal(
+            selected["ticker"],
+            {
+                "similarity": selected["similarity"],
+                "threshold": selected["threshold"],
+                "margin": selected["margin"],
+                "vix_score": float(vix_score or 0.0),
+                "has_good_news": bool(selected["has_good_news"]),
+                "tr_amount": selected["tr_amount"],
+                "ma_gap": selected["ma_gap"],
+                "realized_vol": selected["realized_vol"],
+                "vol_scale": vol_scale,
+                "top_k": top_k,
+            },
+        )
+
+        si.set_scalp_position({
+            "ticker": selected["ticker"],
+            "name": selected["name"],
+            "qty": qty,
+            "remaining_qty": qty,
+            "avg_price": selected["market_price"],
+            "highest_price": selected["market_price"],
+            "half_sold": False,
+            "shape_vector": selected["eval"].get("shape_vector") or [],
+            "similarity": selected["similarity"],
+            "threshold": selected["threshold"],
+            "signal_id": signal_id,
+        })
+        si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_EXECUTED)
+        self.send_slack(
+            f"[Scalp 매수] {selected['name']}({selected['ticker']}) {qty}주 @ {selected['market_price']:,}원\n"
+            f"- TopK: {len(shortlist)}/{top_k}, sim {selected['similarity']:.3f}, thr {selected['threshold']:.2f}, margin {selected['margin']:+.3f}\n"
+            f"- 변동성 타깃 scale {vol_scale:.2f} (예산 {budget:,}원 기준)"
+        )
+        return {
+            "state": "S3",
+            "ticker": selected["ticker"],
+            "qty": qty,
+            "price": selected["market_price"],
+            "similarity": selected["similarity"],
+            "margin": selected["margin"],
+            "vol_scale": vol_scale,
+        }
 
     def scalp_risk_monitor_cycle(self, *, price_provider=None, sell_fn=None):
         """S4: 보유 포지션 3중 방어막 틱 감시."""
         from src.strategy import scalp_logic
-        from src.memory import scalp_trainer
+        from src.memory import scalp_trainer, scalp_meta_dataset
         from src.utils import slack_interface as si
 
         if not si.is_scalp_user_running():
@@ -842,6 +909,12 @@ class MarketOrchestrator:
         scalp_trainer.record_trade_result(
             ticker, pnl_ratio > 0, pos.get("shape_vector") or [],
             extra={"exit_signal": signal, "similarity": pos.get("similarity")},
+        )
+        scalp_meta_dataset.finalize_signal_label(
+            pos.get("signal_id"),
+            is_win=(pnl_ratio > 0),
+            pnl_ratio=pnl_ratio,
+            exit_reason=signal,
         )
         si.clear_scalp_position()
         si.set_scalp_lifecycle(si.SCALP_LIFECYCLE_LIQUIDATED)
