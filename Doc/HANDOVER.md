@@ -1,6 +1,6 @@
 # HANDOVER — 작업 인계 문서
 
-> **최신 갱신**: 2026-06-07 (**Phase 4' Step 2' 운영자 검증 #1~8 완료** — 실 백업/봇 재기동/복원 시뮬레이션/rsync 동기 PASS. #9 1주 안정 대기).
+> **최신 갱신**: 2026-06-11 (**운영 이슈 핫픽스: 10:00 자금흐름 입력 원인 분석 + market chronicles 최근 5일 트리거 값 정정 완료** — `chronicle_entries/chronicle_reports` 동기 반영).
 > **목적**: 다른 PC / 새 세션의 Cursor Agent 가 본 문서 1개만 먼저 읽으면 즉시 이질감 없이 작업을 이어받을 수 있도록 한다.
 
 ---
@@ -9,8 +9,8 @@
 
 1. `git clone` 또는 `git pull` 후 브랜치 확인.
    - 운영 브랜치: **`my_bot`**.
-   - 최근 push 기준 (2026-06-07): `2da4b4b refactor(data_persistence): Phase 4 백업 정책 GitHub → SCP/Local 전환 + smoke 16/16 PASS`. 이전 GitHub 정책 코드 (`5b79cf0`/`6c7f9c6`) 는 commit history 에만 보존.
-   - **현재 push 상태 = origin/my_bot 동기**. 다음 작업 = §3.3 Step 2' #8 운영자 PC rsync 1회 + #9 1주 운영 안정.
+   - 최근 push 기준 (2026-06-08): `86fac5d chore(gitignore): autostock_backup/ 로컬 rsync 백업 디렉터리 추가`. Phase 4 SCP/Local 본체는 `2da4b4b` (smoke 16/16 PASS). 이전 GitHub 정책 코드 (`5b79cf0`/`6c7f9c6`) 는 commit history 에만 보존.
+   - **현재 push 상태 = origin/my_bot 동기 (`86fac5d`)**. 로컬 PC `git pull` 완료 확인 (2026-06-08). 다음 작업 = §3.3 Step 2' **#9 1주 운영 안정** (일간 슬랙 `[Backup OK]` 모니터링).
 2. `.env` 파일 확보 (보안 사유로 git 제외). 운영자가 별도 전달.
    - 필수 키: `APP_KEY / SECRET_KEY / ACCOUNT_NO / HTS_ID / SLACK_TOKEN / SLACK_CHANNEL / GOOGLE_API_KEY / GOOGLE_DRIVE_OAUTH_CLIENT_FILE / DART_API_KEY / TRADING_MODE_NORMAL / SCALP_CONDITION_NAME / TG_API_ID / TG_API_HASH`.
    - **Phase 2/3 신규 키**: `STATE_STORE_BACKEND` (값: `drive` 또는 `sqlite`, 기본 `drive`). 운영 서버는 `sqlite` 활성화 상태.
@@ -33,7 +33,7 @@
 
 ## 1. 한 줄 요약 (현재 상태)
 
-**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. Phase 4' SCP/Local 백업 정책 전환 완료 + Step 2' 운영자 검증 #1~8 완료 (실 백업 / 봇 재기동 / 복원 / rsync 동기 모두 OK). 남은 작업 = #9 1주 운영 안정 모니터링.**
+**Drive → SQLite 마이그레이션 3 단계(Phase 1~3) 모두 완료. Phase 4' SCP/Local 백업 정책 전환 완료 + Step 2' 운영자 검증 #1~8 완료 (실 백업 / 봇 재기동 / 복원 / rsync 동기 모두 OK). #9 1주 운영 안정 모니터링 Day 1 진행 중 (2026-06-08~).**
 
 상위 작업 컨테이너 (체크포인트):
 
@@ -45,12 +45,30 @@
 | M6 안정성 모니터링 | 진행 중 (Day 1~3 PASS) | commit `3591d75`/`74934a3`/`a73625b`/`3bcb6d1` |
 | Phase 4 — 백업 정책 (GitHub 안) | **폐기** (commit `2da4b4b` 으로 SCP/Local 전환) | commit `7db5f52` (Step 1 사양) + `5b79cf0` (Step 2 코드) + `6c7f9c6` (Step 3 E2E) — 이력 보존 |
 | Phase 4' — 백업 정책 SCP/Local | **완료, push** | commit `2da4b4b` — 신설 3 + 수정 3 + 삭제 3 + 사양 5종 갱신 + smoke 16/16 PASS |
-| Phase 4' Step 2' — 운영자 검증 | **진행 중 (#1~8 완료, #9 대기)** | #1~7 완료 + #8 rsync `stock_ls` → `./autostock_backup` 131KB 동기 완료 (2026-06-07) — #9 1주 안정 모니터링 대기 |
+| Phase 4' Step 2' — 운영자 검증 | **진행 중 (#1~8 완료, #9 Day 1/7)** | #8 rsync `stock_ls` → `./autostock_backup` 131KB 동기 (2026-06-07) + `86fac5d` gitignore `autostock_backup/` — #9 슬랙 일간 백업 모니터링 (목표: 7일간 + 주간 1회) |
 | Phase 5 — Drive 코드 통째 정리 | 미착수 (Phase 4' Step 2' + 4주 안정 후) | — |
 
 ---
 
 ## 2. 완료된 작업 (시간 역순, 핵심만)
+
+### 2.0ab 2026-06-11 운영 이슈 핫픽스 — 10:00 자금흐름 입력 점검 + Chronicles 값 정정 (서버 직접 조치)
+- **사용자 보고 이슈**:
+  1. 10:00 슬랙 심층 시황에서 "자금 흐름" 데이터가 기대 대비 누락.
+  2. `market chronicles` 작성 데이터와 실제 당일 지수 데이터 불일치.
+- **원인 분석 결과**:
+  - 10:00 루틴(`orchestrator.deep_market_routine`)은 KIS 수급 API를 직접 조회하지 않고, `collector.get_macro_indicators()` + 뉴스만으로 프롬프트를 구성한다. 즉, "자금 흐름"은 정량 원천 데이터가 아닌 AI 서술 중심 구조.
+  - KOSPI/KOSDAQ 등락률은 yfinance 기반 `collector._daily_change_pct` 값이 입력되며, 최근 영업일 구간에서 장중/지연 값이 섞여 `chronicle trigger`와 실제 종가 기준 등락률 간 괴리가 발생.
+- **웹 대조 기준 (Naver 일별시세)**: `https://finance.naver.com/sise/sise_index_day.naver?code=KOSPI&page=1`
+  - 2026-06-11 `-0.69%`, 2026-06-10 `-4.52%`, 2026-06-09 `+8.18%`, 2026-06-08 `-8.29%`, 2026-06-04 `-1.84%`.
+- **실행 조치 (서버 SQLite 직접 정정)**:
+  - 대상 DB: `~/my_bot/data/sqlite/autostock.db`
+  - 대상 테이블/필드:
+    - `chronicle_entries.trigger_reason`
+    - `chronicle_reports.header_md` 내 `트리거:` 라인
+    - `chronicle_reports.full_md` 내 `트리거:` 라인
+  - 최근 5일(2026-06-11/10/09/08/04) 모두 before/after 검증 완료.
+- **영향 범위**: 기존 보고서 본문 서술은 보존, 트리거 수치 메타데이터만 웹 기준 값으로 정정.
 
 ### 2.0aa Phase 4 백업 정책 SCP/Local 전환 (2026-06-07, commit `2da4b4b`, push 완료)
 - **변경 사유 (사용자 결정)**: GitHub Private Repo 정책의 외부 호스팅/PAT 의존을 회피하고, 봇은 LightSail 로컬 디렉터리에 .db.gz 만 누적·회전. 운영자 PC 와의 동기화는 별도 SCP/rsync 채널로 분리 (본 봇 책임 외부).
@@ -164,7 +182,7 @@
 
 ### 3.3 Phase 4 — 백업 정책 SCP/Local (commit `2da4b4b` push 완료, Step 2' 운영자 검증 대기)
 - **정책 변경 이력**: 초기 GitHub Private Repo 정책 (commit `7db5f52` 사양 + `5b79cf0` 코드 + `6c7f9c6` E2E) → commit `2da4b4b` 에서 LightSail 로컬 디렉터리 + 별도 SCP/rsync 채널로 전환. 사유는 §2.0aa 참조.
-- **현재 상태 (2026-06-07)**: Step 2' #1~7 완료. `origin/my_bot = c2d40c1`. LightSail 서버 `2da4b4b` 동기, `.env` 8키 적용, 실 백업 1건(`autostock-20260607-2039.db.gz`), 봇 재기동 3 jobs 등록, 복원 integrity=ok 확인. **#8 rsync + #9 1주 안정 대기 중**.
+- **현재 상태 (2026-06-08)**: Step 2' #1~8 완료. `origin/my_bot = 86fac5d`. LightSail 서버 Phase 4 코드 동기 + `.env` 8키 적용, 수동 실 백업 1건(`autostock-20260607-2039.db.gz`), 봇 재기동 3 jobs 등록, 복원 integrity=ok, rsync 동기 OK. 로컬 PC repo `86fac5d` pull 완료, `.env` BACKUP 8키 + `STATE_STORE_BACKEND=sqlite` 반영. **#9 1주 안정 Day 1** — 첫 자동 일간 백업 2026-06-08 18:00 KST 슬랙 `[Backup OK]` 확인부터 카운트.
 
 #### Step 2' 운영자 검증 매트릭스 (LightSail 실 환경)
 
@@ -178,7 +196,7 @@
 | 6 | **완료** | 봇 재기동 (스케줄 등록) | `s-restart` (또는 `sudo systemctl restart autostock`) | `[BACKUP] backup jobs registered: daily=18:00, weekly=sunday 22:00, monthly=day01 00:30` 매칭 확인. | 로그 미매칭 → `BACKUP_ENABLED` 값/`schedule` 라이브러리 점검. |
 | 7 | **완료** | 복원 시뮬레이션 (라이브 DB 무영향) | `python scripts/restore_sqlite_from_local.py --latest --kind daily --target-path /tmp/test.db --no-slack` | `[Restore OK] daily 20260607-2039 -> /tmp/test.db \| size=600KB \| integrity=ok` 확인. | `db_in_use=true` → 반드시 `/tmp/...` 사용. |
 | 8 | **완료** | 운영자 PC rsync 1회 | `rsync -avz --delete stock_ls:/home/ubuntu/my_bot/data/backup_local ./autostock_backup` | `autostock_backup/daily/autostock-20260607-2039.db.gz` 동기 확인 (131,650 bytes). SSH alias `stock_ls` 사용. (2026-06-07) | — |
-| 9 | **대기** | 1주 운영 안정 | 별도 작업 없음, 매일 슬랙 모니터링 | 일간 `[Backup OK]` 7회 + 주간 1회 (일요일 22:00) 수신 + `data/backup_local/daily/` 8개 .gz | `[Backup FAIL]` 수신 시 즉시 보고 + B-Type Pause. |
+| 9 | **진행 중 (Day 1/7)** | 1주 운영 안정 | 별도 작업 없음, 매일 슬랙 모니터링 | 일간 `[Backup OK]` 7회 + 주간 1회 (일요일 22:00) 수신 + `data/backup_local/daily/` 8개 .gz. **기준**: 2026-06-08 18:00 KST 첫 자동 일간부터 카운트 (수동 백업 20260607-2039 는 제외). | `[Backup FAIL]` 수신 시 즉시 보고 + B-Type Pause. |
 
 - **(권장) 서버 E2E 1-shot 검증 스크립트**: `scripts/verify_backup_e2e.py` (commit `2da4b4b` 재작성, SCP/Local 7단계). 위 #5 + #7 단계(실 백업 + 복원 시뮬레이션)를 단일 명령으로 자동 묶음 검증. 라이브 DB 무손상(복원 대상=임시 경로) + 백업 디렉터리도 임시 격리. 실행: `python scripts/verify_backup_e2e.py` (전체) 또는 `--skip-real-backup --no-slack` (비파괴 사전 점검). 상세는 03 §13.13 참조.
 - **회귀 안전망 (Phase 1~3 무영향 보장)**: 기본값 `BACKUP_ENABLED=false` 로 운영자 명시 활성화 전까지 schedule 등록 0건. smoke [1] 단계로 이미 검증됨.
@@ -328,12 +346,11 @@ Doc/
 
 순서대로:
 
-1. **(대기)** Phase 4' Step 2' #9 1주 운영 안정 — 매일 슬랙 `[Backup OK]` 모니터링. 일간 7회 + 주간 1회 (일요일 22:00) 수신 후 Step 2' 전체 완료 마킹.
-2. **(선택)** 운영자 PC rsync 자동화 — macOS `launchd` plist 또는 cron 으로 등록. 빠른 참조 명령은 §8 참조.
-3. **(병행 가능)** Phase 3 운영 활성 여부 확인 (서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태 + Chronicle write 1회 SQLite row 증가).
-2. **(병행 가능)** Phase 3 운영 활성 여부 확인 (서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태 + Chronicle write 1회 SQLite row 증가).
-3. **(Phase 4' Step 2' 완료 + 4주 안정)** Phase 5 Drive 코드 통째 정리. 큰 회귀 위험이므로 사전 사양 작성 + 컨펌 필수.
-4. **(여유 시)** FTS5 한국어 토크나이저 / 임베딩 활성 검토 (Phase 3.5).
+1. **(진행 중, Day 1/7)** Phase 4' Step 2' #9 1주 운영 안정 — 매일 슬랙 `[Backup OK]` 모니터링. 2026-06-08 18:00 KST 첫 자동 일간부터 카운트. 일간 7회 + 주간 1회 (일요일 22:00) 수신 후 Step 2' 전체 완료 마킹 (예상 완료: 2026-06-15 전후).
+2. **(선택)** 운영자 PC rsync 자동화 — macOS `launchd` plist 또는 cron 으로 등록. 빠른 참조 명령은 §8 참조. (1회 수동 rsync 는 #8 완료.)
+3. **(병행 가능)** Phase 3 운영 활성 여부 확인 (서버 `.env` `STATE_STORE_BACKEND=sqlite` 상태 + Chronicle write 1회 SQLite row 증가). 로컬 PC `.env` 에는 `STATE_STORE_BACKEND=sqlite` + BACKUP 8키 반영됨 (2026-06-08).
+4. **(Phase 4' Step 2' 완료 + 4주 안정)** Phase 5 Drive 코드 통째 정리. 큰 회귀 위험이므로 사전 사양 작성 + 컨펌 필수.
+5. **(여유 시)** FTS5 한국어 토크나이저 / 임베딩 활성 검토 (Phase 3.5).
 
 M6 안정성 모니터링 (`scripts/m6_stability_check.py`) 은 별도 agent 영역으로 본 핸드오버 agent 는 직접 수정 금지 (§7.1 참조).
 
@@ -403,5 +420,8 @@ python scripts/migrate_master_index_v2.py --dry-run
 | 2026-06-07 | HANDOVER 후속 갱신 — push 완료 사실 반영 (§0/§1/§2.0aa/§3.3 헤더). §3.3 Step 2' 운영자 검증 매트릭스를 단순 7항목 → **9단계 표 (작업/명령/기대 출력/실패 분기)** 로 보강 + 롤백 절차 1 박스 추가. §6 우선순위 1번을 commit/push 완료로 갱신, Step 2' 를 단일 항목으로 통합. 다른 PC 가 본 문서 1개로 즉시 LightSail 작업 진입 가능하도록 명령·기대 출력 캡처. | Cursor Agent (Sonnet 4.6) |
 | 2026-06-07 | **Phase 4' Step 2' 운영자 검증 #1~7 완료** — git pull / .env 8키 추가 (이전 5키 삭제) / E2E 비파괴 PASS / 실 백업 `autostock-20260607-2039.db.gz` 128KB / 봇 재기동 3 jobs 등록 / 복원 시뮬레이션 `integrity=ok`. HANDOVER §0/§1/§3.3/§6 + 03 §13.9 체크리스트 갱신. #8 rsync + #9 1주 안정 대기. | Cursor Agent (Sonnet 4.6) |
 | 2026-06-07 | **Phase 4' Step 2' #8 rsync 완료** — `rsync -avz --delete stock_ls:/home/ubuntu/my_bot/data/backup_local ./autostock_backup` → `autostock_backup/daily/autostock-20260607-2039.db.gz` 131,650 bytes 동기 성공. §8 빠른 참조에 실측 명령(SSH alias `stock_ls`) + 단일 파일 scp 예시 추가. §3.3 매트릭스 #8 완료, 03 §13.9 [x] 처리. 남은 작업 #9 1주 안정만. | Cursor Agent (Sonnet 4.6) |
+| 2026-06-07 | `86fac5d` — `.gitignore` 에 `autostock_backup/` 추가 (로컬 rsync 미러 디렉터리 git 추적 차단). | KyungHoon + Cursor Agent |
+| 2026-06-08 | **Phase 4' Step 2' #9 Day 1 시작** — origin/local PC `86fac5d` 동기 확인. 로컬 PC `.env` BACKUP 8키 + `STATE_STORE_BACKEND=sqlite` 반영. §0/§1/§3.3/§6 갱신. #9 카운트 기준 = 2026-06-08 18:00 KST 첫 자동 일간 백업. 예상 Step 2' 완료 = 2026-06-15 전후 (7일간 + 일요일 주간 1회). §6 중복 항목 정리. | Cursor Agent |
+| 2026-06-11 | 운영 이슈 핫픽스 — 10:00 자금흐름 누락 체감 원인 분석(정량 수급 원천 미연동 + yfinance 최근값 괴리) 및 `autostock.db` 내 market chronicles 최근 5일 트리거 수치를 Naver 일별시세 기준으로 정정( `chronicle_entries.trigger_reason`, `chronicle_reports.{header_md,full_md}` 동기 수정). | Cursor Agent |
 
 > 다음 작업이 끝날 때마다 본 §9 에 한 줄 추가 + 영향 받은 섹션 갱신. 그래야 다음 PC 의 agent 가 이질감 없이 받음.
